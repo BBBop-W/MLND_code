@@ -1,0 +1,24 @@
+
+==================================================
+OPTIMIZATION RESULT SUMMARY
+==================================================
+Objective Value (Served Demand): 570.2200
+Service Level (rho)          : 0.0718
+Total Fleet Size (gamma)     : 500.0000
+Runtime                      : 388.41s
+Gap                          : 0.01%
+
+Open Stations:
+  Bases (L)       : 10 / 16
+  Pickups (P)     : 40 / 65
+  Deliveries (D)  : 40 / 65
+  Swapping (E)    : 0 / 32
+
+Active Assignments (w_li > 0.01):
+  Base V_D24 assigned to Pickup P65 with weight 0.0104
+  Base V_D40 assigned to Pickup P50 with weight 0.0100
+  Base V_D45 assigned to Pickup P9 with weight 0.0503
+  Base V_D57 assigned to Pickup P62 with weight 0.0125
+  Base V_D59 assigned to Pickup P30 with weight 0.0718
+==================================================
+

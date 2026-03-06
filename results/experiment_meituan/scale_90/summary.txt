@@ -1,0 +1,19 @@
+
+==================================================
+OPTIMIZATION RESULT SUMMARY
+==================================================
+Objective Value: None
+Service Level (rho)          : 0.0000
+Total Fleet Size (gamma)     : 0.0000
+Runtime                      : 916.80s
+Gap                          : inf%
+
+Open Stations:
+  Bases (L)       : 0 / 22
+  Pickups (P)     : 0 / 90
+  Deliveries (D)  : 0 / 90
+  Swapping (E)    : 0 / 45
+
+Active Assignments (w_li > 0.01):
+==================================================
+
