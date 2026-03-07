@@ -34,15 +34,23 @@ def debug_sim():
     print(f"Chaining Strategy      : {'Enabled' if sim_chaining else 'Disabled'}")
     
     # Initialize and run
-    sim = DroneSimulator(facilities_df, events_df, use_chaining=sim_chaining)
+    # For GIF generation, let's limit the number of events to make it faster
+    sim = DroneSimulator(facilities_df, events_df.iloc[:500], use_chaining=sim_chaining)
     
     # You can tweak the number of drones here to test fleet sufficiency
-    drones_per_base = 15 
+    drones_per_base = 5 
     sim.initialize(drones_per_base=drones_per_base)
     
     print(f"Initial Drones         : {len(sim.drones)} ({drones_per_base} per physical base)")
     
     sim.run()
+    
+    # --- VISUALIZATION ---
+    from src.utils.sim_visualizer import SimVisualizer
+    viz = SimVisualizer(facilities_df, sim.drones)
+    gif_path = os.path.join(meituan_results_dir, "simulation_playback.gif")
+    viz.generate_gif(gif_path)
+    
     print(f"--- DEBUG SIMULATION END ---")
 
 if __name__ == "__main__":

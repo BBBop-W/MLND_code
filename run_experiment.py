@@ -27,7 +27,7 @@ def run_experiment():
     loader = DataLoader()
 
     # Loop from scale 20 to 100 with increment of 5
-    for scale in range(20, 105, 5):
+    for scale in range(10, 105, 5):
         num_p = scale
         num_d = scale
         num_e = scale // 2
@@ -58,8 +58,9 @@ def run_experiment():
         model = MLNDModel(instance)
         model.build()
         
-        # Enforce exactly 900 seconds time limit as requested
-        model.model.setParam('TimeLimit', 900)
+        # Enforce exactly 3600 seconds time limit as requested
+        model.model.setParam('TimeLimit', 3600)
+        model.model.setParam('MIPGap', 0.05)  # Optional: Set a gap tolerance for faster results on larger instances
         
         success = model.solve()
         
