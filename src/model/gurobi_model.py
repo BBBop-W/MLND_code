@@ -1,7 +1,7 @@
 import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
-from ..data.instance import Instance
+from ..data_processor.instance import Instance
 from .. import config
 
 class MLNDModel:

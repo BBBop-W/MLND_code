@@ -1,7 +1,7 @@
 """Quick Benders test on scale_20."""
 import sys
 sys.path.insert(0, '.')
-from src.data.loader import DataLoader
+from src.data_processor.loader import DataLoader
 from src.model.benders_model import BendersDecomposition
 
 inst = DataLoader().load_instance(

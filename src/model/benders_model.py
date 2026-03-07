@@ -28,7 +28,7 @@ import time
 import gurobipy as gp
 from gurobipy import GRB
 
-from ..data.instance import Instance
+from ..data_processor.instance import Instance
 from .. import config
 
 

@@ -5,8 +5,8 @@ import csv
 # Add the project root to sys.path to allow imports from src
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from src.data.generator import DataGenerator
-from src.data.loader import DataLoader
+from src.data_processor.generator import DataGenerator
+from src.data_processor.loader import DataLoader
 from src.model.gurobi_model import MLNDModel
 from src.utils.output_processor import ResultProcessor
 
