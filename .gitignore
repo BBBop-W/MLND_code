@@ -7,3 +7,6 @@ data/
 *.pkl
 .DS_Store
 Meituan-TSL/
+.idea/
+*.lp
+results/
