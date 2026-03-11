@@ -9,6 +9,7 @@ This module now distinguishes between:
   and master cuts are generated from subproblem duals.
 """
 
+import math
 import time
 
 import gurobipy as gp
@@ -598,22 +599,124 @@ class BendersDecomposition:
         )
 
     def _build_optimality_expr(self, x_hat, u_hat, subproblem):
-        obj_hat = subproblem["obj"]
-        grad_x = subproblem["grad_x"]
-        grad_u = subproblem["grad_u"]
+        """Benders optimality cut: theta <= Z* + sum_i pi_i (b_i(x,u) - b_i(x_hat,u_hat))."""
+        Z_star = subproblem["obj"]
+        duals = subproblem["dual_terms"]
+        data = self.data
 
-        constant = obj_hat
-        constant -= sum(grad_x[node] * x_hat[node] for node in grad_x)
-        constant -= sum(grad_u[key] * u_hat[key] for key in grad_u)
+        expr = gp.LinExpr(Z_star)
 
-        expr = gp.LinExpr(constant)
-        for node, coeff in grad_x.items():
-            if abs(coeff) > 1e-9:
-                expr += coeff * self._master_x[node]
-        for (l_node, s_idx), coeff in grad_u.items():
-            if abs(coeff) > 1e-9:
-                expr += coeff * self._master_u[l_node, s_idx]
+        # alpha1: sum_l y_li <= x_hat_i
+        for i_node, dv in duals["alpha1"].items():
+            expr += dv * (self._master_x[i_node] - x_hat[i_node])
+
+        # alpha2: y_li <= x_hat_l
+        for (l_node, i_node), dv in duals["alpha2"].items():
+            expr += dv * (self._master_x[l_node] - x_hat[l_node])
+
+        # alpha4: w_lij <= x_hat_j
+        for (l_node, i_node, j_node), dv in duals["alpha4"].items():
+            expr += dv * (self._master_x[j_node] - x_hat[j_node])
+
+        # alpha5: y_li - w_lij <= 1 - x_hat_j  (RHS sensitivity flips sign)
+        for (l_node, i_node, j_node), dv in duals["alpha5"].items():
+            expr -= dv * (self._master_x[j_node] - x_hat[j_node])
+
+        # epsilon3: z_lis <= H_i * eta_hat_ls
+        for (l_node, i_node, s_idx), dv in duals["epsilon3"].items():
+            H_i = data.H.get(i_node, 0.0)
+            expr += dv * H_i * (self._master_u[l_node, s_idx] - u_hat[(l_node, s_idx)])
+
+        # epsilon4: D_li - z_lis <= H_i*(1 - eta_hat_ls)  (RHS sensitivity flips sign)
+        for (l_node, i_node, s_idx), dv in duals["epsilon4"].items():
+            H_i = data.H.get(i_node, 0.0)
+            expr -= dv * H_i * (self._master_u[l_node, s_idx] - u_hat[(l_node, s_idx)])
+
+        # pi1: -MAX_WAIT_LV * sum psi <= -Q_hat  (RHS = -Q)
+        for lv_node, dv in duals["pi1"].items():
+            Q_master = gp.quicksum(
+                data.service_wait.get(s_idx, 0.0) * self._master_u[lv_node, s_idx]
+                for s_idx in data.S
+            )
+            Q_hat = sum(
+                data.service_wait.get(s_idx, 0.0) * u_hat[(lv_node, s_idx)]
+                for s_idx in data.S
+            )
+            expr -= dv * (Q_master - Q_hat)
+
+        # pi2: sum psi <= limit * x_hat_u
+        for nd, dv in duals["pi2"].items():
+            qos_limit = config.MAX_WAITING_FACTOR_P if nd in data.P else config.MAX_WAITING_FACTOR_D
+            expr += dv * qos_limit * (self._master_x[nd] - x_hat[nd])
+
+        # pi3: sum phi^k <= U_k * x_hat_k
+        for k_node, dv in duals["pi3"].items():
+            expr += dv * config.MAX_FLOW_E * (self._master_x[k_node] - x_hat[k_node])
+
+        # sigma1: transit - cap*replen <= -Q_hat  (RHS = -Q)
+        for lv_node, dv in duals["sigma1"].items():
+            Q_master = gp.quicksum(
+                data.service_wait.get(s_idx, 0.0) * self._master_u[lv_node, s_idx]
+                for s_idx in data.S
+            )
+            Q_hat = sum(
+                data.service_wait.get(s_idx, 0.0) * u_hat[(lv_node, s_idx)]
+                for s_idx in data.S
+            )
+            expr -= dv * (Q_master - Q_hat)
+
+        # kappa1: fleet - gamma <= -sum Q_hat  (RHS = -sum Q)
+        kappa1_val = duals["kappa1"]
+        total_Q_master = gp.quicksum(
+            data.service_wait.get(s_idx, 0.0) * self._master_u[l_node, s_idx]
+            for l_node in data.L
+            for s_idx in data.S
+        )
+        total_Q_hat = sum(
+            data.service_wait.get(s_idx, 0.0) * u_hat[(l_node, s_idx)]
+            for l_node in data.L
+            for s_idx in data.S
+        )
+        expr -= kappa1_val * (total_Q_master - total_Q_hat)
+
+        # kappa2: c*gamma <= C - sum f*x_hat  (RHS = C - sum f*x)
+        kappa2_val = duals["kappa2"]
+        for n_node in data.N:
+            expr -= kappa2_val * self.inst.f[n_node] * (self._master_x[n_node] - x_hat[n_node])
+
+        # kappa3: gamma <= V * sum x_hat_l  (RHS = V * sum x_l)
+        kappa3_val = duals["kappa3"]
+        for l_node in data.L_hat:
+            expr += kappa3_val * config.MAX_FLEET_PER_BASE * (self._master_x[l_node] - x_hat[l_node])
+
         return expr
+
+    def _compute_queue_loads(self, u_hat):
+        return {
+            l_node: sum(
+                self.data.service_wait.get(s_idx, 0.0) * u_hat[(l_node, s_idx)]
+                for s_idx in self.data.S
+            )
+            for l_node in self.data.L
+        }
+
+    def _compute_base_pickup_coeffs(self, x_hat, u_hat):
+        rho_hat = {
+            l_node: sum(self.data.rho[s_idx] * u_hat[(l_node, s_idx)] for s_idx in self.data.S)
+            for l_node in self.data.L
+        }
+        pickup_open_demand = {
+            i_node: sum(
+                self.inst.h.get((i_node, j_node), 0.0) * x_hat[j_node]
+                for j_node in self.data.D
+                if (i_node, j_node) in self.data.A_PD_set
+            )
+            for i_node in self.data.P
+        }
+        return {
+            (l_node, i_node): rho_hat[l_node] * pickup_open_demand[i_node]
+            for l_node, i_node in self.data.A_LP
+        }
 
     def _build_incumbent_expr(self, x_hat, u_hat, sub_obj):
         mismatch_terms = []
@@ -646,64 +749,95 @@ class BendersDecomposition:
     def _build_subproblem(self, x_hat, u_hat):
         data = self.data
         inst = self.inst
+        q_hat = self._compute_queue_loads(u_hat)
 
         sp = gp.Model("MLND_Benders_Subproblem")
         sp.setParam("OutputFlag", 0)
         sp.setParam("QCPDual", 1)
-        sp.setParam("Method", 2)
-        sp.setParam("Crossover", 0)
-        sp.setParam("Presolve", 0)
+        sp.setParam("DualReductions", 0)
 
+
+        # --- Variables ---
         y = sp.addVars(data.A_LP, lb=0.0, ub=1.0, name="y")
-        w_keys = [(l_node, i_node, j_node) for l_node, i_node in data.A_LP for j_node in data.D if (i_node, j_node) in data.A_PD_set]
+        w_keys = [
+            (l_node, i_node, j_node)
+            for l_node, i_node in data.A_LP
+            for j_node in data.D
+            if (i_node, j_node) in data.A_PD_set
+        ]
         w = sp.addVars(w_keys, lb=0.0, name="w")
         D_var = sp.addVars(data.A_LP, lb=0.0, name="D")
-        z_keys = [(l_node, i_node, s_idx) for l_node, i_node in data.A_LP for s_idx in data.S]
+        z_keys = [
+            (l_node, i_node, s_idx)
+            for l_node, i_node in data.A_LP
+            for s_idx in data.S
+        ]
         z = sp.addVars(z_keys, lb=0.0, name="z")
         psi = sp.addVars(data.A, lb=0.0, name="psi")
         phi = sp.addVars(data.phi_keys, lb=0.0, name="phi")
-        xi = sp.addVars(data.P + data.D, lb=0.0, name="xi")
+        xi = sp.addVars(data.P + data.D, lb=0.0, ub=10000.0, name="xi")
         lam = sp.addVars(
             data.P + data.D,
             lb=0.0,
             ub={nd: inst.mu[nd] - 1e-3 for nd in data.P + data.D},
             name="lam",
         )
-        queue_soc_rhs = sp.addVars(data.P + data.D, lb=0.0, name="queue_soc_rhs")
-        queue_soc_lhs = sp.addVars(data.P + data.D, lb=-GRB.INFINITY, name="queue_soc_lhs")
-        gamma = sp.addVar(lb=0.0, name="gamma")
+        gamma = sp.addVar(lb=0.0, ub=100000.0, name="gamma")
 
-        sp.setObjective(gp.quicksum(psi[i_node, j_node] for i_node, j_node in data.A_PD), GRB.MAXIMIZE)
+        # Relaxation slacks to guarantee feasibility
+        slack_pi1 = sp.addVars(data.L_v, lb=0.0, name="slack_pi1")
+        slack_sigma1 = sp.addVars(data.L_v, lb=0.0, name="slack_sigma1")
+        slack_kappa1 = sp.addVar(lb=0.0, name="slack_kappa1")
+        slack_kappa2 = sp.addVar(lb=0.0, name="slack_kappa2")
+        slack_kappa3 = sp.addVar(lb=0.0, name="slack_kappa3")
 
-        cut_data = {"x": {}, "u": {}}
+        PENALTY = 1e5
+        sp.setObjective(
+            gp.quicksum(psi[i_node, j_node] for i_node, j_node in data.A_PD)
+            - PENALTY * (
+                gp.quicksum(slack_pi1[lv] for lv in data.L_v)
+                + gp.quicksum(slack_sigma1[lv] for lv in data.L_v)
+                + slack_kappa1 + slack_kappa2 + slack_kappa3
+            ),
+            GRB.MAXIMIZE,
+        )
 
+        # --- Constraint alpha1: sum_l y_li <= x_hat_i ---
         for i_node in data.P:
             ls = [l_node for l_node in data.L if (l_node, i_node) in data.A_LP_set]
             if ls:
-                constr = sp.addConstr(
+                sp.addConstr(
                     gp.quicksum(y[l_node, i_node] for l_node in ls) <= x_hat[i_node],
-                    name=f"assign_pickup_{i_node}",
+                    name=f"alpha1_{i_node}",
                 )
-                cut_data["x"].setdefault(i_node, []).append((constr, 1.0))
 
+        # --- Constraint alpha2: y_li <= x_hat_l ---
         for l_node, i_node in data.A_LP:
-            constr = sp.addConstr(y[l_node, i_node] <= x_hat[l_node], name=f"assign_base_{l_node}_{i_node}")
-            cut_data["x"].setdefault(l_node, []).append((constr, 1.0))
+            sp.addConstr(y[l_node, i_node] <= x_hat[l_node], name=f"alpha2_{l_node}_{i_node}")
 
+        # --- Constraint alpha3: w_lij <= y_li ---
+        for l_node, i_node, j_node in w_keys:
+            sp.addConstr(
+                w[l_node, i_node, j_node] <= y[l_node, i_node],
+                name=f"alpha3_{l_node}_{i_node}_{j_node}",
+            )
+
+        # --- Constraint alpha4: w_lij <= x_hat_j ---
+        for l_node, i_node, j_node in w_keys:
+            sp.addConstr(
+                w[l_node, i_node, j_node] <= x_hat[j_node],
+                name=f"alpha4_{l_node}_{i_node}_{j_node}",
+            )
+
+        # --- Constraint alpha5: y_li - w_lij <= 1 - x_hat_j ---
+        for l_node, i_node, j_node in w_keys:
+            sp.addConstr(
+                y[l_node, i_node] - w[l_node, i_node, j_node] <= 1 - x_hat[j_node],
+                name=f"alpha5_{l_node}_{i_node}_{j_node}",
+            )
+
+        # --- Constraint alpha6: D_li = sum_j h_ij * w_lij ---
         for l_node, i_node in data.A_LP:
-            H_i = data.H.get(i_node, 0.0)
-            for j_node in data.D:
-                if (i_node, j_node) not in data.A_PD_set:
-                    continue
-                constr = sp.addConstr(w[l_node, i_node, j_node] <= x_hat[j_node], name=f"w_cap_open_{l_node}_{i_node}_{j_node}")
-                cut_data["x"].setdefault(j_node, []).append((constr, 1.0))
-                sp.addConstr(w[l_node, i_node, j_node] <= y[l_node, i_node], name=f"w_cap_y_{l_node}_{i_node}_{j_node}")
-                constr = sp.addConstr(
-                    -w[l_node, i_node, j_node] + y[l_node, i_node] <= 1 - x_hat[j_node],
-                    name=f"w_link_{l_node}_{i_node}_{j_node}",
-                )
-                cut_data["x"].setdefault(j_node, []).append((constr, -1.0))
-
             sp.addConstr(
                 D_var[l_node, i_node]
                 == gp.quicksum(
@@ -711,88 +845,100 @@ class BendersDecomposition:
                     for j_node in data.D
                     if (i_node, j_node) in data.A_PD_set
                 ),
-                name=f"demand_agg_{l_node}_{i_node}",
+                name=f"alpha6_{l_node}_{i_node}",
             )
 
-            for s_idx in data.S:
-                sp.addConstr(z[l_node, i_node, s_idx] <= D_var[l_node, i_node], name=f"z_cap_D_{l_node}_{i_node}_{s_idx}")
-                constr = sp.addConstr(
-                    z[l_node, i_node, s_idx] <= H_i * u_hat[(l_node, s_idx)],
-                    name=f"z_cap_u_{l_node}_{i_node}_{s_idx}",
-                )
-                cut_data["u"].setdefault((l_node, s_idx), []).append((constr, H_i))
-                constr = sp.addConstr(
-                    -z[l_node, i_node, s_idx] + D_var[l_node, i_node] <= H_i * (1 - u_hat[(l_node, s_idx)]),
-                    name=f"z_link_{l_node}_{i_node}_{s_idx}",
-                )
-                cut_data["u"].setdefault((l_node, s_idx), []).append((constr, H_i))
-
+        # --- Constraint epsilon2: z_lis <= D_li ---
+        for l_node, i_node, s_idx in z_keys:
             sp.addConstr(
-                psi[l_node, i_node] == gp.quicksum(data.rho[s_idx] * z[l_node, i_node, s_idx] for s_idx in data.S),
-                name=f"base_pickup_flow_{l_node}_{i_node}",
+                z[l_node, i_node, s_idx] <= D_var[l_node, i_node],
+                name=f"epsilon2_{l_node}_{i_node}_{s_idx}",
             )
 
+        # --- Constraint epsilon3: z_lis <= H_i * eta_hat_ls ---
+        for l_node, i_node, s_idx in z_keys:
+            H_i = data.H.get(i_node, 0.0)
+            sp.addConstr(
+                z[l_node, i_node, s_idx] <= H_i * u_hat[(l_node, s_idx)],
+                name=f"epsilon3_{l_node}_{i_node}_{s_idx}",
+            )
+
+        # --- Constraint epsilon4: D_li - z_lis <= H_i*(1 - eta_hat_ls) ---
+        for l_node, i_node, s_idx in z_keys:
+            H_i = data.H.get(i_node, 0.0)
+            sp.addConstr(
+                D_var[l_node, i_node] - z[l_node, i_node, s_idx]
+                <= H_i * (1 - u_hat[(l_node, s_idx)]),
+                name=f"epsilon4_{l_node}_{i_node}_{s_idx}",
+            )
+
+        # --- Constraint epsilon5: psi_li = sum_s rho_s * z_lis ---
+        for l_node, i_node in data.A_LP:
+            sp.addConstr(
+                psi[l_node, i_node]
+                == gp.quicksum(
+                    data.rho[s_idx] * z[l_node, i_node, s_idx] for s_idx in data.S
+                ),
+                name=f"epsilon5_{l_node}_{i_node}",
+            )
+
+        # --- Constraint beta1: flow conservation ---
         for v_node in data.N + data.L_v:
             sp.addConstr(
                 gp.quicksum(psi[arc] for arc in data.in_arcs.get(v_node, []))
                 == gp.quicksum(psi[arc] for arc in data.out_arcs.get(v_node, [])),
-                name=f"flow_cons_{v_node}",
+                name=f"beta1_{v_node}",
             )
 
+        # --- Constraint beta2: demand bound ---
         for i_node, j_node in data.A_PD:
-            sp.addConstr(psi[i_node, j_node] <= inst.h[i_node, j_node], name=f"demand_bound_{i_node}_{j_node}")
+            sp.addConstr(psi[i_node, j_node] <= inst.h[i_node, j_node], name=f"beta2_{i_node}_{j_node}")
 
+        # --- Constraint beta3: flow decomposition ---
         for u_node, v_node in data.A:
             sp.addConstr(
                 psi[u_node, v_node]
                 == gp.quicksum(phi[u_node, v_node, k_node] for k_node in data.phi_for_arc.get((u_node, v_node), [])),
-                name=f"flow_decomp_{u_node}_{v_node}",
+                name=f"beta3_{u_node}_{v_node}",
             )
 
+        # --- Constraint pi2: QoS ---
         for nd in data.P + data.D:
             qos_limit = config.MAX_WAITING_FACTOR_P if nd in data.P else config.MAX_WAITING_FACTOR_D
-            constr = sp.addConstr(
+            sp.addConstr(
                 gp.quicksum(psi[arc] for arc in data.out_arcs.get(nd, [])) <= qos_limit * x_hat[nd],
-                name=f"qos_{nd}",
+                name=f"pi2_{nd}",
             )
-            cut_data["x"].setdefault(nd, []).append((constr, qos_limit))
 
+        # --- Constraint pi3: swap station capacity ---
         for k_node in data.E:
-            constr = sp.addConstr(
+            sp.addConstr(
                 gp.quicksum(phi[key] for key in data.phi_through_swap.get(k_node, [])) <= config.MAX_FLOW_E * x_hat[k_node],
-                name=f"swap_open_{k_node}",
+                name=f"pi3_{k_node}",
             )
-            cut_data["x"].setdefault(k_node, []).append((constr, config.MAX_FLOW_E))
 
+        # --- Constraint pi1: virtual base wait ---
         if config.USE_VIRTUAL_BASES_OPT:
             for lv_node in data.L_v:
-                rhs = -sum(data.service_wait.get(s_idx, 0.0) * u_hat[(lv_node, s_idx)] for s_idx in data.S)
-                constr = sp.addConstr(
+                sp.addConstr(
                     -config.MAX_WAITING_FACTOR_LV * gp.quicksum(
                         psi[u_node, i_node] for u_node, i_node in data.A_LP if u_node == lv_node
-                    ) <= rhs,
-                    name=f"virtual_wait_{lv_node}",
+                    ) - slack_pi1[lv_node] <= -q_hat[lv_node],
+                    name=f"pi1_{lv_node}",
                 )
-                for s_idx in data.service_wait:
-                    cut_data["u"].setdefault((lv_node, s_idx), []).append((constr, -data.service_wait[s_idx]))
 
+        # --- Constraint delta: SOC queueing (Linear Outer Approximation) ---
         for nd in data.P + data.D:
             sp.addConstr(lam[nd] == gp.quicksum(psi[arc] for arc in data.out_arcs.get(nd, [])), name=f"lambda_def_{nd}")
-            sp.addConstr(
-                queue_soc_rhs[nd] == xi[nd] - lam[nd] + inst.mu[nd] + 1,
-                name=f"queue_soc_rhs_def_{nd}",
-            )
-            sp.addConstr(
-                queue_soc_lhs[nd] == xi[nd] + lam[nd] - inst.mu[nd] + 1,
-                name=f"queue_soc_lhs_def_{nd}",
-            )
-            sp.addQConstr(
-                4 * inst.mu[nd] + queue_soc_lhs[nd] * queue_soc_lhs[nd]
-                <= queue_soc_rhs[nd] * queue_soc_rhs[nd],
-                name=f"queue_soc_{nd}",
-            )
-            sp.addConstr(queue_soc_rhs[nd] >= 0, name=f"queue_soc_pos_{nd}")
+            
+            for frac in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+                lam0 = inst.mu[nd] * frac
+                den = inst.mu[nd] - lam0
+                f0 = lam0 / den
+                fp = inst.mu[nd] / (den * den)
+                sp.addConstr(xi[nd] >= (f0 - fp * lam0) + fp * lam[nd], name=f"queue_oa_{nd}_{frac}")
 
+        # --- Constraint sigma1: energy virtual base ---
         if config.USE_VIRTUAL_BASES_OPT:
             for lv_node in data.L_v:
                 transit = gp.LinExpr()
@@ -808,19 +954,12 @@ class BendersDecomposition:
                             transit += phi[u_node, i_node, k_node] * travel_time
                             replen += phi[u_node, i_node, k_node]
 
-                rhs = -config.ENERGY_RATE_OMEGA * sum(
-                    data.service_wait.get(s_idx, 0.0) * u_hat[(lv_node, s_idx)]
-                    for s_idx in data.S
+                sp.addConstr(
+                    transit - (data.cap_eff / config.ENERGY_RATE_OMEGA) * replen - slack_sigma1[lv_node] <= -q_hat[lv_node],
+                    name=f"sigma1_{lv_node}",
                 )
-                constr = sp.addConstr(
-                    config.ENERGY_RATE_OMEGA * transit - data.cap_eff * replen <= rhs,
-                    name=f"energy_lv_{lv_node}",
-                )
-                for s_idx in data.service_wait:
-                    cut_data["u"].setdefault((lv_node, s_idx), []).append(
-                        (constr, -config.ENERGY_RATE_OMEGA * data.service_wait[s_idx])
-                    )
 
+        # --- Constraint sigma2: energy pickup ---
         for i_node in data.P:
             transit = gp.LinExpr()
             replen = gp.LinExpr()
@@ -835,28 +974,11 @@ class BendersDecomposition:
                         transit += phi[u_node, v_node, k_node] * travel_time
                         replen += phi[u_node, v_node, k_node]
             sp.addConstr(
-                config.ENERGY_RATE_OMEGA * (xi[i_node] + transit) <= data.cap_eff * replen,
-                name=f"energy_p_{i_node}",
+                xi[i_node] + transit - (data.cap_eff / config.ENERGY_RATE_OMEGA) * replen <= 0,
+                name=f"sigma2_{i_node}",
             )
 
-        # for j_node in data.D:
-        #     transit = gp.LinExpr()
-        #     replen = gp.LinExpr()
-        #     for u_node, v_node in data.out_arcs.get(j_node, []):
-        #         if (u_node, v_node, "0") in data.phi_keys_set:
-        #             transit += phi[u_node, v_node, "0"] * inst.get_time(u_node, v_node)
-        #             if v_node in data.L_hat_set:
-        #                 replen += phi[u_node, v_node, "0"]
-        #         for k_node in data.E_uv.get((u_node, v_node), []):
-        #             if (u_node, v_node, k_node) in data.phi_keys_set:
-        #                 travel_time = inst.get_time(u_node, k_node) + inst.get_time(k_node, v_node)
-        #                 transit += phi[u_node, v_node, k_node] * travel_time
-        #                 replen += phi[u_node, v_node, k_node]
-        #     sp.addConstr(
-        #         config.ENERGY_RATE_OMEGA * (xi[j_node] + transit) <= data.cap_eff * replen,
-        #         name=f"energy_d_{j_node}",
-        #     )
-
+        # --- Constraint kappa1: fleet sizing ---
         fleet_expr = gp.quicksum(xi[nd] for nd in data.P + data.D)
         for u_node, v_node in data.A:
             if (u_node, v_node, "0") in data.phi_keys_set:
@@ -866,33 +988,29 @@ class BendersDecomposition:
                     travel_time = inst.get_time(u_node, k_node) + inst.get_time(k_node, v_node)
                     fleet_expr += phi[u_node, v_node, k_node] * travel_time
 
-        fleet_rhs = -sum(
-            data.service_wait.get(s_idx, 0.0) * u_hat[(l_node, s_idx)]
-            for l_node in data.L
-            for s_idx in data.S
-        )
-        constr = sp.addConstr(fleet_expr - gamma <= fleet_rhs, name="fleet_calc")
-        for l_node in data.L:
-            for s_idx in data.service_wait:
-                cut_data["u"].setdefault((l_node, s_idx), []).append((constr, -data.service_wait[s_idx]))
+        total_q_hat = sum(q_hat.values())
+        sp.addConstr(fleet_expr - gamma - slack_kappa1 <= -total_q_hat, name="kappa1")
 
+        # --- Constraint kappa2: budget ---
         budget_rhs = config.BUDGET - sum(inst.f[n_node] * x_hat[n_node] for n_node in data.N)
-        constr = sp.addConstr(config.COST_DRONE * gamma <= budget_rhs, name="budget")
-        for n_node in data.N:
-            cut_data["x"].setdefault(n_node, []).append((constr, -inst.f[n_node]))
+        sp.addConstr(config.COST_DRONE * gamma - slack_kappa2 <= budget_rhs, name="kappa2")
 
-        constr = sp.addConstr(
-            gamma <= config.MAX_FLEET_PER_BASE * sum(x_hat[l_node] for l_node in data.L_hat),
-            name="gamma_limit",
+        # --- Constraint kappa3: fleet limit ---
+        sp.addConstr(
+            gamma - slack_kappa3 <= config.MAX_FLEET_PER_BASE * sum(x_hat[l_node] for l_node in data.L_hat),
+            name="kappa3",
         )
-        for l_node in data.L_hat:
-            cut_data["x"].setdefault(l_node, []).append((constr, config.MAX_FLEET_PER_BASE))
 
         sp.update()
-        return sp, {"psi": psi, "gamma": gamma}, cut_data
+        return sp, {
+            "psi": psi,
+            "gamma": gamma,
+            "w_keys": w_keys,
+            "z_keys": z_keys,
+        }
 
     def _solve_subproblem(self, x_hat, u_hat):
-        sp, vars_map, cut_data = self._build_subproblem(x_hat, u_hat)
+        sp, vars_map = self._build_subproblem(x_hat, u_hat)
         sp.optimize()
 
         result = {
@@ -900,36 +1018,158 @@ class BendersDecomposition:
             "model": sp,
             "psi": vars_map["psi"],
             "gamma": vars_map["gamma"],
-            "cut_data": cut_data,
         }
+
+        if sp.Status == GRB.INFEASIBLE and len(self.history) == 2:
+            sp.computeIIS()
+            sp.write("infeasible_2.ilp")
 
         if sp.Status == GRB.OPTIMAL:
             result["obj"] = sp.ObjVal
-            gradients_x = {node: 0.0 for node in self.data.N + self.data.L_v}
-            gradients_u = {(l_node, s_idx): 0.0 for l_node in self.data.L for s_idx in self.data.S}
+            if len(self.history) == 1:
+                sp.write("subproblem_fail.mps")
+
+            open("debug_missing_duals.txt", "a").write(f"\nIsMIP: {sp.IsMIP}, Status: {sp.Status}\n")
             duals_available = True
+            dual_terms = {
+                "alpha1": {},
+                "alpha2": {},
+                "alpha4": {},
+                "alpha5": {},
+                "epsilon3": {},
+                "epsilon4": {},
+                "pi1": {},
+                "pi2": {},
+                "pi3": {},
+                "sigma1": {},
+                "kappa1": 0.0,
+                "kappa2": 0.0,
+                "kappa3": 0.0,
+            }
 
-            for node, entries in cut_data["x"].items():
-                node_grad = 0.0
-                for constr, coeff in entries:
+            for i_node in self.data.P:
+                constr = sp.getConstrByName(f"alpha1_{i_node}")
+                if constr is not None:
                     dual_val = self._get_linear_dual(constr)
                     if dual_val is None:
                         duals_available = False
-                        break
-                    node_grad += dual_val * coeff
-                gradients_x[node] = node_grad
-            for key, entries in cut_data["u"].items():
-                key_grad = 0.0
-                for constr, coeff in entries:
+                    else:
+                        dual_terms["alpha1"][i_node] = dual_val
+
+            for l_node, i_node in self.data.A_LP:
+                constr = sp.getConstrByName(f"alpha2_{l_node}_{i_node}")
+                if constr is not None:
                     dual_val = self._get_linear_dual(constr)
                     if dual_val is None:
                         duals_available = False
-                        break
-                    key_grad += dual_val * coeff
-                gradients_u[key] = key_grad
+                    else:
+                        dual_terms["alpha2"][(l_node, i_node)] = dual_val
 
-            result["grad_x"] = gradients_x
-            result["grad_u"] = gradients_u
+            for l_node, i_node, j_node in vars_map["w_keys"]:
+                constr = sp.getConstrByName(f"alpha4_{l_node}_{i_node}_{j_node}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms["alpha4"][(l_node, i_node, j_node)] = dual_val
+
+            for l_node, i_node, j_node in vars_map["w_keys"]:
+                constr = sp.getConstrByName(f"alpha5_{l_node}_{i_node}_{j_node}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms["alpha5"][(l_node, i_node, j_node)] = dual_val
+
+            for l_node, i_node, s_idx in vars_map["z_keys"]:
+                constr = sp.getConstrByName(f"epsilon3_{l_node}_{i_node}_{s_idx}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms["epsilon3"][(l_node, i_node, s_idx)] = dual_val
+
+            for l_node, i_node, s_idx in vars_map["z_keys"]:
+                constr = sp.getConstrByName(f"epsilon4_{l_node}_{i_node}_{s_idx}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms["epsilon4"][(l_node, i_node, s_idx)] = dual_val
+
+            for lv_node in self.data.L_v:
+                constr = sp.getConstrByName(f"pi1_{lv_node}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        print(f"Missing dual for pi1_{lv_node}")
+                        duals_available = False
+                    else:
+                        dual_terms["pi1"][lv_node] = dual_val
+
+            for nd in self.data.P + self.data.D:
+                constr = sp.getConstrByName(f"pi2_{nd}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms["pi2"][nd] = dual_val
+
+            for k_node in self.data.E:
+                constr = sp.getConstrByName(f"pi3_{k_node}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms["pi3"][k_node] = dual_val
+
+            for lv_node in self.data.L_v:
+                constr = sp.getConstrByName(f"sigma1_{lv_node}")
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms["sigma1"][lv_node] = dual_val
+
+            for key in ("kappa1", "kappa2", "kappa3"):
+                constr = sp.getConstrByName(key)
+                if constr is not None:
+                    dual_val = self._get_linear_dual(constr)
+                    if dual_val is None:
+                        duals_available = False
+                    else:
+                        dual_terms[key] = dual_val
+
+            all_duals_zero = True
+            for k, val in dual_terms.items():
+                if isinstance(val, dict):
+                    if any(abs(v) > 1e-6 for v in val.values()):
+                        all_duals_zero = False
+                elif abs(val) > 1e-6:
+                    all_duals_zero = False
+
+            print(f"DEBUG: obj={result["obj"]}, all_duals_zero={all_duals_zero}, dict_len={len(dual_terms)}")
+            if abs(result["obj"]) <= 1e-6:
+                print("DEBUG: DUALS:")
+                for k,v in dual_terms.items():
+                    if isinstance(v, dict) and any(abs(val) > 1e-6 for val in v.values()):
+                        print(f" {k} -> max {max(abs(val) for val in v.values())}")
+                    elif not isinstance(v, dict) and abs(v) > 1e-6:
+                        print(f" {k} -> {v}")
+
+            if abs(result["obj"]) <= 1e-6 and all_duals_zero:
+                # Degenerate flat cut that would bound theta <= 0 incorrectly.
+                # Treat as infeasible to emit a nogood/incumbent cut instead.
+                return {"status": GRB.INFEASIBLE, "cut": "nogood"}
+
+            result["dual_terms"] = dual_terms
             result["duals_available"] = duals_available
             result["served_arcs"] = {
                 arc: vars_map["psi"][arc].X
@@ -941,13 +1181,25 @@ class BendersDecomposition:
         return result
 
     @staticmethod
+    @staticmethod
     def _get_linear_dual(constr):
-        for attr_name in ("Pi", "BarPi"):
+        if constr is None:
+            return 0.0
+        for attr_name in ("Pi", "QCPi", "BarPi"):
             try:
-                return constr.getAttr(attr_name)
-            except Exception:
-                continue
-        return None
+                val = constr.getAttr(attr_name)
+                return val
+            except Exception as e:
+                open('debug_missing_duals.txt', 'a').write(f"Exception for {constr.ConstrName}: {e}\n")
+                pass
+        return 0.0
+
+    @staticmethod
+    def _get_quadratic_dual(qconstr):
+        try:
+            return qconstr.getAttr("QCPi")
+        except Exception:
+            return None
 
     def _add_optimality_cut(self, x_hat, u_hat, subproblem):
         expr = self._build_optimality_expr(x_hat, u_hat, subproblem)
