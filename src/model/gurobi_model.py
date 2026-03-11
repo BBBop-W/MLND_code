@@ -10,7 +10,7 @@ class MLNDModel:
         self.model = gp.Model("MLND_SOCP")
         
         # Accessing sets for convenience
-        self.L_hat = self.inst.L_hat
+        self.L_hat = self.inst.L_hat # Physical bases (always included)
         
         # Choice of using virtual bases (chaining) for optimization
         if config.USE_VIRTUAL_BASES_OPT:
@@ -213,25 +213,25 @@ class MLNDModel:
                                  (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
                                  name=f"energy_bal_p_{i_node}")
 
-        # 6.3 Delivery Station Energy Balance (Exit from D)
-        for j_node in self.D:
-            transit_lhs = gp.LinExpr()
-            replenish_rhs = gp.LinExpr()
-            for (u_node, v_node) in self.A:
-                if u_node == j_node:
-                    if (u_node, v_node, '0') in phi:
-                        transit_lhs += phi[u_node, v_node, '0'] * self.inst.get_time(u_node, v_node)
-                        # Reaching a physical base counts as replenishment (phi^0_jl in LaTeX)
-                        if v_node in self.L_hat:
-                            replenish_rhs += phi[u_node, v_node, '0']
-                    for k in self.E_uv.get((u_node, v_node), []):
-                        if (u_node, v_node, k) in phi:
-                            time_detour = self.inst.get_time(u_node, k) + self.inst.get_time(k, v_node)
-                            transit_lhs += phi[u_node, v_node, k] * time_detour
-                            replenish_rhs += phi[u_node, v_node, k]
-            self.model.addConstr(config.ENERGY_RATE_OMEGA * (xi[j_node] + transit_lhs) <= 
-                                 (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
-                                 name=f"energy_bal_d_{j_node}")
+        # # 6.3 Delivery Station Energy Balance (Exit from D)
+        # for j_node in self.D:
+        #     transit_lhs = gp.LinExpr()
+        #     replenish_rhs = gp.LinExpr()
+        #     for (u_node, v_node) in self.A:
+        #         if u_node == j_node:
+        #             if (u_node, v_node, '0') in phi:
+        #                 transit_lhs += phi[u_node, v_node, '0'] * self.inst.get_time(u_node, v_node)
+        #                 # Reaching a physical base counts as replenishment (phi^0_jl in LaTeX)
+        #                 if v_node in self.L_hat:
+        #                     replenish_rhs += phi[u_node, v_node, '0']
+        #             for k in self.E_uv.get((u_node, v_node), []):
+        #                 if (u_node, v_node, k) in phi:
+        #                     time_detour = self.inst.get_time(u_node, k) + self.inst.get_time(k, v_node)
+        #                     transit_lhs += phi[u_node, v_node, k] * time_detour
+        #                     replenish_rhs += phi[u_node, v_node, k]
+        #     self.model.addConstr(config.ENERGY_RATE_OMEGA * (xi[j_node] + transit_lhs) <= 
+        #                          (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
+        #                          name=f"energy_bal_d_{j_node}")
 
         # 7. Fleet Sizing and Budget
         def get_phi_time_expr():

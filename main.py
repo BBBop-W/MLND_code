@@ -68,6 +68,8 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
         
         config_path_mei = os.path.join(meituan_results_dir, "open_facilities.csv")
         processor_mei.save_open_facilities_config(config_path_mei)
+
+        processor_mei.save_python_object(os.path.join(meituan_results_dir, "result_data.pkl"))
         
         # --- RUN SIMULATION ---
         from src.simulation.simulator import DroneSimulator
