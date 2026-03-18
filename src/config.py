@@ -18,14 +18,14 @@ DEMAND_MIN = 2.0
 DEMAND_MAX = 8.0
 
 # Meituan Semi-synthetic Parameters
-MEITUAN_NUM_BASES = 5
-MEITUAN_NUM_PICKUP = 25
-MEITUAN_NUM_DELIVERY = 25
-MEITUAN_NUM_SWAPPING = 10
+MEITUAN_NUM_BASES = 10
+MEITUAN_NUM_PICKUP = 10
+MEITUAN_NUM_DELIVERY = 10
+MEITUAN_NUM_SWAPPING = 5
 
 # Coverage and Distance Limits
-MAX_DIRECT_DISTANCE = 8.0     # Maximum distance a drone can fly directly without swapping
-MAX_DETOUR_DISTANCE = 12.0    # Maximum total distance allowed if routed through a swapping station
+MAX_DIRECT_DISTANCE = 6.0     # Maximum distance a drone can fly directly without swapping
+MAX_DETOUR_DISTANCE = 8.0    # Maximum total distance allowed if routed through a swapping station
 
 # Model Parameters
 SERVICE_LEVELS = [i/100 for i in range(0, 95, 5)]
@@ -33,7 +33,7 @@ SERVICE_LEVELS += [0.95, 0.999] # Discrete service levels for rho_s
 ENERGY_RATE_OMEGA = 5
 BATTERY_CAPACITY_OMEGA_UPPER = 100.0
 ENERGY_SAFETY_MARGIN_EPSILON = 0.1
-TAU_LV = 3/60  # 1 min
+TAU_LV = 5/60  # 1 min
 TAU_P = 5/60 # 5 min
 GAMMA = 0.05
 MAX_WAITING_FACTOR_LV = - TAU_LV / math.log(GAMMA)
@@ -50,7 +50,7 @@ COST_PICKUP = 200.0
 COST_DELIVERY = 200.0
 COST_SWAPPING = 300.0
 COST_DRONE = 20.0
-BUDGET = 10000.0
+BUDGET = 8000.0
 
 # Fleet Parameters
 MAX_FLEET_PER_BASE = 500000

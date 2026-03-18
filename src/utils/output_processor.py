@@ -26,7 +26,10 @@ class ResultProcessor:
             
         self.run_time = self.model.Runtime
             
-        self.gamma = self.model.getVarByName("gamma").X
+        try:
+            self.gamma = self.model.getVarByName("gamma").X
+        except:
+            self.gamma = None
         
         self.x = {}
         self.y = {}
@@ -73,7 +76,7 @@ class ResultProcessor:
         print("="*50)
         print(f"Objective Value (Served Demand): {self.obj_val:.4f}" if self.obj_val else "Objective Value: None")
         print(f"Average Service Level (rho)  : {self.rho:.4f}")
-        print(f"Total Fleet Size (gamma)     : {self.gamma:.4f}")
+        # print(f"Total Fleet Size (gamma)     : {self.gamma:.4f}")
         print(f"Runtime                      : {self.run_time:.2f}s")
         print(f"Gap                          : {self.gap*100:.2f}%" if self.gap is not None else "Gap: N/A")
         

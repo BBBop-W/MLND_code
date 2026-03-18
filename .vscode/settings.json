@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^/opt/anaconda3/bin/conda run -p /opt/anaconda3 --no-capture-output python /Users/songtaowang/\\.vscode/extensions/ms-python\\.python-2026\\.2\\.0-darwin-arm64/python_files/get_output_via_markers\\.py subproblem_test/test_fixed_binary_subproblems\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

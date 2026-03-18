@@ -78,15 +78,15 @@ class Instance:
             for l_hat in self.L_hat:
                 all_potential_arcs.add((d, l_hat))
                 
-        # (D -> E)
-        for d in self.D:
-            for e in self.E:
-                all_potential_arcs.add((d, e))
+        # # (D -> E)
+        # for d in self.D:
+        #     for e in self.E:
+        #         all_potential_arcs.add((d, e))
                 
-        # (E -> L_hat)
-        for e in self.E:
-            for l_hat in self.L_hat:
-                all_potential_arcs.add((e, l_hat))
+        # # (E -> L_hat)
+        # for e in self.E:
+        #     for l_hat in self.L_hat:
+        #         all_potential_arcs.add((e, l_hat))
                 
         # (D -> L_v) chaining link
         for d in self.D:

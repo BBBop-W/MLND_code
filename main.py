@@ -55,7 +55,7 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
     model_mei.model.setParam('TimeLimit', 3600)
     model_mei.model.setParam('MIPGap', 0.05) 
     success_mei = model_mei.solve()
-    model_mei.write_model(os.path.join(meituan_results_dir, "model.lp"))
+    model_mei.write_model(os.path.join(meituan_results_dir, "model0313.lp"))
 
     if success_mei or model_mei.model.SolCount > 0:
         print("\nOptimization completed. Extracting results...")

@@ -62,7 +62,7 @@ class MLNDModel:
         u = self.model.addVars(self.L, self.S, vtype=GRB.BINARY, name="u")
         
         # y_li: proportion of orders assigned
-        y = self.model.addVars(self.A_LP, lb=0.0, ub=1.0, name="y")
+        y = self.model.addVars(self.A_LP, lb=0.0, name="y")
         
         # w_lij: linearization of y_li * x_j
         w_keys = [(l, i, j) for (l, i) in self.A_LP for j in self.D if (i, j) in self.A_PD]
@@ -100,6 +100,14 @@ class MLNDModel:
 
         # --- Constraints ---
 
+        # Nearby-base connectivity: each pickup/delivery must have at least one active base neighbor
+        for i in self.P + self.D:
+            self.model.addConstr(
+                x[i] <= gp.quicksum(x[l] for l in self.L_hat if (l, i) in self.A or (i, l) in self.A),
+                name=f"nodes_nearby_{i}",
+            )
+        
+
         # 1. Logical Assignment and Service Level Selection
         for i in self.P:
             l_for_i = [l for l in self.L if (l, i) in self.A_LP]
@@ -123,15 +131,15 @@ class MLNDModel:
             
             self.model.addConstr(D_var[l, i] == gp.quicksum(self.inst.h.get((i, j), 0) * w[l, i, j] 
                                                         for j in self.D if (i, j) in self.A_PD), 
-                                 name=f"demand_agg_{l}_{i}")
-                                 
+                                name=f"demand_agg_{l}_{i}")
+                                
             for s in self.S:
                 self.model.addConstr(z[l, i, s] <= D_var[l, i], name=f"lin_z1a_{l}_{i}_{s}")
                 self.model.addConstr(z[l, i, s] <= H_i * u[l, s], name=f"lin_z1b_{l}_{i}_{s}")
                 self.model.addConstr(z[l, i, s] >= D_var[l, i] - H_i * (1 - u[l, s]), name=f"lin_z2_{l}_{i}_{s}")
                 
             self.model.addConstr(psi[l, i] == gp.quicksum(self.rho_vals[s] * z[l, i, s] for s in self.S), 
-                                 name=f"linear_logical_flow_{l}_{i}")
+                                name=f"linear_logical_flow_{l}_{i}")
 
         # 3. Flow Conservation and Decomposition
         all_active_nodes = self.N + self.L_v
@@ -193,7 +201,7 @@ class MLNDModel:
                                 replenish_rhs += phi[u_node, i_node, k]
                 self.model.addConstr(config.ENERGY_RATE_OMEGA * (wait_term + transit_lhs) <= 
                                      (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
-                                     name=f"energy_bal_lv_{lv}")
+                                    name=f"energy_bal_lv_{lv}")
 
         # 6.2 Pickup Station Energy Balance (Exit from P)
         for i_node in self.P:
@@ -211,7 +219,7 @@ class MLNDModel:
                             replenish_rhs += phi[u_node, v_node, k]
             self.model.addConstr(config.ENERGY_RATE_OMEGA * (xi[i_node] + transit_lhs) <= 
                                  (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
-                                 name=f"energy_bal_p_{i_node}")
+                                name=f"energy_bal_p_{i_node}")
 
         # # 6.3 Delivery Station Energy Balance (Exit from D)
         # for j_node in self.D:
@@ -254,6 +262,7 @@ class MLNDModel:
         self.model.addConstr(gamma <= config.MAX_FLEET_PER_BASE * gp.quicksum(x[l] for l in self.L_hat), name="gamma_limit")
 
     def solve(self):
+        self.build()  # Build model before solving
         self.model.optimize()
         if self.model.status == GRB.OPTIMAL:
             print(f"Optimal objective: {self.model.objVal:.4f}")
