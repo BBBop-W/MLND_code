@@ -16,18 +16,30 @@ class DataGenerator:
         and saves it to standard CSV files in the specified directory.
         """
         os.makedirs(save_dir, exist_ok=True)
+
+        if config.NUM_SWAPPING < config.NUM_BASES:
+            raise ValueError(
+                f"NUM_SWAPPING ({config.NUM_SWAPPING}) must be >= NUM_BASES ({config.NUM_BASES}) to ensure each base has a colocated swap station."
+            )
         
         locations_path = os.path.join(save_dir, "locations.csv")
         orders_path = os.path.join(save_dir, "orders.csv")
         
         locations = []
+        base_locations = []
         for i in range(1, config.NUM_BASES + 1):
-            locations.append({"index": f"L{i}", "type": "L", "x": np.random.uniform(0, config.AREA_SIZE), "y": np.random.uniform(0, config.AREA_SIZE)})
+            x_val = np.random.uniform(0, config.AREA_SIZE)
+            y_val = np.random.uniform(0, config.AREA_SIZE)
+            base_locations.append((x_val, y_val))
+            locations.append({"index": f"L{i}", "type": "L", "x": x_val, "y": y_val})
         for i in range(1, config.NUM_PICKUP + 1):
             locations.append({"index": f"P{i}", "type": "P", "x": np.random.uniform(0, config.AREA_SIZE), "y": np.random.uniform(0, config.AREA_SIZE)})
         for i in range(1, config.NUM_DELIVERY + 1):
             locations.append({"index": f"D{i}", "type": "D", "x": np.random.uniform(0, config.AREA_SIZE), "y": np.random.uniform(0, config.AREA_SIZE)})
-        for i in range(1, config.NUM_SWAPPING + 1):
+        # Ensure every base has at least one colocated swap station.
+        for i, (x_val, y_val) in enumerate(base_locations, 1):
+            locations.append({"index": f"E{i}", "type": "E", "x": x_val, "y": y_val})
+        for i in range(config.NUM_BASES + 1, config.NUM_SWAPPING + 1):
             locations.append({"index": f"E{i}", "type": "E", "x": np.random.uniform(0, config.AREA_SIZE), "y": np.random.uniform(0, config.AREA_SIZE)})
             
         with open(locations_path, mode='w', newline='') as f:
@@ -58,6 +70,11 @@ class DataGenerator:
         from sklearn.cluster import KMeans
         from scipy.spatial.distance import cdist
         os.makedirs(save_dir, exist_ok=True)
+
+        if num_swapping < num_bases:
+            raise ValueError(
+                f"num_swapping ({num_swapping}) must be >= num_bases ({num_bases}) to ensure each base has a colocated swap station."
+            )
         
         print(f"Reading data from {raw_data_path} for date {date_filter}...")
         df = pd.read_csv(raw_data_path)
@@ -127,9 +144,17 @@ class DataGenerator:
             locations.append({"index": f"P{idx}", "type": "P", "x": to_km_x(row.sender_lng), "y": to_km_y(row.sender_lat)})
         for idx, row in enumerate(rep_d.itertuples(), 1):
             locations.append({"index": f"D{idx}", "type": "D", "x": to_km_x(row.recipient_lng), "y": to_km_y(row.recipient_lat)})
+        base_locations = []
         for i in range(1, num_bases + 1):
-            locations.append({"index": f"L{i}", "type": "L", "x": np.random.uniform(-6, 6), "y": np.random.uniform(-6, 6)})
-        for i in range(1, num_swapping + 1):
+            x_val = np.random.uniform(-6, 6)
+            y_val = np.random.uniform(-6, 6)
+            base_locations.append((x_val, y_val))
+            locations.append({"index": f"L{i}", "type": "L", "x": x_val, "y": y_val})
+
+        # Ensure every base has at least one colocated swap station.
+        for i, (x_val, y_val) in enumerate(base_locations, 1):
+            locations.append({"index": f"E{i}", "type": "E", "x": x_val, "y": y_val})
+        for i in range(num_bases + 1, num_swapping + 1):
             locations.append({"index": f"E{i}", "type": "E", "x": np.random.uniform(-6, 6), "y": np.random.uniform(-6, 6)})
         pd.DataFrame(locations).to_csv(os.path.join(save_dir, "locations.csv"), index=False)
 

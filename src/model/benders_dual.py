@@ -48,13 +48,13 @@ class DualSubproblem:
         epsilon2,
         epsilon3,
         beta2,
-        # pi1,
+        pi1,
         pi2,
         pi3,
         delta1,
         delta2,
         Delta,
-        # sigma1,
+        sigma1,
         kappa1,
         kappa2,
         kappa3,
@@ -87,7 +87,7 @@ class DualSubproblem:
         )
 
         obj += sum_terms(beta2[i, j] * inst.h[i, j] for i, j in data.A_PD)
-        # obj += sum_terms(-pi1[lv] * q_ref[lv] for lv in data.L_v)
+        obj += sum_terms( (1/ config.MAX_WAITING_FACTOR_LV) * pi1[lv] * x_ref[lv] for lv in data.L_v)
 
         for n in data.P + data.D:
             m_n = config.MAX_WAITING_FACTOR_P if n in data.P else config.MAX_WAITING_FACTOR_D
@@ -161,15 +161,15 @@ class DualSubproblem:
             lb=0.0,
             name="epsilon3",
         )  # ε^3
-        epsilon4 = m.addVars(data.A_LP, lb=-GRB.INFINITY, name="epsilon4")  # ε^4
+        epsilon4 = m.addVars(data.A_LP, lb=0.0, name="epsilon4")  # ε^4
 
         # β (for flow conservation and decomposition)
         beta1 = m.addVars(data.N + data.L_v, lb=-GRB.INFINITY, name="beta1")  # β^1
         beta2 = m.addVars(data.A_PD, lb=0.0, name="beta2")  # β^2
-        beta3 = m.addVars(data.A, lb=-GRB.INFINITY, name="beta3")  # β^3
+        beta3 = m.addVars(data.A, lb=0.0, name="beta3")  # β^3
 
         # π (for LV wait, QoS, swap constraints)
-        pi1 = m.addVars(data.L_v, lb=0.0, name="pi1")  # π^1
+        pi1 = m.addVars(data.L_v, lb=-GRB.INFINITY, ub=0, name="pi1")  # π^1
         pi2 = m.addVars(data.P + data.D, lb=0.0, name="pi2")  # π^2
         pi3 = m.addVars(data.E, lb=0.0, name="pi3")  # π^3
 
@@ -209,13 +209,13 @@ class DualSubproblem:
             epsilon2=epsilon2,
             epsilon3=epsilon3,
             beta2=beta2,
-            # pi1=pi1,
+            pi1=pi1,
             pi2=pi2,
             pi3=pi3,
             delta1=delta1,
             delta2=delta2,
             Delta=Delta,
-            # sigma1=sigma1,
+            sigma1=sigma1,
             kappa1=kappa1,
             kappa2=kappa2,
             kappa3=kappa3,
@@ -249,6 +249,8 @@ class DualSubproblem:
             expr = alpha6[l, i]
             expr -= gp.quicksum(epsilon1[l, i, s] for s in data.S)
             expr += gp.quicksum(epsilon3[l, i, s] for s in data.S)
+            if l in data.L_v:
+                expr += pi1[l]
             m.addConstr(expr >= 0, name=f"dual_D_{l}_{i}")
 
         # z_lis: ε^1 + ε^2 - ε^3 - ρ_s·ε^4 ≥ 0
@@ -266,8 +268,9 @@ class DualSubproblem:
                 expr += epsilon4[u_node, v_node]
 
                 # π^1 term if u ∈ L_v
-                # if u_node in data.L_v:
-                #     expr += -config.MAX_WAITING_FACTOR_LV * pi1[u_node]
+                if u_node in data.L_v:
+                    expr += sigma1[u_node] * config.MAX_WAITING_FACTOR_LV
+                    expr += - pi1[u_node]
 
             # Flow conservation β^1
             expr += beta1[u_node] - beta1[v_node]
@@ -296,13 +299,13 @@ class DualSubproblem:
 
             travel_time = data.path_time(u_node, v_node, k)
 
-            # # σ^1 terms if u ∈ L_v
-            # if u_node in data.L_v:
-            #     expr += travel_time * sigma1[u_node]
-            #     if k != "0":
-            #         expr -= (
-            #             data.energy_exchange_limit
-            #         ) * sigma1[u_node]
+            # σ^1 terms if u ∈ L_v
+            if u_node in data.L_v:
+                expr += travel_time * sigma1[u_node]
+                if k != "0":
+                    expr -= (
+                        data.energy_exchange_limit
+                    ) * sigma1[u_node]
 
             # # σ^2 terms if u ∈ P
             if u_node in data.P:
@@ -373,13 +376,13 @@ class DualSubproblem:
             "beta1": {n: beta1[n].X for n in data.N + data.L_v},
             "beta2": {(i, j): beta2[i, j].X for i, j in data.A_PD},
             "beta3": {(u, v): beta3[u, v].X for u, v in data.A},
-            # "pi1": {lv: pi1[lv].X for lv in data.L_v},
+            "pi1": {lv: pi1[lv].X for lv in data.L_v},
             "pi2": {n: pi2[n].X for n in data.P + data.D},
             "pi3": {k: pi3[k].X for k in data.E},
             "delta1": {u: delta1[u].X for u in data.P + data.D},
             "delta2": {u: delta2[u].X for u in data.P + data.D},
             "Delta": {u: Delta[u].X for u in data.P + data.D},
-            # "sigma1": {lv: sigma1[lv].X for lv in data.L_v},
+            "sigma1": {lv: sigma1[lv].X for lv in data.L_v},
             "sigma2": {p: sigma2[p].X for p in data.P},
             "kappa1": kappa1.X,
             "kappa2": kappa2.X,

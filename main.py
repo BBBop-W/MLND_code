@@ -44,8 +44,8 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
     meituan_instance = loader.load_instance(locations_path_mei, orders_path_mei)
 
     print(f"Nodes Loaded: {len(meituan_instance.L_hat)} Bases, {len(meituan_instance.P)} Pickups, "
-          f"{len(meituan_instance.D)} Deliveries ({len(meituan_instance.L_v)} Virtual), "
-          f"{len(meituan_instance.E)} Swapping.")
+        f"{len(meituan_instance.D)} Deliveries ({len(meituan_instance.L_v)} Virtual), "
+        f"{len(meituan_instance.E)} Swapping.")
 
     print("\nBuilding Gurobi SOCP model for Meituan...")
     model_mei = MLNDModel(meituan_instance)
@@ -53,7 +53,7 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
 
     print("\nSolving model for Meituan...")
     model_mei.model.setParam('TimeLimit', 3600)
-    model_mei.model.setParam('MIPGap', 0.05) 
+    # model_mei.model.setParam('MIPGap', 0.05) 
     success_mei = model_mei.solve()
     model_mei.write_model(os.path.join(meituan_results_dir, "model0313.lp"))
 
@@ -91,4 +91,4 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
 
 if __name__ == "__main__":
     # Set GnerateSample=True to recreate the instance and simulation events
-    run_meituan(GnerateSample=True, date_filter=20221017)
+    run_meituan(GnerateSample=False, date_filter=20221017)

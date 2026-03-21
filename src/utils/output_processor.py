@@ -87,12 +87,13 @@ class ResultProcessor:
         print(f"  Swapping (E)    : {self.open_E} / {len(self.inst.E)}")
         
         print(f"\nActive Assignments (y_li > 0.01):")
-        y_active = [(l, p, val) for (l, p), val in self.y.items() if val > 0.01]
+        y_active = [(l, p, val) for (l, p), val in self.y.items() if val > 0.01]  # Only show if base has an active service level
 
         from src import config
-        for l, p, val in y_active[:10]:
+        for l, p, val in y_active:
             rho = [config.SERVICE_LEVELS[s] for s in range(len(config.SERVICE_LEVELS)) if  self.u.get((l, s), 0)> 0.01]
-            print(f"  Base {l} assigned to Pickup {p} with weight {val:.4f} and rho {rho}")
+            if rho and rho[0] > 0.01:
+                print(f"  Base {l} assigned to Pickup {p} with weight {val:.4f} and rho {rho[0]}")
         if len(y_active) > 10:
             print(f"  ... and {len(y_active) - 10} more.")
         print("="*50 + "\n")

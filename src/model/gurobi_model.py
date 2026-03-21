@@ -138,7 +138,7 @@ class MLNDModel:
                 self.model.addConstr(z[l, i, s] <= H_i * u[l, s], name=f"lin_z1b_{l}_{i}_{s}")
                 self.model.addConstr(z[l, i, s] >= D_var[l, i] - H_i * (1 - u[l, s]), name=f"lin_z2_{l}_{i}_{s}")
                 
-            self.model.addConstr(psi[l, i] == gp.quicksum(self.rho_vals[s] * z[l, i, s] for s in self.S), 
+            self.model.addConstr(psi[l, i] <= gp.quicksum(self.rho_vals[s] * z[l, i, s] for s in self.S), 
                                 name=f"linear_logical_flow_{l}_{i}")
 
         # 3. Flow Conservation and Decomposition
@@ -175,6 +175,10 @@ class MLNDModel:
                 rhs = config.MAX_WAITING_FACTOR_LV * gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
                 self.model.addConstr(lhs <= rhs, name=f"vir_wait_{lv}")
 
+                # lhs = gp.quicksum(z[l,i, s] for (l, i) in self.A_LP if l == lv) - gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
+                # rhs = 1/ config.MAX_WAITING_FACTOR_LV * x[lv]
+                # self.model.addConstr(lhs >= rhs, name=f"vir_wait_demand_{lv}")
+
         # 5. Second-Order Cone Programming (SOCP) Reformulation for Queues
         for i_node in self.P + self.D:
             self.model.addConstr(lambd[i_node] == gp.quicksum(psi[i_node, v_idx] for (u_idx, v_idx) in self.A if u_idx == i_node), name=f"lambda_def_{i_node}")
@@ -182,13 +186,18 @@ class MLNDModel:
             self.model.addQConstr(4 * mu_i + (xi[i_node] + lambd[i_node] - mu_i + 1)**2 <= (xi[i_node] - lambd[i_node] + mu_i + 1)**2, name=f"socp_pd_queue_{i_node}")
             self.model.addConstr(xi[i_node] - lambd[i_node] + mu_i + 1 >= 0, name=f"socp_pd_queue_pos_{i_node}")
 
-        # 6. Energy Balance (Node-based)
-        # 6.1 Virtual Base Energy Balance (Exit from LV)
+        # # 6. Energy Balance (Node-based)
+        # # 6.1 Virtual Base Energy Balance (Exit from LV)
         if config.USE_VIRTUAL_BASES_OPT:
-            for lv in self.L_v:
-                wait_term = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
+            for d in self.D:
+                lv = self.inst.d_to_lv[d]
+                # wait_term = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
+                # wait_term = gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv) * config.MAX_WAITING_FACTOR_LV
+                wait_term = xi[d]
                 transit_lhs = gp.LinExpr()
                 replenish_rhs = gp.LinExpr()
+                replenish_rhs += gp.quicksum(phi[d, l, '0'] for l in self.L_hat if (d, l, '0') in phi)  # Replenishment from direct flights to deliveries
+
                 for (u_node, i_node) in self.A_LP:
                     if u_node == lv:
                         if (u_node, i_node, '0') in phi:
@@ -201,7 +210,7 @@ class MLNDModel:
                                 replenish_rhs += phi[u_node, i_node, k]
                 self.model.addConstr(config.ENERGY_RATE_OMEGA * (wait_term + transit_lhs) <= 
                                      (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
-                                    name=f"energy_bal_lv_{lv}")
+                                    name=f"energy_bal_lv_{d}")
 
         # 6.2 Pickup Station Energy Balance (Exit from P)
         for i_node in self.P:
@@ -221,7 +230,7 @@ class MLNDModel:
                                  (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
                                 name=f"energy_bal_p_{i_node}")
 
-        # # 6.3 Delivery Station Energy Balance (Exit from D)
+        # 6.3 Delivery Station Energy Balance (Exit from D)
         # for j_node in self.D:
         #     transit_lhs = gp.LinExpr()
         #     replenish_rhs = gp.LinExpr()
@@ -239,7 +248,7 @@ class MLNDModel:
         #                     replenish_rhs += phi[u_node, v_node, k]
         #     self.model.addConstr(config.ENERGY_RATE_OMEGA * (xi[j_node] + transit_lhs) <= 
         #                          (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
-        #                          name=f"energy_bal_d_{j_node}")
+        #                         name=f"energy_bal_d_{j_node}")
 
         # 7. Fleet Sizing and Budget
         def get_phi_time_expr():
@@ -259,6 +268,7 @@ class MLNDModel:
                     
         self.model.addConstr(fleet_sum <= gamma, name="fleet_calc")
         self.model.addConstr(gp.quicksum(self.inst.f[u_idx] * x[u_idx] for u_idx in self.N) + config.COST_DRONE * gamma <= config.BUDGET, name="budget")
+        
         self.model.addConstr(gamma <= config.MAX_FLEET_PER_BASE * gp.quicksum(x[l] for l in self.L_hat), name="gamma_limit")
 
     def solve(self):
@@ -271,3 +281,5 @@ class MLNDModel:
 
     def write_model(self, filename="model.lp"):
         self.model.write(filename)
+
+

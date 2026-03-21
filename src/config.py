@@ -18,22 +18,22 @@ DEMAND_MIN = 2.0
 DEMAND_MAX = 8.0
 
 # Meituan Semi-synthetic Parameters
-MEITUAN_NUM_BASES = 10
+MEITUAN_NUM_BASES = 3
 MEITUAN_NUM_PICKUP = 10
 MEITUAN_NUM_DELIVERY = 10
-MEITUAN_NUM_SWAPPING = 5
+MEITUAN_NUM_SWAPPING = 8
 
 # Coverage and Distance Limits
 MAX_DIRECT_DISTANCE = 6.0     # Maximum distance a drone can fly directly without swapping
 MAX_DETOUR_DISTANCE = 8.0    # Maximum total distance allowed if routed through a swapping station
 
 # Model Parameters
-SERVICE_LEVELS = [i/100 for i in range(0, 95, 5)]
-SERVICE_LEVELS += [0.95, 0.999] # Discrete service levels for rho_s
+SERVICE_LEVELS = [i/100 for i in range(0, 95, 5)]  # 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95
+# SERVICE_LEVELS += [0.95, 0.999] # Discrete service levels for rho_s
 ENERGY_RATE_OMEGA = 5
 BATTERY_CAPACITY_OMEGA_UPPER = 100.0
 ENERGY_SAFETY_MARGIN_EPSILON = 0.1
-TAU_LV = 5/60  # 1 min
+TAU_LV = 1/60  # 1 min
 TAU_P = 5/60 # 5 min
 GAMMA = 0.05
 MAX_WAITING_FACTOR_LV = - TAU_LV / math.log(GAMMA)
