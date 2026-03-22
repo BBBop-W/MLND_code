@@ -1,6 +1,7 @@
 import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
+import re
 from ..data_processor.instance import Instance
 from .. import config
 
@@ -45,6 +46,24 @@ class MLNDModel:
                 return False
         return True
 
+    def _corresponding_e_for_l(self, l_node):
+        """Map each physical base to one swapping station.
+
+        Priority:
+        1) Same numeric suffix (e.g., L3 -> E3) when available.
+        2) Otherwise, nearest swapping station by distance.
+        """
+        if not self.E:
+            return None
+
+        suffix_match = re.search(r"(\d+)$", l_node)
+        if suffix_match:
+            candidate = f"E{suffix_match.group(1)}"
+            if candidate in self.E:
+                return candidate
+
+        return min(self.E, key=lambda e_node: self.inst.get_dist(l_node, e_node))
+
     def build(self):
         # --- Variables ---
         
@@ -57,6 +76,13 @@ class MLNDModel:
             for d in self.D:
                 lv = self.inst.d_to_lv[d]
                 self.model.addConstr(x[lv] <= x[d], name=f"x_vbase_{d}")
+
+        # If a physical base is opened, its corresponding swapping station must be open.
+        # This is one-way only: E may be open while L is closed.
+        for l_node in self.L_hat:
+            e_node = self._corresponding_e_for_l(l_node)
+            if e_node is not None:
+                self.model.addConstr(x[l_node] <= x[e_node], name=f"link_base_swap_{l_node}_{e_node}")
 
         # u_ls: binary service level selection
         u = self.model.addVars(self.L, self.S, vtype=GRB.BINARY, name="u")
@@ -138,7 +164,7 @@ class MLNDModel:
                 self.model.addConstr(z[l, i, s] <= H_i * u[l, s], name=f"lin_z1b_{l}_{i}_{s}")
                 self.model.addConstr(z[l, i, s] >= D_var[l, i] - H_i * (1 - u[l, s]), name=f"lin_z2_{l}_{i}_{s}")
                 
-            self.model.addConstr(psi[l, i] <= gp.quicksum(self.rho_vals[s] * z[l, i, s] for s in self.S), 
+            self.model.addConstr(psi[l, i] == gp.quicksum(self.rho_vals[s] * z[l, i, s] for s in self.S), 
                                 name=f"linear_logical_flow_{l}_{i}")
 
         # 3. Flow Conservation and Decomposition
@@ -171,13 +197,13 @@ class MLNDModel:
 
         if config.USE_VIRTUAL_BASES_OPT:
             for lv in self.L_v:
-                lhs = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
-                rhs = config.MAX_WAITING_FACTOR_LV * gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
-                self.model.addConstr(lhs <= rhs, name=f"vir_wait_{lv}")
+                # lhs = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
+                # rhs = config.MAX_WAITING_FACTOR_LV * gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
+                # self.model.addConstr(lhs <= rhs, name=f"vir_wait_{lv}")
 
-                # lhs = gp.quicksum(z[l,i, s] for (l, i) in self.A_LP if l == lv) - gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
-                # rhs = 1/ config.MAX_WAITING_FACTOR_LV * x[lv]
-                # self.model.addConstr(lhs >= rhs, name=f"vir_wait_demand_{lv}")
+                lhs = gp.quicksum(D_var[l,i] for (l, i) in self.A_LP if l == lv) - gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
+                rhs = 1/ config.MAX_WAITING_FACTOR_LV * x[lv]
+                self.model.addConstr(lhs >= rhs, name=f"vir_wait_demand_{lv}")
 
         # 5. Second-Order Cone Programming (SOCP) Reformulation for Queues
         for i_node in self.P + self.D:

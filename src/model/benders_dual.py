@@ -87,7 +87,7 @@ class DualSubproblem:
         )
 
         obj += sum_terms(beta2[i, j] * inst.h[i, j] for i, j in data.A_PD)
-        obj += sum_terms( (1/ config.MAX_WAITING_FACTOR_LV) * pi1[lv] * x_ref[lv] for lv in data.L_v)
+        obj += sum_terms(-pi1[lv] * q_ref[lv] for lv in data.L_v)
 
         for n in data.P + data.D:
             m_n = config.MAX_WAITING_FACTOR_P if n in data.P else config.MAX_WAITING_FACTOR_D
@@ -166,10 +166,10 @@ class DualSubproblem:
         # β (for flow conservation and decomposition)
         beta1 = m.addVars(data.N + data.L_v, lb=-GRB.INFINITY, name="beta1")  # β^1
         beta2 = m.addVars(data.A_PD, lb=0.0, name="beta2")  # β^2
-        beta3 = m.addVars(data.A, lb=0.0, name="beta3")  # β^3
+        beta3 = m.addVars(data.A, lb=-GRB.INFINITY, name="beta3")  # β^3
 
         # π (for LV wait, QoS, swap constraints)
-        pi1 = m.addVars(data.L_v, lb=-GRB.INFINITY, ub=0, name="pi1")  # π^1
+        pi1 = m.addVars(data.L_v, lb=0.0, name="pi1")  # π^1
         pi2 = m.addVars(data.P + data.D, lb=0.0, name="pi2")  # π^2
         pi3 = m.addVars(data.E, lb=0.0, name="pi3")  # π^3
 
@@ -182,7 +182,7 @@ class DualSubproblem:
         )  # Δ_u
 
         # σ (for energy balance constraints)
-        sigma1 = m.addVars(data.L_v, lb=0.0, name="sigma1")  # σ^1
+        sigma1 = m.addVars(data.D, lb=0.0, name="sigma1")  # σ^1 (indexed by delivery node)
         sigma2 = m.addVars(data.P, lb=0.0, name="sigma2")  # σ^2
 
         # κ (for fleet sizing and budget)
@@ -249,8 +249,6 @@ class DualSubproblem:
             expr = alpha6[l, i]
             expr -= gp.quicksum(epsilon1[l, i, s] for s in data.S)
             expr += gp.quicksum(epsilon3[l, i, s] for s in data.S)
-            if l in data.L_v:
-                expr += pi1[l]
             m.addConstr(expr >= 0, name=f"dual_D_{l}_{i}")
 
         # z_lis: ε^1 + ε^2 - ε^3 - ρ_s·ε^4 ≥ 0
@@ -269,8 +267,7 @@ class DualSubproblem:
 
                 # π^1 term if u ∈ L_v
                 if u_node in data.L_v:
-                    expr += sigma1[u_node] * config.MAX_WAITING_FACTOR_LV
-                    expr += - pi1[u_node]
+                    expr += -config.MAX_WAITING_FACTOR_LV * pi1[u_node]
 
             # Flow conservation β^1
             expr += beta1[u_node] - beta1[v_node]
@@ -299,13 +296,15 @@ class DualSubproblem:
 
             travel_time = data.path_time(u_node, v_node, k)
 
-            # σ^1 terms if u ∈ L_v
-            if u_node in data.L_v:
-                expr += travel_time * sigma1[u_node]
-                if k != "0":
-                    expr -= (
-                        data.energy_exchange_limit
-                    ) * sigma1[u_node]
+            # σ^1 terms from LV energy constraints indexed by delivery node d.
+            for d in data.D:
+                lv = inst.d_to_lv[d]
+                if u_node == lv and (u_node, v_node) in data.A_LP_set:
+                    expr += travel_time * sigma1[d]
+                    if k != "0":
+                        expr -= data.energy_exchange_limit * sigma1[d]
+                if u_node == d and v_node in data.L_hat and k == "0":
+                    expr -= data.energy_exchange_limit * sigma1[d]
 
             # # σ^2 terms if u ∈ P
             if u_node in data.P:
@@ -326,6 +325,8 @@ class DualSubproblem:
             expr+= kappa1
             if u in data.P:
                 expr += sigma2[u]
+            if u in data.D:
+                expr += sigma1[u]
             m.addConstr(expr >= 0, name=f"dual_xi_{u}")
 
         # Γ: -κ^1 + c·κ^2 + κ^3 ≥ 0
@@ -382,7 +383,7 @@ class DualSubproblem:
             "delta1": {u: delta1[u].X for u in data.P + data.D},
             "delta2": {u: delta2[u].X for u in data.P + data.D},
             "Delta": {u: Delta[u].X for u in data.P + data.D},
-            "sigma1": {lv: sigma1[lv].X for lv in data.L_v},
+            "sigma1": {d: sigma1[d].X for d in data.D},
             "sigma2": {p: sigma2[p].X for p in data.P},
             "kappa1": kappa1.X,
             "kappa2": kappa2.X,

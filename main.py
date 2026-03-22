@@ -33,7 +33,9 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
             num_delivery=config.MEITUAN_NUM_DELIVERY,
             num_bases=config.MEITUAN_NUM_BASES,
             num_swapping=config.MEITUAN_NUM_SWAPPING,
-            date_filter=date_filter
+            date_filter=date_filter,
+            map_half_size_km=config.MEITUAN_MAP_HALF_SIZE_KM,
+            min_node_hourly_orders=config.MEITUAN_MIN_NODE_HOURLY_ORDERS,
         )
         
     locations_path_mei = os.path.join(meituan_instance_dir, "locations.csv")
@@ -49,7 +51,7 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
 
     print("\nBuilding Gurobi SOCP model for Meituan...")
     model_mei = MLNDModel(meituan_instance)
-    model_mei.build()
+    # model_mei.build()
 
     print("\nSolving model for Meituan...")
     model_mei.model.setParam('TimeLimit', 3600)
@@ -68,6 +70,7 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
         
         config_path_mei = os.path.join(meituan_results_dir, "open_facilities.csv")
         processor_mei.save_open_facilities_config(config_path_mei)
+        processor_mei.save_node_flow_summary(os.path.join(meituan_results_dir, "node_flow_summary.csv"))
 
         processor_mei.save_python_object(os.path.join(meituan_results_dir, "result_data.pkl"))
         
@@ -91,4 +94,4 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
 
 if __name__ == "__main__":
     # Set GnerateSample=True to recreate the instance and simulation events
-    run_meituan(GnerateSample=False, date_filter=20221017)
+    run_meituan(GnerateSample=True, date_filter=20221017)

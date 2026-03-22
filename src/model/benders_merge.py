@@ -137,32 +137,10 @@ class BendersMerge:
             name="theta_PD",
         )
 
-        C_CONSTANT = 1.0 / config.MAX_WAITING_FACTOR_LV
-        
-        # 1.1 局部先验割 (Local Capacity Cut)
-        for l in data.L_v:
-            max_potential_demand = gp.quicksum(
-                inst.h[i, j] * y[i, j]
-                for i, j in data.A_PD 
-                if (l, i) in data.A_LP  # 修正了原代码的 if 连用语法错误
-            )
-            mdl.addConstr(
-                max_potential_demand >= C_CONSTANT * x[l],
-                name=f"min_cap_threshold_{l}"
-            )
-            print(f"[Local Cut] Virtual base {l} with service requires at least {C_CONSTANT:.4f} capacity. Added cut.")
-
-        # 1.2 全局先验割 (Global Capacity Cut) 
-        # 全网开启的总容量，必须 >= 所有被激活的虚拟基地需要的下界总和
-        global_potential_demand = gp.quicksum(
-            inst.h[i, j] * y[i, j]
-            for i, j in data.A_PD
-        )
-        mdl.addConstr(
-            global_potential_demand >= C_CONSTANT * gp.quicksum(x[l] for l in data.L_v),
-            name="global_min_cap_threshold"
-        )
-        print(f"[Global Cut] Total potential demand from all active edges must cover the sum of {C_CONSTANT:.4f} times the number of active virtual bases. Added cut.")
+        # NOTE:
+        # Legacy capacity pre-cuts tied to the old D-based LV-wait threshold are removed.
+        # With the current u-based LV wait formulation, those cuts can over-restrict valid
+        # master solutions and break primal/dual alignment.
 
         # 挂载变量到 model 对象，供 Callback 使用
 
@@ -268,93 +246,8 @@ class BendersMerge:
                 return
             self._visited_master_keys.add(master_key)
 
-            C_CONSTANT = 1.0 / config.MAX_WAITING_FACTOR_LV
-            TOL = 1e-5
-            
-            # --- 提前提取当前解的活跃状态，减少后续循环计算 ---
-            active_v_bases = [l for l in self.data.L_v if xh[l] > 0.5]
-            active_edges = [(i, j) for (i, j) in self.data.A_PD if xh[i] > 0.5 and xh[j] > 0.5]
-
-            # 1. 快速的单点局部检查 (Local Cut-Set Filter)
-            local_fail = False
-            for l in active_v_bases:
-                available_demand = sum(
-                    self.inst.h[i, j] 
-                    for (i, j) in active_edges 
-                    if (l, i) in self.data.A_LP
-                )
-                if available_demand < C_CONSTANT - TOL:
-                    print(f"[Local Cut] Virtual base {l} lacks capacity: {available_demand:.4f} < {C_CONSTANT:.4f}. Rejected.")
-                    max_demand_expr = gp.quicksum(
-                        self.inst.h[i, j] * model._vars_y[i, j]
-                        for (i, j) in self.data.A_PD
-                        if (l, i) in self.data.A_LP
-                    )
-                    model.cbLazy(max_demand_expr >= C_CONSTANT * model._vars_x[l])
-                    local_fail = True
-            
-            if local_fail:
-                return
-
-            # 2. 基于最大流的精确子集检查 (Max-Flow Min-Cut Subset Filter)
-            # 这能发现任意组合 (如 {v2, v3}) 共享容量不足的情况，绝不会漏 Cut
-            if len(active_v_bases) > 1:
-                import networkx as nx
-                G = nx.DiGraph()
-                G.add_node("S")
-                G.add_node("T")
-                
-                # (1) 源点 -> 虚拟基站 (该边容量为基站的最低需求)
-                for l in active_v_bases:
-                    G.add_edge("S", l, capacity=C_CONSTANT)
-                    
-                # (2) 配送边 -> 汇点 (该边容量为该配送能提供的最大订单流)
-                for (i, j) in active_edges:
-                    G.add_edge((i, j), "T", capacity=self.inst.h[i, j])
-                    
-                # (3) 虚拟基站 -> 配送边 (连通性映射，容量正无穷)
-                for l in active_v_bases:
-                    for (i, j) in active_edges:
-                        if (l, i) in self.data.A_LP:
-                            G.add_edge(l, (i, j), capacity=float('inf'))
-                            
-                # 计算最大流和最小割
-                flow_value, partition = nx.minimum_cut(G, "S", "T")
-                required_demand = C_CONSTANT * len(active_v_bases)
-                
-                # 如果最大流小于总需求，说明至少存在一个子集发生拥堵（无解）
-                if flow_value < required_demand - TOL:
-                    # partition[0] 是包含源点 S 的集合，里面包括了所有"被饿死"(缺乏边覆盖)的基站
-                    S_set = partition[0] 
-                    starved_bases = [node for node in S_set if node in active_v_bases]
-                    
-                    if starved_bases:
-                        # 找出这些困局基站所能触达的**所有候选边**（用于写 Lazy Cut）
-                        reachable_edges = set()
-                        for l in starved_bases:
-                            for i, j in self.data.A_PD:
-                                if (l, i) in self.data.A_LP:
-                                    reachable_edges.add((i, j))
-                        
-                        shared_available_demand = sum(self.inst.h[i, j] for (i, j) in reachable_edges if (i, j) in active_edges)
-                        starved_required = C_CONSTANT * len(starved_bases)
-                        
-                        print(f"[Min-Cut Filter] Active bases {starved_bases} share only {shared_available_demand:.4f} capacity, need {starved_required:.4f}. Rejected.")
-                        
-                        # 构造子集 Cut
-                        shared_demand_expr = gp.quicksum(
-                            self.inst.h[i, j] * model._vars_y[i, j]
-                            for (i, j) in reachable_edges
-                        )
-                        required_expr = gp.quicksum(
-                            C_CONSTANT * model._vars_x[l]
-                            for l in starved_bases
-                        )
-                        model.cbLazy(shared_demand_expr >= required_expr)
-
-
-                        # model.cbLazy(gp.quicksum(self.inst.h[i, j] * model._vars_x[i] * model._vars_x[j] for (i, j) in reachable_edges) >= C_CONSTANT * gp.quicksum(model._vars_x[l] for l in starved_bases))
-                        return 
+            # Legacy min-cut pre-filters removed: they were derived for the previous
+            # D-threshold LV wait model and are not valid under the current u-based form.
 
             # status, obj, cd = subPrimal.solve(xh, uh)
             status, obj, cd = subDual.solve(xh, uh)

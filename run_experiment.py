@@ -9,6 +9,7 @@ from src.data_processor.generator import DataGenerator
 from src.data_processor.loader import DataLoader
 from src.model.gurobi_model import MLNDModel
 from src.utils.output_processor import ResultProcessor
+from src import config
 
 def run_experiment():
     experiment_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results", "experiment_meituan")
@@ -47,7 +48,9 @@ def run_experiment():
             num_pickup=num_p,
             num_delivery=num_d,
             num_bases=num_l,
-            num_swapping=num_e
+            num_swapping=num_e,
+            map_half_size_km=config.MEITUAN_MAP_HALF_SIZE_KM,
+            min_node_hourly_orders=config.MEITUAN_MIN_NODE_HOURLY_ORDERS,
         )
         
         locations_path = os.path.join(scale_dir, "locations.csv")
@@ -78,6 +81,7 @@ def run_experiment():
             
             # Export outputs to folder
             processor.save_selected_stations(os.path.join(scale_dir, "selected_stations.csv"))
+            processor.save_node_flow_summary(os.path.join(scale_dir, "node_flow_summary.csv"))
             processor.save_python_object(os.path.join(scale_dir, "result_data.pkl"))
             processor.plot_network(save_path=os.path.join(scale_dir, "network_plot.png"))
             

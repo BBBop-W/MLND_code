@@ -21,6 +21,9 @@ class DataLoader:
                 node_type = row["type"]
                 x = float(row["x"])
                 y = float(row["y"])
+
+                if not np.isfinite(x) or not np.isfinite(y):
+                    raise ValueError(f"Invalid coordinate for node {node_id}: ({x}, {y})")
                 
                 inst.coords[node_id] = (x, y)
                 
@@ -47,13 +50,17 @@ class DataLoader:
             inst.coords[v_id] = inst.coords[d] # Same location
             
         # 3. Compute Distances and Times
+        if config.DRONE_SPEED_KMPH <= 0:
+            raise ValueError("DRONE_SPEED_KMPH must be positive for consistent time conversion.")
+
         all_physical_nodes = inst.L_hat + inst.P + inst.D + inst.E
         for u in all_physical_nodes:
             for v in all_physical_nodes:
                 dist = np.sqrt((inst.coords[u][0] - inst.coords[v][0])**2 + 
                                (inst.coords[u][1] - inst.coords[v][1])**2)
                 inst.dist_matrix[(u, v)] = dist
-                inst.time_matrix[(u, v)] = dist / 1.0 # speed = 1.0
+                # Distance in km, time in hour.
+                inst.time_matrix[(u, v)] = dist / config.DRONE_SPEED_KMPH
                 
         # 4. Read orders
         with open(orders_path, mode='r') as f:
@@ -62,6 +69,10 @@ class DataLoader:
                 p = row["start_node"]
                 d = row["end_node"]
                 demand = float(row["demand"])
+
+                if demand < 0:
+                    raise ValueError(f"Negative demand found for ({p}, {d}): {demand}")
+
                 inst.h[(p, d)] = demand
                 inst.A_PD.add((p, d))
                 

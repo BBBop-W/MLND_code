@@ -170,7 +170,7 @@ class PrimalSubproblem:
         for u_n, v_n in data.A:
             beta_3[u_n, v_n] = m.addConstr(
                 psi[u_n, v_n]
-                <= gp.quicksum(
+                == gp.quicksum(
                     phi[u_n, v_n, k]
                     for k in data.phi_for_arc.get((u_n, v_n), [])
                 ),
@@ -180,13 +180,11 @@ class PrimalSubproblem:
 
         pi_1 = {}
         for lv in data.L_v:
-            # pi_1[lv] = m.addConstr(
-            #     -config.MAX_WAITING_FACTOR_LV * data.outflow_expr(psi, lv) <= -q_hat[lv],
-            #     name=f"pi_1_{lv}",
-            # )
-            lhs = gp.quicksum(D_var[l,i] for (l, i) in self.data.A_LP if l == lv) - gp.quicksum(psi[lv, i] for (l_idx, i) in self.data.A_LP if l_idx == lv)
-            rhs = 1/ config.MAX_WAITING_FACTOR_LV * x_hat[lv]
-            pi_1[lv] = m.addConstr(lhs >= rhs, name=f"vir_wait_demand_{lv}")
+            pi_1[lv] = m.addConstr(
+                -config.MAX_WAITING_FACTOR_LV * data.outflow_expr(psi, lv)
+                <= -q_hat[lv],
+                name=f"pi_1_{lv}",
+            )
 
         # -- (C10) QoS:  outflow(n) ≤ M_n · x̂[n]
         pi_2 = {}
@@ -249,24 +247,30 @@ class PrimalSubproblem:
         # -- (C15) LV energy:  q̂[lv] + travel ≤ E_lim · replenish
         #    Same parametric structure: b_eff = −q̂[lv] when q̂ moved right.
         sigma_1 = {}
-        for lv in data.L_v:
+        phi_key_set = set(data.phi_keys)
+        for d in data.D:
+            lv = inst.d_to_lv[d]
             lv_path_keys = [
                 (u_n, v_n, k)
                 for u_n, v_n in data.lp_arcs_from_base.get(lv, [])
                 for k in data.phi_for_arc.get((u_n, v_n), [])
             ]
             lv_travel = data.phi_travel_expr(phi, lv_path_keys)
+
             lv_replenish = gp.quicksum(
+                phi[d, l_hat, "0"]
+                for l_hat in data.L_hat
+                if (d, l_hat, "0") in phi_key_set
+            )
+            lv_replenish += gp.quicksum(
                 phi[u_n, v_n, k]
                 for u_n, v_n, k in lv_path_keys
                 if k != "0"
             )
 
-            sigma_1[lv] = m.addConstr( 
-                gp.quicksum(psi[lv, i] for (l_idx, i) in data.A_LP if l_idx == lv) * config.MAX_WAITING_FACTOR_LV
-                -data.energy_exchange_limit * lv_replenish + lv_travel
-                <= 0,
-                name=f"sigma_1_{lv}",
+            sigma_1[d] = m.addConstr(
+                xi[d] + lv_travel - data.energy_exchange_limit * lv_replenish <= 0,
+                name=f"sigma_1_{d}",
             )
 
         Constr_dict["sigma1"] = sigma_1
