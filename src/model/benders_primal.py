@@ -65,7 +65,9 @@ class PrimalSubproblem:
 
         # ---------- objective ----------
         m.setObjective(
-            gp.quicksum(psi[i, j] for i, j in data.A_PD), GRB.MAXIMIZE
+            config.ORDER_REVENUE_COEF * gp.quicksum(psi[i, j] for i, j in data.A_PD)
+            - config.COST_DRONE * gamma_var,
+            GRB.MAXIMIZE,
         )
 
         # -- (C1) assign pickup:  Σ_l y[l,i] ≤ x̂[i]
@@ -302,26 +304,16 @@ class PrimalSubproblem:
             name="kappa_1",
         )
 
-        # -- (C18) budget:  C_d · γ ≤ B − Σ f_n · x̂[n]
-        budget_rhs = config.BUDGET - sum(
-            inst.f[n] * x_hat[n] for n in data.N
-        )
-        kappa_2 = m.addConstr(
-            gamma_var <= budget_rhs/config.COST_DRONE,
-            name="kappa_2",
-        )
-
-        # -- (C19) fleet limit:  γ ≤ M · Σ x̂[l]
+        # -- (C18) fleet limit:  γ ≤ M · Σ x̂[l]
         fleet_limit_rhs = config.MAX_FLEET_PER_BASE * sum(
             x_hat[l] for l in data.L_hat
         )
-        kappa_3 = m.addConstr(
-            gamma_var <= fleet_limit_rhs, name="kappa_3"
-        )
+        # kappa_3 = m.addConstr(
+        #     gamma_var <= fleet_limit_rhs, name="kappa_3"
+        # )
 
         Constr_dict["kappa1"] = kappa_1
-        Constr_dict["kappa2"] = kappa_2
-        Constr_dict["kappa3"] = kappa_3
+        # Constr_dict["kappa3"] = kappa_3
 
         # ---------- solve ----------
         m.optimize()

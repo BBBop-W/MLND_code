@@ -122,7 +122,12 @@ class MLNDModel:
         gamma = self.model.addVar(lb=0.0, name="gamma", vtype=GRB.CONTINUOUS)
 
         # --- Objective ---
-        self.model.setObjective(gp.quicksum(psi[i, j] for (i, j) in self.A_PD), GRB.MAXIMIZE)
+        served_demand = gp.quicksum(psi[i, j] for (i, j) in self.A_PD)
+        fixed_cost = gp.quicksum(self.inst.f[u_idx] * x[u_idx] for u_idx in self.N)
+        self.model.setObjective(
+            config.ORDER_REVENUE_COEF * served_demand - config.COST_DRONE * gamma - fixed_cost,
+            GRB.MAXIMIZE,
+        )
 
         # --- Constraints ---
 
@@ -197,13 +202,13 @@ class MLNDModel:
 
         if config.USE_VIRTUAL_BASES_OPT:
             for lv in self.L_v:
-                # lhs = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
-                # rhs = config.MAX_WAITING_FACTOR_LV * gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
-                # self.model.addConstr(lhs <= rhs, name=f"vir_wait_{lv}")
+                lhs = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
+                rhs = config.MAX_WAITING_FACTOR_LV * gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
+                self.model.addConstr(lhs <= rhs, name=f"vir_wait_{lv}")
 
-                lhs = gp.quicksum(D_var[l,i] for (l, i) in self.A_LP if l == lv) - gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
-                rhs = 1/ config.MAX_WAITING_FACTOR_LV * x[lv]
-                self.model.addConstr(lhs >= rhs, name=f"vir_wait_demand_{lv}")
+                # lhs = gp.quicksum(D_var[l,i] for (l, i) in self.A_LP if l == lv) - gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
+                # rhs = 1/ config.MAX_WAITING_FACTOR_LV * x[lv]
+                # self.model.addConstr(lhs >= rhs, name=f"vir_wait_demand_{lv}")
 
         # 5. Second-Order Cone Programming (SOCP) Reformulation for Queues
         for i_node in self.P + self.D:
@@ -256,26 +261,6 @@ class MLNDModel:
                                  (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
                                 name=f"energy_bal_p_{i_node}")
 
-        # 6.3 Delivery Station Energy Balance (Exit from D)
-        # for j_node in self.D:
-        #     transit_lhs = gp.LinExpr()
-        #     replenish_rhs = gp.LinExpr()
-        #     for (u_node, v_node) in self.A:
-        #         if u_node == j_node:
-        #             if (u_node, v_node, '0') in phi:
-        #                 transit_lhs += phi[u_node, v_node, '0'] * self.inst.get_time(u_node, v_node)
-        #                 # Reaching a physical base counts as replenishment (phi^0_jl in LaTeX)
-        #                 if v_node in self.L_hat:
-        #                     replenish_rhs += phi[u_node, v_node, '0']
-        #             for k in self.E_uv.get((u_node, v_node), []):
-        #                 if (u_node, v_node, k) in phi:
-        #                     time_detour = self.inst.get_time(u_node, k) + self.inst.get_time(k, v_node)
-        #                     transit_lhs += phi[u_node, v_node, k] * time_detour
-        #                     replenish_rhs += phi[u_node, v_node, k]
-        #     self.model.addConstr(config.ENERGY_RATE_OMEGA * (xi[j_node] + transit_lhs) <= 
-        #                          (1 - config.ENERGY_SAFETY_MARGIN_EPSILON) * config.BATTERY_CAPACITY_OMEGA_UPPER * replenish_rhs, 
-        #                         name=f"energy_bal_d_{j_node}")
-
         # 7. Fleet Sizing and Budget
         def get_phi_time_expr():
             expr = gp.LinExpr()
@@ -293,9 +278,7 @@ class MLNDModel:
                     get_phi_time_expr()
                     
         self.model.addConstr(fleet_sum <= gamma, name="fleet_calc")
-        self.model.addConstr(gp.quicksum(self.inst.f[u_idx] * x[u_idx] for u_idx in self.N) + config.COST_DRONE * gamma <= config.BUDGET, name="budget")
         
-        self.model.addConstr(gamma <= config.MAX_FLEET_PER_BASE * gp.quicksum(x[l] for l in self.L_hat), name="gamma_limit")
 
     def solve(self):
         self.build()  # Build model before solving

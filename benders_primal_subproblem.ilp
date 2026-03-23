@@ -1,189 +1,25 @@
 \ Model PrimalSub_copy
 \ LP format - for model browsing. Use MPS format to capture full model detail.
-\ Signature: 0xa7a8c552c324dbd8
+\ Signature: 0x87b5fb1527140565
 Maximize
  
 Subject To
- alpha_1_P2: y[L3,P2] + y[V_D3,P2] + y[V_D5,P2] + y[V_D1,P2] + y[V_D2,P2]
-   + y[L2,P2] <= 1
- alpha_1_P3: y[V_D3,P3] + y[V_D5,P3] + y[L1,P3] + y[V_D2,P3] + y[V_D1,P3]
-   + y[L2,P3] + y[L3,P3] + y[V_D4,P3] <= 0
- alpha_1_P4: y[V_D3,P4] + y[V_D5,P4] + y[V_D2,P4] + y[L2,P4] + y[V_D1,P4]
-   + y[L3,P4] <= 0
- alpha_1_P5: y[L3,P5] + y[V_D4,P5] + y[V_D3,P5] + y[V_D5,P5] + y[V_D1,P5]
-   + y[V_D2,P5] <= 0
- alpha_3_V_D3_P3_D1: - y[V_D3,P3] + w[V_D3,P3,D1] <= 0
- alpha_3_V_D3_P3_D2: - y[V_D3,P3] + w[V_D3,P3,D2] <= 0
- alpha_3_V_D3_P3_D3: - y[V_D3,P3] + w[V_D3,P3,D3] <= 0
- alpha_3_V_D3_P3_D4: - y[V_D3,P3] + w[V_D3,P3,D4] <= 0
- alpha_3_V_D3_P3_D5: - y[V_D3,P3] + w[V_D3,P3,D5] <= 0
- alpha_3_V_D3_P4_D1: - y[V_D3,P4] + w[V_D3,P4,D1] <= 0
- alpha_3_V_D3_P4_D2: - y[V_D3,P4] + w[V_D3,P4,D2] <= 0
- alpha_3_V_D3_P4_D3: - y[V_D3,P4] + w[V_D3,P4,D3] <= 0
- alpha_3_V_D3_P4_D4: - y[V_D3,P4] + w[V_D3,P4,D4] <= 0
- alpha_3_V_D3_P4_D5: - y[V_D3,P4] + w[V_D3,P4,D5] <= 0
- alpha_3_V_D5_P3_D1: - y[V_D5,P3] + w[V_D5,P3,D1] <= 0
- alpha_3_V_D5_P3_D2: - y[V_D5,P3] + w[V_D5,P3,D2] <= 0
- alpha_3_V_D5_P3_D3: - y[V_D5,P3] + w[V_D5,P3,D3] <= 0
- alpha_3_V_D5_P3_D4: - y[V_D5,P3] + w[V_D5,P3,D4] <= 0
- alpha_3_V_D5_P3_D5: - y[V_D5,P3] + w[V_D5,P3,D5] <= 0
- alpha_3_V_D5_P4_D1: - y[V_D5,P4] + w[V_D5,P4,D1] <= 0
- alpha_3_V_D5_P4_D2: - y[V_D5,P4] + w[V_D5,P4,D2] <= 0
- alpha_3_V_D5_P4_D3: - y[V_D5,P4] + w[V_D5,P4,D3] <= 0
- alpha_3_V_D5_P4_D4: - y[V_D5,P4] + w[V_D5,P4,D4] <= 0
- alpha_3_V_D5_P4_D5: - y[V_D5,P4] + w[V_D5,P4,D5] <= 0
- alpha_3_V_D3_P5_D1: - y[V_D3,P5] + w[V_D3,P5,D1] <= 0
- alpha_3_V_D3_P5_D2: - y[V_D3,P5] + w[V_D3,P5,D2] <= 0
- alpha_3_V_D3_P5_D3: - y[V_D3,P5] + w[V_D3,P5,D3] <= 0
- alpha_3_V_D3_P5_D4: - y[V_D3,P5] + w[V_D3,P5,D4] <= 0
- alpha_3_V_D3_P5_D5: - y[V_D3,P5] + w[V_D3,P5,D5] <= 0
- alpha_3_V_D3_P2_D1: - y[V_D3,P2] + w[V_D3,P2,D1] <= 0
- alpha_3_V_D3_P2_D2: - y[V_D3,P2] + w[V_D3,P2,D2] <= 0
- alpha_3_V_D3_P2_D3: - y[V_D3,P2] + w[V_D3,P2,D3] <= 0
- alpha_3_V_D3_P2_D4: - y[V_D3,P2] + w[V_D3,P2,D4] <= 0
- alpha_3_V_D3_P2_D5: - y[V_D3,P2] + w[V_D3,P2,D5] <= 0
- alpha_3_V_D2_P3_D1: - y[V_D2,P3] + w[V_D2,P3,D1] <= 0
- alpha_3_V_D2_P3_D2: - y[V_D2,P3] + w[V_D2,P3,D2] <= 0
- alpha_3_V_D2_P3_D3: - y[V_D2,P3] + w[V_D2,P3,D3] <= 0
- alpha_3_V_D2_P3_D4: - y[V_D2,P3] + w[V_D2,P3,D4] <= 0
- alpha_3_V_D2_P3_D5: - y[V_D2,P3] + w[V_D2,P3,D5] <= 0
- alpha_3_V_D5_P5_D1: - y[V_D5,P5] + w[V_D5,P5,D1] <= 0
- alpha_3_V_D5_P5_D2: - y[V_D5,P5] + w[V_D5,P5,D2] <= 0
- alpha_3_V_D5_P5_D3: - y[V_D5,P5] + w[V_D5,P5,D3] <= 0
- alpha_3_V_D5_P5_D4: - y[V_D5,P5] + w[V_D5,P5,D4] <= 0
- alpha_3_V_D5_P5_D5: - y[V_D5,P5] + w[V_D5,P5,D5] <= 0
- alpha_3_V_D5_P2_D1: - y[V_D5,P2] + w[V_D5,P2,D1] <= 0
- alpha_3_V_D5_P2_D2: - y[V_D5,P2] + w[V_D5,P2,D2] <= 0
- alpha_3_V_D5_P2_D3: - y[V_D5,P2] + w[V_D5,P2,D3] <= 0
- alpha_3_V_D5_P2_D4: - y[V_D5,P2] + w[V_D5,P2,D4] <= 0
- alpha_3_V_D5_P2_D5: - y[V_D5,P2] + w[V_D5,P2,D5] <= 0
- alpha_3_V_D2_P4_D1: - y[V_D2,P4] + w[V_D2,P4,D1] <= 0
- alpha_3_V_D2_P4_D2: - y[V_D2,P4] + w[V_D2,P4,D2] <= 0
- alpha_3_V_D2_P4_D3: - y[V_D2,P4] + w[V_D2,P4,D3] <= 0
- alpha_3_V_D2_P4_D4: - y[V_D2,P4] + w[V_D2,P4,D4] <= 0
- alpha_3_V_D2_P4_D5: - y[V_D2,P4] + w[V_D2,P4,D5] <= 0
- alpha_3_V_D2_P5_D1: - y[V_D2,P5] + w[V_D2,P5,D1] <= 0
- alpha_3_V_D2_P5_D2: - y[V_D2,P5] + w[V_D2,P5,D2] <= 0
- alpha_3_V_D2_P5_D3: - y[V_D2,P5] + w[V_D2,P5,D3] <= 0
- alpha_3_V_D2_P5_D4: - y[V_D2,P5] + w[V_D2,P5,D4] <= 0
- alpha_3_V_D2_P5_D5: - y[V_D2,P5] + w[V_D2,P5,D5] <= 0
- alpha_6_V_D3_P3: - 23.875 w[V_D3,P3,D1] - 59.625 w[V_D3,P3,D2]
-   - 14.58333333333333 w[V_D3,P3,D3] - 60.83333333333334 w[V_D3,P3,D4]
-   - 13.08333333333333 w[V_D3,P3,D5] + D[V_D3,P3] = 0
- alpha_6_V_D3_P4: - 55.375 w[V_D3,P4,D1] - 37.33333333333334 w[V_D3,P4,D2]
-   - 48.95833333333334 w[V_D3,P4,D3] - 10.875 w[V_D3,P4,D4]
-   - 64.29166666666667 w[V_D3,P4,D5] + D[V_D3,P4] = 0
- alpha_6_V_D5_P3: - 23.875 w[V_D5,P3,D1] - 59.625 w[V_D5,P3,D2]
-   - 14.58333333333333 w[V_D5,P3,D3] - 60.83333333333334 w[V_D5,P3,D4]
-   - 13.08333333333333 w[V_D5,P3,D5] + D[V_D5,P3] = 0
- alpha_6_V_D5_P4: - 55.375 w[V_D5,P4,D1] - 37.33333333333334 w[V_D5,P4,D2]
-   - 48.95833333333334 w[V_D5,P4,D3] - 10.875 w[V_D5,P4,D4]
-   - 64.29166666666667 w[V_D5,P4,D5] + D[V_D5,P4] = 0
- alpha_6_V_D3_P5: - 37.16666666666666 w[V_D3,P5,D1]
-   - 25.16666666666667 w[V_D3,P5,D2] - 1.5 w[V_D3,P5,D3]
-   - 26.41666666666667 w[V_D3,P5,D4] - 21.25 w[V_D3,P5,D5] + D[V_D3,P5]
-   = 0
- alpha_6_V_D3_P2: - 0.9166666666666666 w[V_D3,P2,D1]
-   - 13.41666666666667 w[V_D3,P2,D2] - 35.25 w[V_D3,P2,D3]
-   - 1.583333333333333 w[V_D3,P2,D4] - 15.66666666666667 w[V_D3,P2,D5]
-   + D[V_D3,P2] = 0
- alpha_6_V_D2_P3: - 23.875 w[V_D2,P3,D1] - 59.625 w[V_D2,P3,D2]
-   - 14.58333333333333 w[V_D2,P3,D3] - 60.83333333333334 w[V_D2,P3,D4]
-   - 13.08333333333333 w[V_D2,P3,D5] + D[V_D2,P3] = 0
- alpha_6_V_D5_P5: - 37.16666666666666 w[V_D5,P5,D1]
-   - 25.16666666666667 w[V_D5,P5,D2] - 1.5 w[V_D5,P5,D3]
-   - 26.41666666666667 w[V_D5,P5,D4] - 21.25 w[V_D5,P5,D5] + D[V_D5,P5]
-   = 0
- alpha_6_V_D5_P2: - 0.9166666666666666 w[V_D5,P2,D1]
-   - 13.41666666666667 w[V_D5,P2,D2] - 35.25 w[V_D5,P2,D3]
-   - 1.583333333333333 w[V_D5,P2,D4] - 15.66666666666667 w[V_D5,P2,D5]
-   + D[V_D5,P2] = 0
- alpha_6_V_D2_P4: - 55.375 w[V_D2,P4,D1] - 37.33333333333334 w[V_D2,P4,D2]
-   - 48.95833333333334 w[V_D2,P4,D3] - 10.875 w[V_D2,P4,D4]
-   - 64.29166666666667 w[V_D2,P4,D5] + D[V_D2,P4] = 0
- alpha_6_V_D2_P5: - 37.16666666666666 w[V_D2,P5,D1]
-   - 25.16666666666667 w[V_D2,P5,D2] - 1.5 w[V_D2,P5,D3]
-   - 26.41666666666667 w[V_D2,P5,D4] - 21.25 w[V_D2,P5,D5] + D[V_D2,P5]
-   = 0
- vir_wait_demand_V_D3: D[V_D3,P3] + D[V_D3,P4] + D[V_D3,P5] + D[V_D3,P2]
-   - psi[V_D3,P3] - psi[V_D3,P4] - psi[V_D3,P5] - psi[V_D3,P2]
-   >= 35.94878728264789
- vir_wait_demand_V_D5: D[V_D5,P3] + D[V_D5,P4] + D[V_D5,P5] + D[V_D5,P2]
-   - psi[V_D5,P3] - psi[V_D5,P4] - psi[V_D5,P5] - psi[V_D5,P2]
-   >= 35.94878728264789
+ beta_1_V_D19: - psi[V_D19,P10] - psi[V_D19,P19] + psi[D19,V_D19]
+   - psi[V_D19,P4] - psi[V_D19,P5] - psi[V_D19,P7] - psi[V_D19,P17]
+   - psi[V_D19,P20] = 0
+ pi_1_V_D19: - 0.0111269400231778 psi[V_D19,P10]
+   - 0.0111269400231778 psi[V_D19,P19] - 0.0111269400231778 psi[V_D19,P4]
+   - 0.0111269400231778 psi[V_D19,P5] - 0.0111269400231778 psi[V_D19,P7]
+   - 0.0111269400231778 psi[V_D19,P17] - 0.0111269400231778 psi[V_D19,P20]
+   <= -5.666666666666666
+ pi_2_D19: psi[D19,L4] + psi[D19,V_D19] + psi[D19,L5] <= 10.04267726446009
 Bounds
- y[V_D3,P3] free
- y[V_D3,P4] free
- y[V_D5,P3] free
- y[V_D5,P4] free
- y[V_D3,P5] free
- y[V_D3,P2] free
- y[V_D2,P3] free
- y[V_D5,P5] free
- y[V_D5,P2] free
- y[V_D2,P4] free
- y[V_D2,P5] free
- w[V_D3,P3,D1] free
- w[V_D3,P3,D2] free
- w[V_D3,P3,D3] free
- w[V_D3,P3,D4] free
- w[V_D3,P3,D5] free
- w[V_D3,P4,D1] free
- w[V_D3,P4,D2] free
- w[V_D3,P4,D3] free
- w[V_D3,P4,D4] free
- w[V_D3,P4,D5] free
- w[V_D5,P3,D1] free
- w[V_D5,P3,D2] free
- w[V_D5,P3,D3] free
- w[V_D5,P3,D4] free
- w[V_D5,P3,D5] free
- w[V_D5,P4,D1] free
- w[V_D5,P4,D2] free
- w[V_D5,P4,D3] free
- w[V_D5,P4,D4] free
- w[V_D5,P4,D5] free
- w[V_D3,P5,D1] free
- w[V_D3,P5,D2] free
- w[V_D3,P5,D3] free
- w[V_D3,P5,D4] free
- w[V_D3,P5,D5] free
- w[V_D3,P2,D1] free
- w[V_D3,P2,D2] free
- w[V_D3,P2,D3] free
- w[V_D3,P2,D4] free
- w[V_D3,P2,D5] free
- w[V_D2,P3,D1] free
- w[V_D2,P3,D2] free
- w[V_D2,P3,D3] free
- w[V_D2,P3,D4] free
- w[V_D2,P3,D5] free
- w[V_D5,P5,D1] free
- w[V_D5,P5,D2] free
- w[V_D5,P5,D3] free
- w[V_D5,P5,D4] free
- w[V_D5,P5,D5] free
- w[V_D5,P2,D1] free
- w[V_D5,P2,D2] free
- w[V_D5,P2,D3] free
- w[V_D5,P2,D4] free
- w[V_D5,P2,D5] free
- w[V_D2,P4,D1] free
- w[V_D2,P4,D2] free
- w[V_D2,P4,D3] free
- w[V_D2,P4,D4] free
- w[V_D2,P4,D5] free
- w[V_D2,P5,D1] free
- w[V_D2,P5,D2] free
- w[V_D2,P5,D3] free
- w[V_D2,P5,D4] free
- w[V_D2,P5,D5] free
- D[V_D3,P3] free
- D[V_D3,P4] free
- D[V_D5,P3] free
- D[V_D5,P4] free
- D[V_D3,P5] free
- D[V_D3,P2] free
- D[V_D5,P5] free
- D[V_D5,P2] free
+ psi[V_D19,P10] free
+ psi[V_D19,P19] free
+ psi[D19,V_D19] free
+ psi[V_D19,P4] free
+ psi[V_D19,P5] free
+ psi[V_D19,P7] free
+ psi[V_D19,P17] free
+ psi[V_D19,P20] free
 End

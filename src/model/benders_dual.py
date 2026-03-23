@@ -56,7 +56,6 @@ class DualSubproblem:
         Delta,
         sigma1,
         kappa1,
-        kappa2,
         kappa3,
         use_gurobi_expr: bool,
     ):
@@ -103,8 +102,8 @@ class DualSubproblem:
 
         # obj += sum_terms(-q_ref[lv] * sigma1[lv] for lv in data.L_v)
         obj += -kappa1 * sum_terms(q_ref[l] for l in data.L)
-        obj += kappa2 * (config.BUDGET - sum_terms(inst.f[u] * x_ref[u] for u in data.N))
-        obj += kappa3 * config.MAX_FLEET_PER_BASE * sum_terms(x_ref[l] for l in data.L_hat)
+        # obj += kappa3 * config.MAX_FLEET_PER_BASE * sum_terms(x_ref[l] for l in data.L_hat)
+        obj += -sum_terms(inst.f[u] * x_ref[u] for u in data.N)
 
         return obj
 
@@ -187,7 +186,6 @@ class DualSubproblem:
 
         # κ (for fleet sizing and budget)
         kappa1 = m.addVar(lb=0.0, name="kappa1")  # κ^1
-        kappa2 = m.addVar(lb=0.0, name="kappa2")  # κ^2
         kappa3 = m.addVar(lb=0.0, name="kappa3")  # κ^3
 
         # ========== Dual objective ==========
@@ -217,7 +215,6 @@ class DualSubproblem:
             Delta=Delta,
             sigma1=sigma1,
             kappa1=kappa1,
-            kappa2=kappa2,
             kappa3=kappa3,
             use_gurobi_expr=True,
         )
@@ -285,7 +282,7 @@ class DualSubproblem:
                 expr += Delta[u_node] - delta2[u_node]
 
             # RHS
-            rhs = 1.0 if (u_node, v_node) in data.A_PD_set else 0.0
+            rhs = config.ORDER_REVENUE_COEF if (u_node, v_node) in data.A_PD_set else 0.0
             m.addConstr(expr >= rhs, name=f"dual_psi_{u_node}_{v_node}")
 
         # φ_uv^k (complex constraint with energy terms)
@@ -331,7 +328,8 @@ class DualSubproblem:
 
         # Γ: -κ^1 + c·κ^2 + κ^3 ≥ 0
         m.addConstr(
-            -kappa1 + config.COST_DRONE * kappa2 + kappa3 >= 0,
+            -kappa1  >= -config.COST_DRONE,
+            # -kappa1 + kappa3 >= -config.COST_DRONE,
             name="dual_Gamma",
         )
 
@@ -386,7 +384,6 @@ class DualSubproblem:
             "sigma1": {d: sigma1[d].X for d in data.D},
             "sigma2": {p: sigma2[p].X for p in data.P},
             "kappa1": kappa1.X,
-            "kappa2": kappa2.X,
             "kappa3": kappa3.X,
         }
         cut_data = {

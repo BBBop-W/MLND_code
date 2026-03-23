@@ -18,10 +18,10 @@ DEMAND_MIN = 2.0
 DEMAND_MAX = 8.0
 
 # Meituan Semi-synthetic Parameters
-MEITUAN_NUM_BASES = 5
-MEITUAN_NUM_PICKUP = 10
-MEITUAN_NUM_DELIVERY = 10
-MEITUAN_NUM_SWAPPING = 10
+MEITUAN_NUM_BASES = 10
+MEITUAN_NUM_PICKUP = 50
+MEITUAN_NUM_DELIVERY = 50
+MEITUAN_NUM_SWAPPING = 20
 MEITUAN_MAP_HALF_SIZE_KM = 8  # Side length = 2 * half size. 3.0-4.0km usually yields stable top-10/top-10 candidates.
 MEITUAN_MIN_NODE_HOURLY_ORDERS = 0.2  # Drop low-frequency nodes below this avg hourly order count.
 MEITUAN_WORK_HOUR_START = 8
@@ -42,8 +42,8 @@ SERVICE_LEVELS = [i/100 for i in range(5, 95, 20)]  # 0.05, 0.25, ..., 0.85 for 
 ENERGY_RATE_OMEGA = 10
 BATTERY_CAPACITY_OMEGA_UPPER = 100.0
 ENERGY_SAFETY_MARGIN_EPSILON = 0.3
-TAU_LV = 5/60  # 1 min
-TAU_P = 8/60 # 10 min
+TAU_LV = 2/60  # 1 min
+TAU_P = 6/60 # 10 min
 GAMMA = 0.05
 MAX_WAITING_FACTOR_LV = - TAU_LV / math.log(GAMMA)
 MU_PICKUP = 40.0  # Service rate at pickup stations
@@ -54,6 +54,8 @@ MAX_WAITING_FACTOR_D = MAX_WAITING_FACTOR_P
 MAX_FLOW_E = 1000.0  # Large constant for flow constraints
 
 # Costs
+
+ORDER_REVENUE_COEF = 7.0  # Profit coefficient: served order volume * coef (10k CNY unit)
 
 COST_PICKUP = 20.0
 COST_DELIVERY = 20.0

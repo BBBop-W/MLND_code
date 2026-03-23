@@ -20,7 +20,12 @@ def run_experiment():
     # Initialize global tracking CSV
     with open(global_results_csv, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Scale_P', 'Scale_D', 'Scale_E', 'Scale_L', 'Time(s)', 'Gap(%)', 'Rho', 'ObjVal', 'Open_P', 'Open_D', 'Open_E', 'Open_L'])
+        writer.writerow([
+            'Scale_P', 'Scale_D', 'Scale_E', 'Scale_L',
+            'Time(s)', 'Gap(%)', 'Rho',
+            'NetProfit', 'CompletedVolume', 'CompletedVolumeRevenue', 'TotalCost',
+            'Open_P', 'Open_D', 'Open_E', 'Open_L'
+        ])
 
     meituan_raw_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Meituan-TSL", "all_waybill_info_meituan_0322.csv")
     
@@ -86,7 +91,10 @@ def run_experiment():
             processor.plot_network(save_path=os.path.join(scale_dir, "network_plot.png"))
             
             gap_val = processor.gap * 100 if processor.gap is not None else 0.0
-            obj_val_str = f"{processor.obj_val:.4f}" if processor.obj_val else "None"
+            net_profit_str = f"{processor.net_profit:.4f}"
+            completed_volume_str = f"{processor.served_demand:.4f}"
+            completed_revenue_str = f"{processor.served_revenue:.4f}"
+            total_cost_str = f"{processor.total_cost:.4f}"
             
             # Append result row to global tracking CSV
             with open(global_results_csv, 'a', newline='') as f:
@@ -96,7 +104,10 @@ def run_experiment():
                     f"{processor.run_time:.2f}",
                     f"{gap_val:.2f}",
                     f"{processor.rho:.4f}",
-                    obj_val_str,
+                    net_profit_str,
+                    completed_volume_str,
+                    completed_revenue_str,
+                    total_cost_str,
                     processor.open_P,
                     processor.open_D,
                     processor.open_E,
@@ -106,7 +117,12 @@ def run_experiment():
             print(f"Failed to find solution for scale {scale} within time limit.")
             with open(global_results_csv, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([num_p, num_d, num_e, num_l, "Timeout/Fail", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"])
+                writer.writerow([
+                    num_p, num_d, num_e, num_l,
+                    "Timeout/Fail", "N/A", "N/A",
+                    "N/A", "N/A", "N/A", "N/A",
+                    "N/A", "N/A", "N/A", "N/A"
+                ])
 
 if __name__ == "__main__":
     run_experiment()

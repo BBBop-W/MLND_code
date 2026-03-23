@@ -2,7 +2,8 @@ import math
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from collections import deque
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import gurobipy as gp
 from gurobipy import GRB
@@ -73,8 +74,11 @@ class BendersMerge:
         x = mdl.addVars(data.N + data.L_v, vtype=GRB.BINARY, name="x")
         u = mdl.addVars(data.L, data.S, vtype=GRB.BINARY, name="u")
         y = mdl.addVars(data.A_PD, lb=0.0, ub=1.0, name="y")
-        theta = mdl.addVar(lb=0.0, ub=data.total_demand, name="theta")
-        mdl.setObjective(theta, GRB.MAXIMIZE)
+
+        fixed_cost = gp.quicksum(self.inst.f[u_idx] * x[u_idx] for u_idx in self.N)
+
+        theta = mdl.addVar(lb=-GRB.INFINITY, ub=config.ORDER_REVENUE_COEF * data.total_demand, name="theta")
+        mdl.setObjective(theta - fixed_cost, GRB.MAXIMIZE)
 
         # McCormick linearization for y[i,j] = x[i] * x[j] on binary x.
         for i, j in data.A_PD:
@@ -117,23 +121,21 @@ class BendersMerge:
                     name=f"vbase_{d}",
                 )
 
-        fc = gp.quicksum(inst.f[n] * x[n] for n in data.N)
         mw = data.service_wait_expr(u)
-        mdl.addConstr(fc + config.COST_DRONE * mw <= config.BUDGET, name="budget_lb")
+        # mdl.addConstr(
+        #     mw <= config.MAX_FLEET_PER_BASE * gp.quicksum(x[b] for b in data.L_hat),
+        #     name="fleet_lb",
+        # )
         mdl.addConstr(
-            mw <= config.MAX_FLEET_PER_BASE * gp.quicksum(x[b] for b in data.L_hat),
-            name="fleet_lb",
-        )
-        mdl.addConstr(
-            theta <= gp.quicksum(data.H[i] * x[i] for i in data.P),
+            theta <= config.ORDER_REVENUE_COEF * gp.quicksum(data.H[i] * x[i] for i in data.P),
             name="theta_P",
         )
         mdl.addConstr(
-            theta <= gp.quicksum(data.H_hat[j] * x[j] for j in data.D),
+            theta <= config.ORDER_REVENUE_COEF * gp.quicksum(data.H_hat[j] * x[j] for j in data.D),
             name="theta_D",
         )
         mdl.addConstr(
-            theta <= gp.quicksum(inst.h[i, j] * y[i, j] for i, j in data.A_PD),
+            theta <= config.ORDER_REVENUE_COEF * gp.quicksum(inst.h[i, j] * y[i, j] for i, j in data.A_PD),
             name="theta_PD",
         )
 
@@ -163,8 +165,12 @@ class BendersMerge:
             for l in self.data.L
             for s in self.data.S
         }
+        y_hat = {
+            (i, j): float(model.cbGetSolution(model._vars_y[i, j]))
+            for i, j in self.data.A_PD
+        }
         tv = model.cbGetSolution(self.theta)
-        return x_hat, u_hat, tv
+        return x_hat, u_hat, y_hat, tv
 
     def _master_solution_key(self, x_hat, u_hat):
         return (
@@ -195,7 +201,6 @@ class BendersMerge:
             Delta=duals["Delta"],
             sigma1=duals["sigma1"],
             kappa1=duals["kappa1"],
-            kappa2=duals["kappa2"],
             kappa3=duals["kappa3"],
             use_gurobi_expr=use_gurobi_expr,
         )
@@ -217,6 +222,169 @@ class BendersMerge:
         expr = self._build_cut_rhs(duals, self.x, self.u, Q_var, use_gurobi_expr=True)
 
         model.cbLazy(self.theta <= expr)
+
+    def _required_lv_flow(self, u_hat: UHat) -> float:
+        if not self.data.L_v:
+            return 0.0
+        return sum(
+            self.data.service_wait_value(u_hat, [lv]) / config.MAX_WAITING_FACTOR_LV
+            for lv in self.data.L_v
+        )
+
+    def _flow_required_expr(self) -> gp.LinExpr:
+        if not self.data.L_v:
+            return gp.LinExpr(0.0)
+        return (1.0 / config.MAX_WAITING_FACTOR_LV) * self.data.service_wait_expr(
+            self.u, locations=self.data.L_v
+        )
+
+    @staticmethod
+    def _edmonds_karp(
+        nodes: List[str],
+        edges: Dict[Tuple[str, str], float],
+        source: str,
+        sink: str,
+    ) -> Tuple[float, Set[str]]:
+        adj: Dict[str, List[str]] = {n: [] for n in nodes}
+        residual: Dict[Tuple[str, str], float] = {}
+
+        for (u_node, v_node), cap in edges.items():
+            cap = max(0.0, float(cap))
+            if cap <= TOL:
+                continue
+            if v_node not in adj[u_node]:
+                adj[u_node].append(v_node)
+            if u_node not in adj[v_node]:
+                adj[v_node].append(u_node)
+            residual[u_node, v_node] = residual.get((u_node, v_node), 0.0) + cap
+            residual[v_node, u_node] = residual.get((v_node, u_node), 0.0)
+
+        max_flow = 0.0
+        while True:
+            parent: Dict[str, Optional[str]] = {source: None}
+            q = deque([source])
+            while q and sink not in parent:
+                cur = q.popleft()
+                for nxt in adj[cur]:
+                    if nxt in parent:
+                        continue
+                    if residual.get((cur, nxt), 0.0) > TOL:
+                        parent[nxt] = cur
+                        q.append(nxt)
+
+            if sink not in parent:
+                break
+
+            path_cap = float("inf")
+            v = sink
+            while parent[v] is not None:
+                u = parent[v]
+                path_cap = min(path_cap, residual[u, v])
+                v = u
+
+            v = sink
+            while parent[v] is not None:
+                u = parent[v]
+                residual[u, v] -= path_cap
+                residual[v, u] = residual.get((v, u), 0.0) + path_cap
+                v = u
+
+            max_flow += path_cap
+
+        reachable: Set[str] = set()
+        q = deque([source])
+        reachable.add(source)
+        while q:
+            cur = q.popleft()
+            for nxt in adj[cur]:
+                if nxt in reachable:
+                    continue
+                if residual.get((cur, nxt), 0.0) > TOL:
+                    reachable.add(nxt)
+                    q.append(nxt)
+
+        return max_flow, reachable
+
+    def _compute_pd_mincut(
+        self,
+        x_hat: XHat,
+        y_hat: Dict[Tuple[str, str], float],
+    ) -> Tuple[float, Set[str], Set[str]]:
+        source = "__src__"
+        sink = "__snk__"
+        nodes = [source, sink] + self.data.P + self.data.D
+        edges: Dict[Tuple[str, str], float] = {}
+
+        for i in self.data.P:
+            edges[source, i] = self.data.H.get(i, 0.0) * x_hat[i]
+        for i, j in self.data.A_PD:
+            edges[i, j] = self.inst.h.get((i, j), 0.0) * max(0.0, y_hat.get((i, j), 0.0))
+        for j in self.data.D:
+            edges[j, sink] = self.data.H_hat.get(j, 0.0) * x_hat[j]
+
+        max_flow, reachable = self._edmonds_karp(nodes, edges, source, sink)
+        reachable_p = {i for i in self.data.P if i in reachable}
+        reachable_d = {j for j in self.data.D if j in reachable}
+        return max_flow, reachable_p, reachable_d
+
+    def _add_flow_mincut_cut(
+        self,
+        model: gp.Model,
+        reachable_p: Set[str],
+        reachable_d: Set[str],
+    ) -> None:
+        lhs = gp.LinExpr()
+        lhs += gp.quicksum(
+            self.data.H.get(i, 0.0) * self.x[i]
+            for i in self.data.P
+            if i not in reachable_p
+        )
+        lhs += gp.quicksum(
+            self.inst.h.get((i, j), 0.0) * model._vars_y[i, j]
+            for i, j in self.data.A_PD
+            if i in reachable_p and j not in reachable_d
+        )
+        lhs += gp.quicksum(
+            self.data.H_hat.get(j, 0.0) * self.x[j]
+            for j in reachable_d
+        )
+        model.cbLazy(lhs >= self._flow_required_expr())
+
+    def _add_swap_energy_cuts(
+        self,
+        model: gp.Model,
+        x_hat: XHat,
+        u_hat: UHat,
+    ) -> int:
+        cuts_added = 0
+        phi_key_set = set(self.data.phi_keys)
+        for d in self.data.D:
+            lv = self.inst.d_to_lv[d]
+            if lv not in self.data.L_v:
+                continue
+            if x_hat.get(lv, 0) == 0:
+                continue
+
+            lv_wait = self.data.service_wait_value(u_hat, [lv])
+            if lv_wait <= TOL:
+                continue
+
+            swap_opts = list(self.data.nearby_swaps.get(lv, []))
+            base_opts = [
+                b for b in self.data.L_hat
+                if (d, b, "0") in phi_key_set
+            ]
+            rhs_nodes = sorted(set(swap_opts + base_opts))
+            if not rhs_nodes:
+                model.cbLazy(self.x[lv] == 0)
+                cuts_added += 1
+                continue
+
+            if sum(x_hat.get(node, 0) for node in rhs_nodes) == 0:
+                model.cbLazy(self.x[lv] <= gp.quicksum(self.x[node] for node in rhs_nodes))
+                cuts_added += 1
+
+        return cuts_added
     
     # alpha_2
     # epsilon_1
@@ -240,7 +408,7 @@ class BendersMerge:
         def callback(model: gp.Model, where: int):
             if where != GRB.Callback.MIPSOL:
                 return
-            xh, uh, tv = self.get_solution_binary(model)
+            xh, uh, yh, tv = self.get_solution_binary(model)
             master_key = self._master_solution_key(xh, uh)
             if master_key in self._visited_master_keys:
                 return
@@ -263,9 +431,29 @@ class BendersMerge:
                         )
                     
             if obj is None:
-                print("Infeasible subproblem, adding nogood cut.")
-                _status, _obj, _cd = subPrimal.solve(xh, uh)
-                self._add_nogood(model, cd)
+                added = False
+                req_flow = self._required_lv_flow(uh)
+                if req_flow > TOL:
+                    max_flow, reach_p, reach_d = self._compute_pd_mincut(xh, yh)
+                    if max_flow + 1e-6 < req_flow:
+                        if self.verbose:
+                            print(
+                                f"Flow infeasibility detected: required={req_flow:.6f}, maxflow={max_flow:.6f}. Adding min-cut lazy cut."
+                            )
+                        self._add_flow_mincut_cut(model, reach_p, reach_d)
+                        added = True
+
+                swap_cuts = self._add_swap_energy_cuts(model, xh, uh)
+                if swap_cuts > 0:
+                    if self.verbose:
+                        print(f"Swap/energy structure infeasibility detected. Added {swap_cuts} cut(s).")
+                    added = True
+
+                if not added:
+                    if self.verbose:
+                        print("Infeasible subproblem with no structural certificate, adding nogood cut.")
+                    _status, _obj, _cd = subPrimal.solve(xh, uh)
+                    self._add_nogood(model, cd)
                 return
 
             if cd["kind"] == "feasibility":

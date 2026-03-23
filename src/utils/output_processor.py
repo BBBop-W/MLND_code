@@ -116,8 +116,17 @@ class ResultProcessor:
         self.served_demand = sum(
             self.psi.get((i, j), 0.0) for (i, j) in self.inst.A_PD
         )
+
+        # Profit/cost accounting used by summary output.
+        self.served_revenue = config.ORDER_REVENUE_COEF * self.served_demand
+        self.fixed_cost = sum(
+            self.inst.f.get(node, 0.0) * self.x.get(node, 0.0) for node in self.inst.N
+        )
+        gamma_val = self.gamma if self.gamma is not None else 0.0
+        self.drone_cost = config.COST_DRONE * gamma_val
+        self.total_cost = self.fixed_cost + self.drone_cost
+        self.net_profit = self.served_revenue - self.total_cost
         
-        from src import config
         active_rhos = [config.SERVICE_LEVELS[s] for l in self.inst.L_hat for s in range(len(config.SERVICE_LEVELS)) if self.u.get((l, s), 0) > 0.5]
         self.rho = sum(active_rhos) / len(active_rhos) if active_rhos else 0.0
 
@@ -166,7 +175,17 @@ class ResultProcessor:
         print("\n" + "="*50)
         print("OPTIMIZATION RESULT SUMMARY")
         print("="*50)
-        print(f"Objective Value (Served Demand): {self.obj_val:.4f}" if self.obj_val else "Objective Value: None")
+        print(f"Net Profit                   : {self.net_profit:.4f}")
+        print(f"Completed Volume             : {self.served_demand:.4f}")
+        print(f"Completed Volume Revenue     : {self.served_revenue:.4f}")
+        print(f"Total Cost                   : {self.total_cost:.4f}")
+        print(f"  - Fixed Station Cost       : {self.fixed_cost:.4f}")
+        print(f"  - Drone Cost               : {self.drone_cost:.4f}")
+        print(
+            f"Model Objective              : {self.obj_val:.4f}"
+            if self.obj_val is not None
+            else "Model Objective              : None"
+        )
         if self.gamma is not None:
             print(f"Total Aircraft (gamma)        : {self.gamma:.4f}")
         else:
