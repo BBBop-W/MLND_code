@@ -21,7 +21,7 @@ DEMAND_MAX = 8.0
 MEITUAN_NUM_BASES = 10
 MEITUAN_NUM_PICKUP = 50
 MEITUAN_NUM_DELIVERY = 50
-MEITUAN_NUM_SWAPPING = 20
+MEITUAN_NUM_SWAPPING = 10
 MEITUAN_MAP_HALF_SIZE_KM = 8  # Side length = 2 * half size. 3.0-4.0km usually yields stable top-10/top-10 candidates.
 MEITUAN_MIN_NODE_HOURLY_ORDERS = 0.2  # Drop low-frequency nodes below this avg hourly order count.
 MEITUAN_WORK_HOUR_START = 8
@@ -55,7 +55,7 @@ MAX_FLOW_E = 1000.0  # Large constant for flow constraints
 
 # Costs
 
-ORDER_REVENUE_COEF = 7.0  # Profit coefficient: served order volume * coef (10k CNY unit)
+ORDER_REVENUE_COEF = 6  # Profit coefficient: served order volume * coef (10k CNY unit)
 
 COST_PICKUP = 20.0
 COST_DELIVERY = 20.0
@@ -74,3 +74,6 @@ DRONE_SPEED_KMPH = 30.0
 # Misc
 BIG_M = MEITUAN_NUM_BASES * MAX_FLEET_PER_BASE
 EPS = 1e-6
+
+# Benders options
+INDEPENDENT_MW = True

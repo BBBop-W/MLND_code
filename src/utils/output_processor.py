@@ -35,6 +35,7 @@ class ResultProcessor:
         self.x = {}
         self.y = {}
         self.u = {}
+        self.eta = {}
         self.xi = {}
         self.psi = {}
         self.phi = {}
@@ -51,6 +52,10 @@ class ResultProcessor:
                     self.y[(parts[0], parts[1])] = v.X
             elif v.VarName.startswith("u["):
                 parts = v.VarName[2:-1].split(',')
+                if len(parts) == 2:
+                    self.u[(parts[0], int(parts[1]))] = v.X
+            elif v.VarName.startswith("eta["):
+                parts = v.VarName[4:-1].split(',')
                 if len(parts) == 2:
                     self.u[(parts[0], int(parts[1]))] = v.X
             elif v.VarName.startswith("xi["):
@@ -72,6 +77,8 @@ class ResultProcessor:
         self.open_P = sum(1 for node in self.inst.P if self.x.get(node, 0) > 0.5)
         self.open_D = sum(1 for node in self.inst.D if self.x.get(node, 0) > 0.5)
         self.open_E = sum(1 for node in self.inst.E if self.x.get(node, 0) > 0.5)
+        # Keep explicit alias for downstream consumers after eta rename.
+        self.eta = dict(self.u)
 
         # Summary nodes include physical nodes plus virtual bases L_v.
         self.summary_nodes = list(self.inst.N) + list(self.inst.L_v)
@@ -286,6 +293,7 @@ class ResultProcessor:
                 'x': self.x,
                 'y': self.y,
                 'u': self.u,
+                'eta': self.eta,
                 'phi': self.phi,
                 'psi': self.psi,
                 'rho': self.rho,

@@ -7,10 +7,10 @@ from gurobipy import GRB
 
 from .. import config
 from ..data_processor.instance import Instance
-from .benders_model import IndexSets
+from .benders_main import IndexSets
 
 XHat = Dict[str, int]
-UHat = Dict[Tuple[str, int], int]
+EtaHat = Dict[Tuple[str, int], int]
 TOL = 1e-7
 
 # ======================================================================
@@ -27,13 +27,13 @@ class PrimalSubproblem:
     def solve(
         self,
         x_hat: XHat,
-        u_hat: UHat,
+        eta_hat: EtaHat,
     ) -> Tuple[int, Optional[float], Optional[Dict[str, Any]]]:
         """Build, solve, extract duals, return (status, obj, cut_data)."""
         data = self.data
         inst = self.inst
-        q_hat = {loc: data.service_wait_value(u_hat, [loc]) for loc in data.L}
-        sw_total = data.service_wait_value(u_hat)
+        q_hat = {loc: data.service_wait_value(eta_hat, [loc]) for loc in data.L_hat}
+        sw_total = data.service_wait_value(eta_hat)
 
         m = gp.Model("PrimalSub")
         
@@ -76,7 +76,7 @@ class PrimalSubproblem:
 
         alpha_1 = {}
         for i in data.P:
-            bases = [l for l in data.L if (l, i) in data.A_LP_set]
+            bases = [l for l in data.L_hat if (l, i) in data.A_LP_set]
             if bases:
                 alpha_1[i] = m.addConstr(
                     gp.quicksum(y[l, i] for l in bases) <= x_hat[i],
@@ -132,15 +132,15 @@ class PrimalSubproblem:
             epsilon_1[l, i, s] = m.addConstr( z[l, i, s] <= D_var[l, i],name=f"epsilon_1_{l}_{i}_{s}",)
         # -- (C5b) z ≤ H_i · û[l,s]
             H_i = data.H.get(i, 0.0)
-            epsilon_2[l, i, s] = m.addConstr( z[l, i, s] <= H_i * u_hat[l, s], name=f"epsilon_2_{l}_{i}_{s}",)
+            epsilon_2[l, i, s] = m.addConstr( z[l, i, s] <= H_i * eta_hat[l, s], name=f"epsilon_2_{l}_{i}_{s}",)
         # -- (C5c) D - z ≤ H_i · (1 - û[l,s])
-            epsilon_3[l, i, s] = m.addConstr(D_var[l, i] - z[l, i, s] <= H_i * (1 - u_hat[l, s]),name=f"epsilon_3_{l}_{i}_{s}",)
+            epsilon_3[l, i, s] = m.addConstr(D_var[l, i] - z[l, i, s] <= H_i * (1 - eta_hat[l, s]),name=f"epsilon_3_{l}_{i}_{s}",)
 
         epsilon_4 = {}
         # -- (C6) pickup flow:  psi[l,i] = Σ ρ_s z[l,i,s]  (no master var)
         for l, i in data.A_LP:
             epsilon_4[l, i] = m.addConstr( psi[l, i]
-                <= gp.quicksum(data.rho[s] * z[l, i, s] for s in data.S),
+                == gp.quicksum(data.rho[s] * z[l, i, s] for s in data.S),
                 name=f"epsilon_4_{l}_{i}",
             )
 
@@ -248,52 +248,52 @@ class PrimalSubproblem:
 
         # -- (C15) LV energy:  q̂[lv] + travel ≤ E_lim · replenish
         #    Same parametric structure: b_eff = −q̂[lv] when q̂ moved right.
-        sigma_1 = {}
-        phi_key_set = set(data.phi_keys)
-        for d in data.D:
-            lv = inst.d_to_lv[d]
-            lv_path_keys = [
-                (u_n, v_n, k)
-                for u_n, v_n in data.lp_arcs_from_base.get(lv, [])
-                for k in data.phi_for_arc.get((u_n, v_n), [])
-            ]
-            lv_travel = data.phi_travel_expr(phi, lv_path_keys)
+        # sigma_1 = {}
+        # phi_key_set = set(data.phi_keys)
+        # for d in data.D:
+        #     lv = inst.d_to_lv[d]
+        #     lv_path_keys = [
+        #         (u_n, v_n, k)
+        #         for u_n, v_n in data.lp_arcs_from_base.get(lv, [])
+        #         for k in data.phi_for_arc.get((u_n, v_n), [])
+        #     ]
+        #     lv_travel = data.phi_travel_expr(phi, lv_path_keys)
 
-            lv_replenish = gp.quicksum(
-                phi[d, l_hat, "0"]
-                for l_hat in data.L_hat
-                if (d, l_hat, "0") in phi_key_set
-            )
-            lv_replenish += gp.quicksum(
-                phi[u_n, v_n, k]
-                for u_n, v_n, k in lv_path_keys
-                if k != "0"
-            )
+        #     lv_replenish = gp.quicksum(
+        #         phi[d, l_hat, "0"]
+        #         for l_hat in data.L
+        #         if (d, l_hat, "0") in phi_key_set
+        #     )
+        #     lv_replenish += gp.quicksum(
+        #         phi[u_n, v_n, k]
+        #         for u_n, v_n, k in lv_path_keys
+        #         if k != "0"
+        #     )
 
-            sigma_1[d] = m.addConstr(
-                xi[d] + lv_travel - data.energy_exchange_limit * lv_replenish <= 0,
-                name=f"sigma_1_{d}",
-            )
+        #     sigma_1[d] = m.addConstr(
+        #         xi[d] + lv_travel - data.energy_exchange_limit * lv_replenish <= 0,
+        #         name=f"sigma_1_{d}",
+        #     )
 
-        Constr_dict["sigma1"] = sigma_1
+        # Constr_dict["sigma1"] = sigma_1
 
         
-        for i in data.P:
-            p_keys = [
-                (u_n, v_n, k)
-                for u_n, v_n in data.pd_arcs_from_pickup.get(i, [])
-                for k in data.phi_for_arc.get((u_n, v_n), [])
-            ]
-            m.addConstr(
-                xi[i] + data.phi_travel_expr(phi, p_keys)
-                -data.energy_exchange_limit
-                * gp.quicksum(
-                    phi[u_n, v_n, k]
-                    for u_n, v_n, k in p_keys
-                    if k != "0"
-                ) <= 0,
-                name=f"sigma_2_{i}",
-            )
+        # for i in data.P:
+        #     p_keys = [
+        #         (u_n, v_n, k)
+        #         for u_n, v_n in data.pd_arcs_from_pickup.get(i, [])
+        #         for k in data.phi_for_arc.get((u_n, v_n), [])
+        #     ]
+        #     m.addConstr(
+        #         xi[i] + data.phi_travel_expr(phi, p_keys)
+        #         -data.energy_exchange_limit
+        #         * gp.quicksum(
+        #             phi[u_n, v_n, k]
+        #             for u_n, v_n, k in p_keys
+        #             if k != "0"
+        #         ) <= 0,
+        #         name=f"sigma_2_{i}",
+        #     )
 
         fleet_travel = data.phi_travel_expr(phi, data.phi_keys)
         kappa_1 = m.addConstr(
@@ -305,9 +305,9 @@ class PrimalSubproblem:
         )
 
         # -- (C18) fleet limit:  γ ≤ M · Σ x̂[l]
-        fleet_limit_rhs = config.MAX_FLEET_PER_BASE * sum(
-            x_hat[l] for l in data.L_hat
-        )
+        # fleet_limit_rhs = config.MAX_FLEET_PER_BASE * sum(
+        #     x_hat[l] for l in data.L
+        # )
         # kappa_3 = m.addConstr(
         #     gamma_var <= fleet_limit_rhs, name="kappa_3"
         # )
@@ -327,7 +327,7 @@ class PrimalSubproblem:
             return (
                 m.Status,
                 None,
-                {"kind": "feasibility", "x_hat": dict(x_hat), "u_hat": dict(u_hat)},
+                {"kind": "feasibility", "x_hat": dict(x_hat), "eta_hat": dict(eta_hat)},
             )
 
         if m.Status != GRB.OPTIMAL:
@@ -354,283 +354,9 @@ class PrimalSubproblem:
             "z_star": obj,
             "duals": duals,
             "x_hat": dict(x_hat),
-            "u_hat": dict(u_hat),
+            "eta_hat": dict(eta_hat),
         }
         self.model = m
         
         return m.Status, obj, cut_data
 
-
-# ======================================================================
-# Full Benders driver
-# ======================================================================
-
-# class BendersPrimal:
-#     """Benders decomposition with cuts from primal-subproblem duals."""
-
-#     def __init__(
-#         self,
-#         instance: Instance,
-#         max_iter: int = 100,
-#         gap_tol: float = 1e-4,
-#         time_limit: float = 3600,
-#         verbose: bool = True,
-#     ):
-#         self.inst = instance
-#         self.data = IndexSets(instance)
-#         self.max_iter = max_iter
-#         self.gap_tol = gap_tol
-#         self.time_limit = time_limit
-#         self.verbose = verbose
-
-#         self.model: Optional[gp.Model] = None
-#         self.x: Optional[gp.tupledict] = None
-#         self.u: Optional[gp.tupledict] = None
-#         self.theta: Optional[gp.Var] = None
-#         self.best_obj = -math.inf
-#         self.best_sol: Optional[Dict[str, Any]] = None
-#         self._visited_master_keys: set = set()
-
-#     def _build_master(self) -> None:
-#         data = self.data
-#         inst = self.inst
-
-#         mdl = gp.Model("BendersMaster_Primal")
-#         mdl.setParam("OutputFlag", 1 if self.verbose else 0)
-
-#         x = mdl.addVars(data.N + data.L_v, vtype=GRB.BINARY, name="x")
-#         u = mdl.addVars(data.L, data.S, vtype=GRB.BINARY, name="u")
-#         theta = mdl.addVar(lb=0.0, ub=data.total_demand, name="theta")
-#         mdl.setObjective(theta, GRB.MAXIMIZE)
-
-#         # service level selection
-#         for l in data.L:
-#             mdl.addConstr(
-#                 gp.quicksum(u[l, s] for s in data.S) == x[l],
-#                 name=f"svc_{l}",
-#             )
-
-#         # connectivity
-#         for n in data.P + data.D:
-#             bases = data.nearby_bases.get(n, [])
-#             if bases:
-#                 mdl.addConstr(
-#                     x[n] <= gp.quicksum(x[b] for b in bases),
-#                     name=f"near_base_{n}",
-#                 )
-#             else:
-#                 mdl.addConstr(x[n] == 0, name=f"forbid_{n}")
-
-#         for n in data.L_v + data.P:
-#             swaps = data.nearby_swaps.get(n, [])
-#             if swaps:
-#                 mdl.addConstr(
-#                     x[n] <= gp.quicksum(x[e] for e in swaps),
-#                     name=f"near_swap_{n}",
-#                 )
-#             else:
-#                 mdl.addConstr(x[n] == 0, name=f"forbid_swap_{n}")
-
-#         if config.USE_VIRTUAL_BASES_OPT:
-#             for d in data.D:
-#                 mdl.addConstr(
-#                     x[inst.d_to_lv[d]] <= x[d],
-#                     name=f"vbase_{d}",
-#                 )
-
-#         fc = gp.quicksum(inst.f[n] * x[n] for n in data.N)
-#         mw = data.service_wait_expr(u)
-#         mdl.addConstr(fc + config.COST_DRONE * mw <= config.BUDGET, name="budget_lb")
-#         mdl.addConstr(
-#             mw <= config.MAX_FLEET_PER_BASE * gp.quicksum(x[b] for b in data.L_hat),
-#             name="fleet_lb",
-#         )
-#         mdl.addConstr(
-#             theta <= gp.quicksum(data.H[i] * x[i] for i in data.P),
-#             name="theta_P",
-#         )
-#         mdl.addConstr(
-#             theta <= gp.quicksum(x[j] for j in data.D) * data.total_demand,
-#             name="theta_D",
-#         )
-
-
-#         self.model = mdl
-#         self.x = x
-#         self.u = u
-#         self.theta = theta
-
-#     def get_solution_binary(self, model: gp.Model):
-#         x_hat = {
-#             n: 1 if model.cbGetSolution(self.x[n]) > 0.5 else 0
-#             for n in self.data.N + self.data.L_v
-#         }
-#         u_hat = {
-#             (l, s): 1 if model.cbGetSolution(self.u[l, s]) > 0.5 else 0
-#             for l in self.data.L
-#             for s in self.data.S
-#         }
-#         tv = model.cbGetSolution(self.theta)
-#         return x_hat, u_hat, tv
-
-#     def _master_solution_key(self, x_hat, u_hat):
-#         return (
-#             tuple(x_hat[n] for n in self.data.N + self.data.L_v),
-#             tuple(u_hat[l, s] for l in self.data.L for s in self.data.S),
-#         )
-
-#     def _cut_check(self, cd: dict) -> float:
-#         """Evaluate affine cut RHS at (x_hat, u_hat) for consistency check."""
-        
-#         duals = cd["duals"]
-#         data = self.data
-#         inst = self.inst
-#         XHat = cd["x_hat"]
-#         UHat = cd["u_hat"]
-
-#         rhs = 0
-        
-#         rhs += sum(pi_i * XHat[i] for i, pi_i in duals["alpha_1"].items())
-
-#         rhs += sum(pi_li * XHat[l] for (l, i), pi_li in duals["alpha_2"].items())
-
-#         rhs += sum(pi_lij * XHat[j] for (l, i, j), pi_lij in duals["alpha_4"].items())
-
-#         rhs += sum(pi_lij * (1 - XHat[j]) for (l, i, j), pi_lij in duals["alpha_5"].items())
-
-#         # rhs += sum(pi_lis * data.H.get(i, 0.0) * UHat[l, s] for (l, i, s), pi_lis in duals["epsilon_2"].items())
-
-#         rhs += sum(pi_lis * data.H.get(i, 0.0) * (1 - UHat[l, s]) for (l, i, s), pi_lis in duals["epsilon_3"].items())
-
-#         rhs += sum(pi_ij * inst.h.get((i, j), 0.0) for (i, j), pi_ij in duals["beta_2"].items())
-
-#         rhs -= sum(pi_lv * data.service_wait.get(s, 0.0) * UHat[lv, s] for lv, pi_lv in duals["pi_1"].items() for s in data.S)
-
-#         rhs += sum(pi_n * config.MAX_WAITING_FACTOR_P * XHat[n] for n, pi_n in duals["pi_2"].items() if n in data.P)
-#         rhs += sum(pi_n * config.MAX_WAITING_FACTOR_D * XHat[n] for n, pi_n in duals["pi_2"].items() if n in data.D)
-
-#         rhs += sum(pi_k * config.MAX_FLOW_E * XHat[k] for k, pi_k in duals["pi_3"].items())
-
-#         # rhs += sum(2 * pi_delta_1 * math.sqrt(inst.mu[n]) for n, pi_delta_1 in duals["delta_1"].items())
-#         # rhs += sum(pi_delta_2 * (1 - inst.mu[n]) for n, pi_delta_2 in duals["delta_2"].items())
-#         # rhs += sum(pi_Delta * (inst.mu[n] + 1) for n, pi_Delta in duals["Delta"].items())
-        
-#         # rhs -= sum(pi_sigma_1 * data.service_wait.get(s, 0.0) * UHat[lv, s] for lv, pi_sigma_1 in duals["sigma_1"].items() for s in data.S)
-        
-#         rhs -= duals["kappa_1"] * sum(data.service_wait.get(s, 0.0) * UHat[l, s] for l in data.L for s in data.S)
-#         rhs += duals["kappa_2"] *(config.BUDGET - sum(inst.f[n]* XHat[n] for n in data.N) )/config.COST_DRONE
-#         rhs += duals["kappa_3"] *sum(config.MAX_FLEET_PER_BASE * XHat[l] for l in data.L_hat)
-
-#         return rhs
-
-#     def _add_cut(self, model: gp.Model, cut_data: dict) -> None:
-#         """Add optimality cut using coefficients computed from subproblem dual multipliers."""
-#         expr = 0
-#         duals = cut_data["duals"]
-#         data = self.data
-#         inst = self.inst
-
-#         expr += gp.quicksum(pi_i * self.x[i] for i, pi_i in duals["alpha_1"].items())
-
-#         expr += gp.quicksum(pi_li * self.x[l] for (l, i), pi_li in duals["alpha_2"].items())
-
-#         expr += gp.quicksum(pi_lij * self.x[j] for (l, i, j), pi_lij in duals["alpha_4"].items())
-
-#         expr += gp.quicksum(pi_lij * (1 - self.x[j]) for (l, i, j), pi_lij in duals["alpha_5"].items())
-
-#         # expr += gp.quicksum(pi_lis * data.H.get(i, 0.0) * self.u[l, s] for (l, i, s), pi_lis in duals["epsilon_2"].items())
-
-#         expr += gp.quicksum(pi_lis * data.H.get(i, 0.0) * (1 - self.u[l, s]) for (l, i, s), pi_lis in duals["epsilon_3"].items())
-
-#         expr += gp.quicksum(pi_ij * inst.h.get((i, j), 0.0) for (i, j), pi_ij in duals["beta_2"].items())
-
-#         expr -= gp.quicksum(pi_lv * data.service_wait.get(s, 0.0) * self.u[lv, s] for lv, pi_lv in duals["pi_1"].items() for s in data.S)
-
-#         expr += gp.quicksum(pi_n * config.MAX_WAITING_FACTOR_P * self.x[n] for n, pi_n in duals["pi_2"].items() if n in data.P)
-#         expr += gp.quicksum(pi_n * config.MAX_WAITING_FACTOR_D * self.x[n] for n, pi_n in duals["pi_2"].items() if n in data.D)
-
-#         expr += gp.quicksum(pi_k * config.MAX_FLOW_E * self.x[k] for k, pi_k in duals["pi_3"].items())
-
-#         # expr += gp.quicksum(2 * pi_delta_1 * math.sqrt(inst.mu[n]) for n, pi_delta_1 in duals["delta_1"].items())
-#         # expr += gp.quicksum(pi_delta_2 * (1 - inst.mu[n]) for n, pi_delta_2 in duals["delta_2"].items())
-#         # expr += gp.quicksum(pi_Delta * (inst.mu[n] + 1) for n, pi_Delta in duals["Delta"].items())
-        
-#         # expr -= gp.quicksum(pi_sigma_1 * data.service_wait.get(s, 0.0) * self.u[lv, s] for lv, pi_sigma_1 in duals["sigma_1"].items() for s in data.S)
-        
-#         expr -= duals["kappa_1"] * gp.quicksum(data.service_wait.get(s, 0.0) * self.u[l, s] for l in data.L for s in data.S)
-#         expr += duals["kappa_2"] * ( config.BUDGET - gp.quicksum(inst.f[n]* self.x[n] for n in data.N) )/config.COST_DRONE
-#         expr += duals["kappa_3"] * gp.quicksum(config.MAX_FLEET_PER_BASE * self.x[l] for l in data.L_hat)
-
-
-#         model.cbLazy(self.theta <= expr)
-    
-#     # alpha_2
-#     # epsilon_1
-#     # kappa_3
-
-
-#     # def _add_nogood(self, model: gp.Model, cd: dict) -> None:
-#     #     """Feasibility cut: exclude the current binary combination."""
-#     #     xh = cd["x_hat"]
-#     #     ones = [self.x[n] for n in self.data.N + self.data.L_v if xh[n] == 1]
-#     #     zeros = [self.x[n] for n in self.data.N + self.data.L_v if xh[n] == 0]
-#     #     model.cbLazy(
-#     #         gp.quicksum(1 - v for v in ones) + gp.quicksum(zeros) >= 1
-#     #     )
-
-#     def solve(self) -> Optional[float]:
-#         self._build_master()
-#         sub = PrimalSubproblem(self.inst, self.data)
-#         t0 = time.time()
-
-#         def callback(model: gp.Model, where: int):
-#             if where != GRB.Callback.MIPSOL:
-#                 return
-#             # if time.time() - t0 > self.time_limit:
-#             #     model.terminate()
-#             #     return
-#             # if len(self._visited_master_keys) >= self.max_iter:
-#             #     model.terminate()
-#             #     return
-
-#             xh, uh, tv = self.get_solution_binary(model)
-#             master_key = self._master_solution_key(xh, uh)
-#             if master_key in self._visited_master_keys:
-#                 return
-#             self._visited_master_keys.add(master_key)
-
-#             status, obj, cd = sub.solve(xh, uh)
-#             # for v in sub.model.getVars():
-#             #     if v.VarName.startswith("psi["):
-#             #         if v.X > 0.00001:
-#             #             print(f"Nonzero psi: {v.VarName} = {v.X:.6f}")
-
-#             if obj is not None:
-#                 rhs_at_inc = self._cut_check(cd)
-#                 tol = 1e-5 * max(1.0, abs(obj))
-#                 if abs(rhs_at_inc - obj) > tol:
-#                     print(
-#                             "Inconsistent cut: "
-#                             f"RHS(x_hat,u_hat)={rhs_at_inc:.6f}, obj={obj:.6f}, "
-#                             f"diff={rhs_at_inc - obj:.6e}"
-#                         )
-#                 # else:
-#                     # print(
-#                     #     f"Cut check passed: RHS(x_hat,u_hat)={rhs_at_inc:.6f}, obj={obj:.6f}"
-#                     # )
-                    
-#             # if cd["kind"] == "feasibility":
-#             #     self._add_nogood(model, cd)
-#             #     return
-
-#             if obj is not None:
-#                 self._add_cut(model, cd)
-
-#             if obj is not None and obj > self.best_obj:
-#                 self.best_obj = obj
-#                 self.best_sol = {"x": xh, "u": uh, "obj": obj}
-
-#         self.model.setParam("LazyConstraints", 1)
-#         self.model.optimize(callback)
-#         self.model.write("benders_primal_master.lp")
-#         return self.model.ObjVal if self.model.Status == GRB.OPTIMAL else None

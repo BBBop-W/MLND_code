@@ -1,6 +1,5 @@
 import gurobipy as gp
 from gurobipy import GRB
-import numpy as np
 import re
 from ..data_processor.instance import Instance
 from .. import config
@@ -9,17 +8,20 @@ class MLNDModel:
     def __init__(self, instance: Instance):
         self.inst = instance
         self.model = gp.Model("MLND_SOCP")
+        self.model.setParam('Threads', 1)
         
         # Accessing sets for convenience
-        self.L_hat = self.inst.L_hat # Physical bases (always included)
+        physical_bases = self.inst.L_hat
         
         # Choice of using virtual bases (chaining) for optimization
         if config.USE_VIRTUAL_BASES_OPT:
             self.L_v = self.inst.L_v
-            self.L = self.inst.L_hat + self.inst.L_v
+            self.L = physical_bases
+            self.L_hat = physical_bases + self.inst.L_v
         else:
             self.L_v = []
-            self.L = self.inst.L_hat
+            self.L = physical_bases
+            self.L_hat = physical_bases
             
         self.P = self.inst.P
         self.D = self.inst.D
@@ -79,13 +81,13 @@ class MLNDModel:
 
         # If a physical base is opened, its corresponding swapping station must be open.
         # This is one-way only: E may be open while L is closed.
-        for l_node in self.L_hat:
+        for l_node in self.L:
             e_node = self._corresponding_e_for_l(l_node)
             if e_node is not None:
                 self.model.addConstr(x[l_node] <= x[e_node], name=f"link_base_swap_{l_node}_{e_node}")
 
-        # u_ls: binary service level selection
-        u = self.model.addVars(self.L, self.S, vtype=GRB.BINARY, name="u")
+        # eta_ls: binary service level selection
+        eta = self.model.addVars(self.L_hat, self.S, vtype=GRB.BINARY, name="eta")
         
         # y_li: proportion of orders assigned
         y = self.model.addVars(self.A_LP, lb=0.0, name="y")
@@ -134,22 +136,37 @@ class MLNDModel:
         # Nearby-base connectivity: each pickup/delivery must have at least one active base neighbor
         for i in self.P + self.D:
             self.model.addConstr(
-                x[i] <= gp.quicksum(x[l] for l in self.L_hat if (l, i) in self.A or (i, l) in self.A),
+                x[i] <= gp.quicksum(x[l] for l in self.L if (l, i) in self.A or (i, l) in self.A),
                 name=f"nodes_nearby_{i}",
             )
+
+        for n in self.L_v + self.P:
+            if n in self.L_v:
+                candidate_arcs = [(u_node, v_node) for (u_node, v_node) in self.A_LP if u_node == n]
+            else:
+                candidate_arcs = [(u_node, v_node) for (u_node, v_node) in self.A_PD if u_node == n]
+
+            swaps = sorted({swap for arc in candidate_arcs for swap in self.E_uv.get(arc, [])})
+            if swaps:
+                self.model.addConstr(
+                    x[n] <= gp.quicksum(x[e] for e in swaps),
+                    name=f"near_swap_{n}",
+                )
+            else:
+                self.model.addConstr(x[n] == 0, name=f"forbid_swap_{n}")
         
 
         # 1. Logical Assignment and Service Level Selection
         for i in self.P:
-            l_for_i = [l for l in self.L if (l, i) in self.A_LP]
+            l_for_i = [l for l in self.L_hat if (l, i) in self.A_LP]
             if l_for_i:
                 self.model.addConstr(gp.quicksum(y[l, i] for l in l_for_i) <= x[i], name=f"assign1_{i}")
         
         for (l, i) in self.A_LP:
             self.model.addConstr(y[l, i] <= x[l], name=f"assign2_{l}_{i}")
             
-        for l in self.L:
-            self.model.addConstr(gp.quicksum(u[l, s] for s in self.S) == x[l], name=f"service_select_{l}")
+        for l in self.L_hat:
+            self.model.addConstr(gp.quicksum(eta[l, s] for s in self.S) == x[l], name=f"service_select_{l}")
 
         # 2. PWLA Exact Linearization (Big-M)
         for (l, i) in self.A_LP:
@@ -166,8 +183,8 @@ class MLNDModel:
                                 
             for s in self.S:
                 self.model.addConstr(z[l, i, s] <= D_var[l, i], name=f"lin_z1a_{l}_{i}_{s}")
-                self.model.addConstr(z[l, i, s] <= H_i * u[l, s], name=f"lin_z1b_{l}_{i}_{s}")
-                self.model.addConstr(z[l, i, s] >= D_var[l, i] - H_i * (1 - u[l, s]), name=f"lin_z2_{l}_{i}_{s}")
+                self.model.addConstr(z[l, i, s] <= H_i * eta[l, s], name=f"lin_z1b_{l}_{i}_{s}")
+                self.model.addConstr(z[l, i, s] >= D_var[l, i] - H_i * (1 - eta[l, s]), name=f"lin_z2_{l}_{i}_{s}")
                 
             self.model.addConstr(psi[l, i] == gp.quicksum(self.rho_vals[s] * z[l, i, s] for s in self.S), 
                                 name=f"linear_logical_flow_{l}_{i}")
@@ -202,13 +219,9 @@ class MLNDModel:
 
         if config.USE_VIRTUAL_BASES_OPT:
             for lv in self.L_v:
-                lhs = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
+                lhs = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * eta[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
                 rhs = config.MAX_WAITING_FACTOR_LV * gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
                 self.model.addConstr(lhs <= rhs, name=f"vir_wait_{lv}")
-
-                # lhs = gp.quicksum(D_var[l,i] for (l, i) in self.A_LP if l == lv) - gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv)
-                # rhs = 1/ config.MAX_WAITING_FACTOR_LV * x[lv]
-                # self.model.addConstr(lhs >= rhs, name=f"vir_wait_demand_{lv}")
 
         # 5. Second-Order Cone Programming (SOCP) Reformulation for Queues
         for i_node in self.P + self.D:
@@ -222,12 +235,12 @@ class MLNDModel:
         if config.USE_VIRTUAL_BASES_OPT:
             for d in self.D:
                 lv = self.inst.d_to_lv[d]
-                # wait_term = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
+                # wait_term = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * eta[lv, s] for s in self.S if self.rho_vals[s] < 1.0)
                 # wait_term = gp.quicksum(psi[lv, i] for (l_idx, i) in self.A_LP if l_idx == lv) * config.MAX_WAITING_FACTOR_LV
                 wait_term = xi[d]
                 transit_lhs = gp.LinExpr()
                 replenish_rhs = gp.LinExpr()
-                replenish_rhs += gp.quicksum(phi[d, l, '0'] for l in self.L_hat if (d, l, '0') in phi)  # Replenishment from direct flights to deliveries
+                replenish_rhs += gp.quicksum(phi[d, l, '0'] for l in self.L if (d, l, '0') in phi)  # Replenishment from direct flights to deliveries
 
                 for (u_node, i_node) in self.A_LP:
                     if u_node == lv:
@@ -273,7 +286,7 @@ class MLNDModel:
                         expr += phi[u_idx, v_idx, k] * time_detour
             return expr
 
-        fleet_sum = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * u[l, s] for l in self.L for s in self.S if self.rho_vals[s] < 1.0) + \
+        fleet_sum = gp.quicksum((self.rho_vals[s] / (1 - self.rho_vals[s])) * eta[l, s] for l in self.L_hat for s in self.S if self.rho_vals[s] < 1.0) + \
                     gp.quicksum(xi[i_node] for i_node in self.P + self.D) + \
                     get_phi_time_expr()
                     
