@@ -21,10 +21,10 @@ def run_experiment():
     with open(global_results_csv, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([
-            'Scale_P', 'Scale_D', 'Scale_E', 'Scale_L',
+            'Scale_H', 'Scale_E', 'Scale_L',
             'Time(s)', 'Gap(%)', 'Rho',
             'NetProfit', 'CompletedVolume', 'CompletedVolumeRevenue', 'TotalCost',
-            'Open_P', 'Open_D', 'Open_E', 'Open_L'
+            'Open_H', 'Open_E', 'Open_L'
         ])
 
     meituan_raw_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Meituan-TSL", "all_waybill_info_meituan_0322.csv")
@@ -34,13 +34,12 @@ def run_experiment():
 
     # Loop from scale 20 to 100 with increment of 5
     for scale in range(10, 105, 5):
-        num_p = scale
-        num_d = scale
+        num_h = scale
         num_e = scale // 2
         num_l = scale // 4
         
         print(f"" + "="*60)
-        print(f"RUNNING EXPERIMENT SCALE: P={num_p}, D={num_d}, E={num_e}, L={num_l}")
+        print(f"RUNNING EXPERIMENT SCALE: H={num_h}, E={num_e}, L={num_l}")
         print("="*60)
         
         scale_dir = os.path.join(experiment_dir, f"scale_{scale}")
@@ -50,8 +49,7 @@ def run_experiment():
         generator.generate_meituan_hourly(
             raw_data_path=meituan_raw_file, 
             save_dir=scale_dir,
-            num_pickup=num_p,
-            num_delivery=num_d,
+            num_hubs=num_h,
             num_bases=num_l,
             num_swapping=num_e,
             map_half_size_km=config.MEITUAN_MAP_HALF_SIZE_KM,
@@ -100,16 +98,15 @@ def run_experiment():
             with open(global_results_csv, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    num_p, num_d, num_e, num_l,
+                    num_h, num_e, num_l,
                     f"{processor.run_time:.2f}",
                     f"{gap_val:.2f}",
-                    f"{processor.rho:.4f}",
+                    f"{processor.rho_avg:.4f}",
                     net_profit_str,
                     completed_volume_str,
                     completed_revenue_str,
                     total_cost_str,
-                    processor.open_P,
-                    processor.open_D,
+                    processor.open_H,
                     processor.open_E,
                     processor.open_L
                 ])
@@ -118,10 +115,10 @@ def run_experiment():
             with open(global_results_csv, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    num_p, num_d, num_e, num_l,
+                    num_h, num_e, num_l,
                     "Timeout/Fail", "N/A", "N/A",
                     "N/A", "N/A", "N/A", "N/A",
-                    "N/A", "N/A", "N/A", "N/A"
+                    "N/A", "N/A", "N/A"
                 ])
 
 if __name__ == "__main__":

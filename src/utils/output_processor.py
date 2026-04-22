@@ -5,9 +5,10 @@ import numpy as np
 import csv
 import pickle
 from src import config
+from src.data_processor.instance import Instance
 
 class ResultProcessor:
-    def __init__(self, model, instance):
+    def __init__(self, model, instance: Instance):
         self.model = model.model
         self.inst = instance
         
@@ -28,7 +29,7 @@ class ResultProcessor:
         self.run_time = self.model.Runtime
             
         try:
-            self.gamma = self.model.getVarByName("gamma").X
+            self.gamma = self.model.getVarByName("Gamma").X
         except:
             self.gamma = None
         
@@ -39,6 +40,10 @@ class ResultProcessor:
         self.xi = {}
         self.psi = {}
         self.phi = {}
+        self.z = {}
+        self.rho = {}
+        self.lambd = {}
+        self.theta = {}
 
         Vars = self.model.getVars()
         
@@ -67,30 +72,42 @@ class ResultProcessor:
                     self.psi[(parts[0], parts[1])] = v.X
             elif v.VarName.startswith("phi["):
                 parts = v.VarName[4:-1].split(',')
+                if len(parts) == 2:
+                    self.phi[(parts[0], parts[1])] = v.X
+            elif v.VarName.startswith("z["):
+                parts = v.VarName[2:-1].split(',')
+                if len(parts) == 2:
+                    self.z[(parts[0], int(parts[1]))] = v.X
+            elif v.VarName.startswith("rho_l["):
+                key = v.VarName[6:-1]
+                self.rho[key] = v.X
+            elif v.VarName.startswith("rho_ell["):
+                key = v.VarName[8:-1]
+                self.rho[key] = v.X
+            elif v.VarName.startswith("lambda["):
+                key = v.VarName[7:-1]
+                self.lambd[key] = v.X
+            elif v.VarName.startswith("theta["):
+                parts = v.VarName[6:-1].split(',')
                 if len(parts) == 3:
-                    u_node = parts[0]
-                    v_node = parts[1]
-                    k_node = parts[2]
-                    self.phi[(u_node, v_node, k_node)] = v.X
-                    
-        self.open_L = sum(1 for node in self.inst.L_hat if self.x.get(node, 0) > 0.5)
-        self.open_P = sum(1 for node in self.inst.P if self.x.get(node, 0) > 0.5)
-        self.open_D = sum(1 for node in self.inst.D if self.x.get(node, 0) > 0.5)
+                    self.theta[(parts[0], parts[1], parts[2])] = v.X
+
+        self.open_L = sum(1 for node in self.inst.L if self.x.get(node, 0) > 0.5)
+        self.open_H = sum(1 for node in self.inst.H if self.x.get(node, 0) > 0.5)
         self.open_E = sum(1 for node in self.inst.E if self.x.get(node, 0) > 0.5)
         # Keep explicit alias for downstream consumers after eta rename.
         self.eta = dict(self.u)
 
         # Summary nodes include physical nodes plus virtual bases L_v.
-        self.summary_nodes = list(self.inst.N) + list(self.inst.L_v)
+        self.summary_nodes = list(self.inst.L) + list(self.inst.L_v) + list(self.inst.H) + list(self.inst.E)
 
-        # Node-level flow accounting:
-        # Prefer phi-based physical legs so swapping-station traffic is counted.
-        # Fallback to psi when phi is unavailable (e.g., master-only outputs).
+        # Node-level flow accounting for printed/exported summaries.
+        # Prefer theta-based leg decomposition so swapping stations (E)
+        # receive correct in/out flow. Fallback to psi/phi when theta is absent.
         self.node_inflow = {node: 0.0 for node in self.summary_nodes}
         self.node_outflow = {node: 0.0 for node in self.summary_nodes}
 
         flow_tol = 1e-5
-        has_phi_flow = any(val > flow_tol for val in self.phi.values())
 
         def add_leg(u_node, v_node, flow):
             if u_node in self.node_outflow:
@@ -98,14 +115,15 @@ class ResultProcessor:
             if v_node in self.node_inflow:
                 self.node_inflow[v_node] += flow
 
-        if has_phi_flow:
-            for (u_node, v_node, k_node), flow in self.phi.items():
+        has_theta_flow = any(flow > flow_tol for flow in self.theta.values())
+        if has_theta_flow:
+            for (u_node, v_node, k_node), flow in self.theta.items():
                 if flow <= flow_tol:
                     continue
                 if k_node == '0':
                     add_leg(u_node, v_node, flow)
                 else:
-                    # Decompose detour into two flown legs: u->k and k->v.
+                    # Swapped flow is decomposed into two flown legs.
                     add_leg(u_node, k_node, flow)
                     add_leg(k_node, v_node, flow)
         else:
@@ -113,6 +131,46 @@ class ResultProcessor:
                 if flow <= flow_tol:
                     continue
                 add_leg(u_node, v_node, flow)
+            for (u_node, v_node), flow in self.phi.items():
+                if flow <= flow_tol:
+                    continue
+                add_leg(u_node, v_node, flow)
+
+        # Validate consistency: if assignment implies non-zero base throughput,
+        # physical base flow must not be zero.
+        hub_outgoing = {h_node: 0.0 for h_node in self.inst.H}
+        for (i_node, j_node), flow in self.psi.items():
+            if i_node in hub_outgoing and flow > flow_tol:
+                hub_outgoing[i_node] += flow
+
+        self.base_assigned_flow = {l_node: 0.0 for l_node in self.inst.L}
+        for (i_node, l_node), y_val in self.y.items():
+            if y_val <= flow_tol:
+                continue
+            if l_node in self.base_assigned_flow and i_node in hub_outgoing:
+                self.base_assigned_flow[l_node] += y_val * hub_outgoing[i_node]
+
+        inconsistent_bases = []
+        for l_node in self.inst.L:
+            expected_flow = self.base_assigned_flow.get(l_node, 0.0)
+            if expected_flow <= flow_tol:
+                continue
+            phys_in = self.node_inflow.get(l_node, 0.0)
+            phys_out = self.node_outflow.get(l_node, 0.0)
+            if phys_in <= flow_tol and phys_out <= flow_tol:
+                inconsistent_bases.append((l_node, expected_flow, phys_in, phys_out))
+
+        if inconsistent_bases:
+            preview = "; ".join(
+                f"{l}: expected~{exp_f:.4f}, in={in_f:.4f}, out={out_f:.4f}"
+                for l, exp_f, in_f, out_f in inconsistent_bases[:5]
+            )
+            raise ValueError(
+                "Model-flow inconsistency detected: base has assignment-implied throughput "
+                "but zero physical flow. "
+                f"Examples: {preview}"
+            )
+
         self.node_total_flow = {
             node: self.node_inflow[node] + self.node_outflow[node]
             for node in self.summary_nodes
@@ -121,36 +179,25 @@ class ResultProcessor:
         # Use a flow-based served-demand metric so summaries remain stable even if
         # objective reporting changes (e.g., multi-objective/tie-break settings).
         self.served_demand = sum(
-            self.psi.get((i, j), 0.0) for (i, j) in self.inst.A_PD
+            self.psi.get((i, j), 0.0) for (i, j) in self.inst.A_HH
         )
 
         # Profit/cost accounting used by summary output.
         self.served_revenue = config.ORDER_REVENUE_COEF * self.served_demand
         self.fixed_cost = sum(
-            self.inst.f.get(node, 0.0) * self.x.get(node, 0.0) for node in self.inst.N
+            self.inst.f.get(node, 0.0) * self.x.get(node, 0.0) for node in self.inst.L + self.inst.E
         )
+        f_hub = config.COST_HUB
+        self.fixed_cost += sum(f_hub[c] * self.z.get((i, c), 0.0) for i in self.inst.H for c in range(len(config.MU_HUB)))
+        flight_coef = getattr(config, "COST_FLIGHT_TIME", 0.1)
+        self.flight_cost = flight_coef * sum(v for v in self.theta.values())
         gamma_val = self.gamma if self.gamma is not None else 0.0
         self.drone_cost = config.COST_DRONE * gamma_val
-        self.total_cost = self.fixed_cost + self.drone_cost
+        self.total_cost = self.fixed_cost + self.flight_cost + self.drone_cost
         self.net_profit = self.served_revenue - self.total_cost
-        
-        active_rhos = [config.SERVICE_LEVELS[s] for l in self.inst.L_hat for s in range(len(config.SERVICE_LEVELS)) if self.u.get((l, s), 0) > 0.5]
-        self.rho = sum(active_rhos) / len(active_rhos) if active_rhos else 0.0
+        self.rho_avg = float(np.mean(list(self.rho.values()))) if self.rho else 0.0
 
-    def _get_node_rho(self, node):
-        if node in self.inst.L:
-            for s in range(len(config.SERVICE_LEVELS)):
-                if self.u.get((node, s), 0) > 0.5:
-                    return config.SERVICE_LEVELS[s]
-            return 0.0
 
-        if node in self.inst.P or node in self.inst.D:
-            mu_val = self.inst.mu.get(node, 0.0)
-            if mu_val > 0:
-                return self.node_inflow.get(node, 0.0) / mu_val
-            return None
-
-        return None
 
     def _rho_to_l_metric(self, rho_val):
         if rho_val is None:
@@ -160,10 +207,6 @@ class ResultProcessor:
             return None
         return rho_val / (1.0 - rho_val)
 
-    def _get_node_rho_l(self, node):
-        rho_val = self._get_node_rho(node)
-        l_val = self._rho_to_l_metric(rho_val)
-        return rho_val, l_val
 
     def _is_all_zero_row(self, open_raw, in_flow, out_flow, rho_val, l_val):
         tol = 1e-5
@@ -180,13 +223,17 @@ class ResultProcessor:
 
     def print_summary(self):
         print("\n" + "="*50)
-        print("OPTIMIZATION RESULT SUMMARY")
+        if self.obj_val is not None:
+            print(f"OPTIMIZATION RESULT SUMMARY: {self.obj_val:.4f}")
+        else:
+            print("OPTIMIZATION RESULT SUMMARY")
         print("="*50)
         print(f"Net Profit                   : {self.net_profit:.4f}")
         print(f"Completed Volume             : {self.served_demand:.4f}")
         print(f"Completed Volume Revenue     : {self.served_revenue:.4f}")
         print(f"Total Cost                   : {self.total_cost:.4f}")
         print(f"  - Fixed Station Cost       : {self.fixed_cost:.4f}")
+        print(f"  - Flight Time Cost         : {self.flight_cost:.4f}")
         print(f"  - Drone Cost               : {self.drone_cost:.4f}")
         print(
             f"Model Objective              : {self.obj_val:.4f}"
@@ -197,33 +244,32 @@ class ResultProcessor:
             print(f"Total Aircraft (gamma)        : {self.gamma:.4f}")
         else:
             print("Total Aircraft (gamma)        : N/A")
-        print(f"Average Service Level (rho)  : {self.rho:.4f}")
+        print(f"Average Service Level (rho)  : {self.rho_avg:.4f}" if self.rho else "Average Service Level (rho)  : N/A")
         print(f"Runtime                      : {self.run_time:.2f}s")
         print(f"Gap                          : {self.gap*100:.2f}%" if self.gap is not None else "Gap: N/A")
         
         print(f"\nOpen Stations:")
-        print(f"  Bases (L)       : {self.open_L} / {len(self.inst.L_hat)}")
-        print(f"  Pickups (P)     : {self.open_P} / {len(self.inst.P)}")
-        print(f"  Deliveries (D)  : {self.open_D} / {len(self.inst.D)}")
+        print(f"  Bases (L)       : {self.open_L} / {len(self.inst.L)}")
+        print(f"  Hubs (H)        : {self.open_H} / {len(self.inst.H)}")
         print(f"  Swapping (E)    : {self.open_E} / {len(self.inst.E)}")
         
         print(f"\nActive Assignments (y_li > 0.01):")
-        y_active = [(l, p, val) for (l, p), val in self.y.items() if val > 0.01]  # Only show if base has an active service level
+        y_active = [(i, l, val) for (i, l), val in self.y.items() if val > 0.01]
 
-        from src import config
-        for l, p, val in y_active:
-            rho = [config.SERVICE_LEVELS[s] for s in range(len(config.SERVICE_LEVELS)) if  self.u.get((l, s), 0)> 0.01]
-            if rho and rho[0] > 0.01:
-                print(f"  Base {l} assigned to Pickup {p} with weight {val:.4f} and rho {rho[0]}")
+        for i, l, val in y_active[:10]:
+            rho_l = self.rho.get(l, 0.0)
+            print(f"  Base {l} assigned to Hub {i} with y={val:.4f}, rho_l={rho_l:.4f}")
         if len(y_active) > 10:
             print(f"  ... and {len(y_active) - 10} more.")
 
         flow_tol = 1e-5
         active_phi_edges = sum(1 for v in self.phi.values() if v > flow_tol)
         active_psi_edges = sum(1 for v in self.psi.values() if v > flow_tol)
+        active_theta_edges = sum(1 for v in self.theta.values() if v > flow_tol)
         print(f"\nActive edge counts (tol={flow_tol:g}):")
         print(f"  phi edges       : {active_phi_edges}")
         print(f"  psi edges       : {active_psi_edges}")
+        print(f"  theta edges     : {active_theta_edges}")
 
         # Dangling open stations: open physical nodes with no significant incident flow.
         dangling = []
@@ -239,39 +285,57 @@ class ResultProcessor:
             print(f"  Examples: {preview}{' ...' if len(dangling) > 10 else ''}")
 
         print("\nPer-node flow summary:")
-        print("  NodeID | Open | InFlow | OutFlow |   rho |     L")
+        print("  NodeID | Open | InFlow | OutFlow | Lambda |   rho |     L |    Xi")
         for node in self.summary_nodes:
-            open_raw = self.x.get(node, None)
+            if node in self.inst.L_v:
+                open_raw = self.x.get(self.inst.lv_to_h.get(node), None)
+            else:
+                open_raw = self.x.get(node, None)
             open_display = str(int(open_raw > 0.5)) if open_raw is not None else "-"
             in_flow = self.node_inflow.get(node, 0.0)
             out_flow = self.node_outflow.get(node, 0.0)
-            rho_val, l_val = self._get_node_rho_l(node)
+            lambda_val = self.lambd.get(node, None)
+            rho_val = self.rho.get(node, None)
+            l_val = self._rho_to_l_metric(rho_val)
             if self._is_all_zero_row(open_raw, in_flow, out_flow, rho_val, l_val):
                 continue
+            lambda_display = f"{lambda_val:6.3f}" if lambda_val is not None else "  -   "
             rho_display = f"{rho_val:5.3f}" if rho_val is not None else "  -  "
             l_display = f"{l_val:5.3f}" if l_val is not None else "  -  "
-            print(f"  {node:>6} | {open_display:>4} | {in_flow:7.3f} | {out_flow:8.3f} | {rho_display:>5} | {l_display:>5}")
+            xi_val = self.xi.get(node, None)
+            xi_display = f"{xi_val:5.3f}" if xi_val is not None else "  -  "
+            print(f"  {node:>6} | {open_display:>4} | {in_flow:7.3f} | {out_flow:8.3f} | {lambda_display:>6} | {rho_display:>5} | {l_display:>5} | {xi_display:>5}")
+
+                
         print("="*50 + "\n")
 
     def save_node_flow_summary(self, save_path):
         """Export CSV of node-level flow summary with rho and L columns."""
         with open(save_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['NodeID', 'Open', 'InFlow', 'OutFlow', 'rho', 'L'])
+            writer.writerow(['NodeID', 'Open', 'InFlow', 'OutFlow', 'Lambda', 'rho', 'L', 'Xi'])
             for node in self.summary_nodes:
-                rho_val, l_val = self._get_node_rho_l(node)
+                rho_val = self.rho.get(node, None)
+                l_val = self._rho_to_l_metric(rho_val)
                 in_flow = self.node_inflow.get(node, 0.0)
                 out_flow = self.node_outflow.get(node, 0.0)
-                open_raw = self.x.get(node, None)
+                lambda_val = self.lambd.get(node, None)
+                xi_val = self.xi.get(node, None)
+                if node in self.inst.L_v:
+                    open_raw = self.x.get(self.inst.lv_to_h.get(node), None)
+                else:
+                    open_raw = self.x.get(node, None)
                 if self._is_all_zero_row(open_raw, in_flow, out_flow, rho_val, l_val):
                     continue
                 writer.writerow([
                     node,
-                    1 if open_raw > 0.5 else ('' if node not in self.x else 0),
+                    1 if (open_raw is not None and open_raw > 0.5) else (0 if open_raw is not None else ''),
                     in_flow,
                     out_flow,
+                    lambda_val,
                     rho_val,
                     l_val,
+                    xi_val,
                 ])
 
     def save_selected_stations(self, save_path):
@@ -292,11 +356,14 @@ class ResultProcessor:
             'variables': {
                 'x': self.x,
                 'y': self.y,
+                'z': self.z,
                 'u': self.u,
                 'eta': self.eta,
                 'phi': self.phi,
                 'psi': self.psi,
                 'rho': self.rho,
+                'lambda': self.lambd,
+                'theta': self.theta,
                 'gamma': self.gamma
             },
             'metrics': {
@@ -314,18 +381,25 @@ class ResultProcessor:
         from src import config
 
         rows = []
-        for node in self.inst.N:
+        for node in self.inst.L + self.inst.H + self.inst.E:
             if self.x.get(node, 0) > 0.5:
                 x, y = self.inst.coords[node]
                 node_type = node[0]
-                mu = self.inst.mu.get(node, 0)
-                # For bases, find the selected service level
+                mu = self.inst.mu.get(node, 0.0)
                 rho_val = 0.0
                 if node_type == 'L':
-                    for s in range(len(config.SERVICE_LEVELS)):
-                        if self.u.get((node, s), 0) > 0.5:
-                            rho_val = config.SERVICE_LEVELS[s]
+                    rho_val = self.rho.get(node, 0.0)
+                elif node_type == 'H':
+                    chosen_c = None
+                    for c in range(len(config.MU_HUB)):
+                        if self.z.get((node, c), 0.0) > 0.5:
+                            chosen_c = c
                             break
+                    if chosen_c is not None:
+                        mu = config.MU_HUB[chosen_c]
+                    else:
+                        mu = 0.0
+                    rho_val = (self.lambd.get(node, 0.0) / mu) if mu > 1e-8 else 0.0
                 
                 rows.append({
                     'index': node,
@@ -335,7 +409,8 @@ class ResultProcessor:
                     'mu': mu,
                     'rho': rho_val
                 })
-        pd.DataFrame(rows).to_csv(save_path, index=False)
+        df = pd.DataFrame(rows, columns=['index', 'type', 'x', 'y', 'mu', 'rho'])
+        df.to_csv(save_path, index=False)
         print(f"Open facilities config saved to {save_path}")
 
     def plot_network(self, save_path=None):
@@ -352,7 +427,10 @@ class ResultProcessor:
         
         # Add all physical nodes
         for node in self.inst.N:
-            status = 'open' if self.x.get(node, 0) > 0.5 else 'closed'
+            if node in self.inst.L_v:
+                status = 'open' if self.x.get(self.inst.lv_to_h.get(node), 0) > 0.5 else 'closed'
+            else:
+                status = 'open' if self.x.get(node, 0) > 0.5 else 'closed'
             node_type = node[0] 
             G.add_node(node, pos=self.inst.coords[node], status=status, type=node_type)
             
@@ -360,16 +438,16 @@ class ResultProcessor:
         pos = nx.get_node_attributes(G, 'pos')
         
         # Calculate max flow for scaling
-        all_flows = [f for f in self.phi.values() if f > flow_tol]
+        all_flows = [f for f in self.theta.values() if f > flow_tol]
         max_phi_flow = max(all_flows) if all_flows else 1.0
         
         # 1. Plot direct flows (phi^0) - Gray lines
         direct_edges = []
         direct_widths = []
-        for (u, v, k), flow in self.phi.items():
+        for (u, v, k), flow in self.theta.items():
             if k == '0' and flow > flow_tol:
-                u_plot = self.inst.lv_to_d.get(u, u)
-                v_plot = self.inst.lv_to_d.get(v, v)
+                u_plot = self.inst.lv_to_h.get(u, u)
+                v_plot = self.inst.lv_to_h.get(v, v)
                 if u_plot != v_plot:
                     direct_edges.append((u_plot, v_plot))
                     # Visibly thicker lines
@@ -377,17 +455,17 @@ class ResultProcessor:
 
         if direct_edges:
             nx.draw_networkx_edges(G, pos, edgelist=direct_edges, width=direct_widths, 
-                                   edge_color='gray', alpha=0.4, arrows=True, 
-                                   arrowsize=15, connectionstyle='arc3,rad=0.1', 
-                                   label='Direct Flow (phi^0)')
+                                edge_color='gray', alpha=0.4, arrows=True, 
+                                arrowsize=15, connectionstyle='arc3,rad=0.1', 
+                                label='Direct Flow (phi^0)')
 
         # 2. Plot flows via swapping stations (phi^k) - Orange lines
         swap_edges = []
         swap_widths = []
-        for (u, v, k), flow in self.phi.items():
+        for (u, v, k), flow in self.theta.items():
             if k != '0' and flow > flow_tol:
-                u_plot = self.inst.lv_to_d.get(u, u)
-                v_plot = self.inst.lv_to_d.get(v, v)
+                u_plot = self.inst.lv_to_h.get(u, u)
+                v_plot = self.inst.lv_to_h.get(v, v)
 
                 # Leg 1: origin to swap
                 if u_plot != k and not is_corresponding_base_swap(u_plot, k):
@@ -404,9 +482,9 @@ class ResultProcessor:
 
         if swap_edges:
             nx.draw_networkx_edges(G, pos, edgelist=swap_edges, width=swap_widths, 
-                                   edge_color='darkorange', alpha=0.7, arrows=True, 
-                                   arrowsize=15, connectionstyle='arc3,rad=0.1',
-                                   label='Swapped Flow (phi^k)')
+                                edge_color='darkorange', alpha=0.7, arrows=True, 
+                                arrowsize=15, connectionstyle='arc3,rad=0.1',
+                                label='Swapped Flow (phi^k)')
 
         # If phi edges are unavailable (e.g., master-only model), fall back to psi.
         if not direct_edges and not swap_edges:
@@ -416,8 +494,8 @@ class ResultProcessor:
             for (u, v), flow in self.psi.items():
                 if flow <= flow_tol:
                     continue
-                u_plot = self.inst.lv_to_d.get(u, u)
-                v_plot = self.inst.lv_to_d.get(v, v)
+                u_plot = self.inst.lv_to_h.get(u, u)
+                v_plot = self.inst.lv_to_h.get(v, v)
                 if u_plot != v_plot:
                     psi_edges.append((u_plot, v_plot))
                     psi_widths.append(1.0 + 4.0 * (flow / max_psi_flow))
@@ -438,10 +516,10 @@ class ResultProcessor:
                 print("Warning: no flow edges above tolerance to plot.")
 
         # 3. Nodes - distinguish open and closed
-        shapes = {'L': 's', 'P': '^', 'D': 'o', 'E': 'D'}
-        colors_open = {'L': 'red', 'P': 'green', 'D': 'blue', 'E': 'orange'}
+        shapes = {'L': 's', 'H': '^', 'E': 'D', 'V': 'o'}
+        colors_open = {'L': 'red', 'H': 'green', 'E': 'orange', 'V': 'steelblue'}
         
-        for n_type in ['L', 'P', 'D', 'E']:
+        for n_type in ['L', 'H', 'E', 'V']:
             open_nodes = [n for n, attr in G.nodes(data=True) if attr['status'] == 'open' and attr['type'] == n_type]
             if open_nodes:
                 nx.draw_networkx_nodes(G, pos, nodelist=open_nodes, 

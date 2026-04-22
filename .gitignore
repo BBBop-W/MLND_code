@@ -10,3 +10,4 @@ Meituan-TSL/
 .idea/
 *.lp
 results/
+*.ilp

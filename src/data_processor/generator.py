@@ -32,10 +32,8 @@ class DataGenerator:
             y_val = np.random.uniform(0, config.AREA_SIZE)
             base_locations.append((x_val, y_val))
             locations.append({"index": f"L{i}", "type": "L", "x": x_val, "y": y_val})
-        for i in range(1, config.NUM_PICKUP + 1):
-            locations.append({"index": f"P{i}", "type": "P", "x": np.random.uniform(0, config.AREA_SIZE), "y": np.random.uniform(0, config.AREA_SIZE)})
-        for i in range(1, config.NUM_DELIVERY + 1):
-            locations.append({"index": f"D{i}", "type": "D", "x": np.random.uniform(0, config.AREA_SIZE), "y": np.random.uniform(0, config.AREA_SIZE)})
+        for i in range(1, config.NUM_HUBS + 1):
+            locations.append({"index": f"H{i}", "type": "H", "x": np.random.uniform(0, config.AREA_SIZE), "y": np.random.uniform(0, config.AREA_SIZE)})
         # Ensure every base has at least one colocated swap station.
         for i, (x_val, y_val) in enumerate(base_locations, 1):
             locations.append({"index": f"E{i}", "type": "E", "x": x_val, "y": y_val})
@@ -48,11 +46,10 @@ class DataGenerator:
             writer.writerows(locations)
             
         orders = []
-        pickups = [loc["index"] for loc in locations if loc["type"] == "P"]
-        deliveries = [loc["index"] for loc in locations if loc["type"] == "D"]
-        for p in pickups:
-            for d in deliveries:
-                if np.random.random() < config.DEMAND_PROBABILITY:
+        hubs = [loc["index"] for loc in locations if loc["type"] == "H"]
+        for p in hubs:
+            for d in hubs:
+                if p != d and np.random.random() < config.DEMAND_PROBABILITY:
                     demand = np.random.uniform(config.DEMAND_MIN, config.DEMAND_MAX)
                     orders.append({"start_node": p, "end_node": d, "demand": demand})
                     
@@ -63,7 +60,7 @@ class DataGenerator:
         print(f"Synthetic instance generated and saved to: {save_dir}")
 
     def generate_meituan_hourly(self, raw_data_path: str, save_dir: str, 
-                                num_pickup: int = 100, num_delivery: int = 100, 
+                                num_hubs: int = 100, 
                                 num_bases: int = 25, num_swapping: int = 50,
                                 date_filter: int = 20221017,
                                 map_half_size_km: float = None,
@@ -134,109 +131,94 @@ class DataGenerator:
         # Real-node activity in selected map (work hours only).
         p_stats = area_df.groupby(['sender_lng', 'sender_lat', 'sender_x_km', 'sender_y_km']).size().reset_index(name='daily_count')
         d_stats = area_df.groupby(['recipient_lng', 'recipient_lat', 'recipient_x_km', 'recipient_y_km']).size().reset_index(name='daily_count')
-        p_stats['hourly_avg'] = p_stats['daily_count'] / float(work_hours_count)
-        d_stats['hourly_avg'] = d_stats['daily_count'] / float(work_hours_count)
+        
+        # Rename columns to uniform names for merging
+        p_stats.columns = ['lng', 'lat', 'x_km', 'y_km', 'daily_count']
+        d_stats.columns = ['lng', 'lat', 'x_km', 'y_km', 'daily_count']
+        
+        # Combine all node activities
+        node_stats = pd.concat([p_stats, d_stats]).groupby(['lng', 'lat', 'x_km', 'y_km'])['daily_count'].sum().reset_index()
+        node_stats['hourly_avg'] = node_stats['daily_count'] / float(work_hours_count)
 
-        p_filtered = p_stats[p_stats['hourly_avg'] >= min_node_hourly_orders].copy()
-        d_filtered = d_stats[d_stats['hourly_avg'] >= min_node_hourly_orders].copy()
+        h_filtered = node_stats[node_stats['hourly_avg'] >= min_node_hourly_orders].copy()
 
         # Fallback if threshold is too strict.
-        if p_filtered.empty:
-            p_filtered = p_stats.copy()
-        if d_filtered.empty:
-            d_filtered = d_stats.copy()
+        if h_filtered.empty:
+            h_filtered = node_stats.copy()
 
-        # Aggregate raw nodes to requested PD counts (cluster in km space, weighted by work-hour order frequency).
-        n_p = max(1, min(num_pickup, len(p_filtered)))
-        n_d = max(1, min(num_delivery, len(d_filtered)))
+        # Aggregate raw nodes to requested Hub counts (cluster in km space, weighted by work-hour order frequency).
+        n_h = max(1, min(num_hubs, len(h_filtered)))
 
-        p_xy = p_filtered[['sender_x_km', 'sender_y_km']].to_numpy()
-        p_w = p_filtered['daily_count'].to_numpy()
-        p_kmeans = KMeans(n_clusters=n_p, random_state=42, n_init="auto")
-        p_filtered['cluster'] = p_kmeans.fit_predict(p_xy, sample_weight=p_w)
+        h_xy = h_filtered[['x_km', 'y_km']].to_numpy()
+        h_w = h_filtered['daily_count'].to_numpy()
+        h_kmeans = KMeans(n_clusters=n_h, random_state=42, n_init="auto")
+        h_filtered['cluster'] = h_kmeans.fit_predict(h_xy, sample_weight=h_w)
 
-        d_xy = d_filtered[['recipient_x_km', 'recipient_y_km']].to_numpy()
-        d_w = d_filtered['daily_count'].to_numpy()
-        d_kmeans = KMeans(n_clusters=n_d, random_state=42, n_init="auto")
-        d_filtered['cluster'] = d_kmeans.fit_predict(d_xy, sample_weight=d_w)
-
-        p_cluster_rank = (
-            p_filtered.groupby('cluster')['daily_count']
+        h_cluster_rank = (
+            h_filtered.groupby('cluster')['daily_count']
             .sum()
             .sort_values(ascending=False)
             .index
             .tolist()
         )
-        d_cluster_rank = (
-            d_filtered.groupby('cluster')['daily_count']
-            .sum()
-            .sort_values(ascending=False)
-            .index
-            .tolist()
-        )
-        p_cluster_to_id = {c: f"P{i + 1}" for i, c in enumerate(p_cluster_rank)}
-        d_cluster_to_id = {c: f"D{i + 1}" for i, c in enumerate(d_cluster_rank)}
+        
+        h_cluster_to_id = {c: f"H{i + 1}" for i, c in enumerate(h_cluster_rank)}
 
-        p_map = p_filtered[['sender_lng', 'sender_lat', 'cluster']].copy()
-        d_map = d_filtered[['recipient_lng', 'recipient_lat', 'cluster']].copy()
+        h_map = h_filtered[['lng', 'lat', 'cluster']].copy()
 
-        # Keep only orders whose endpoints survived frequency filtering, then aggregate by clustered IDs.
-        selected_orders = area_df.merge(p_map, on=['sender_lng', 'sender_lat'], how='inner')
-        selected_orders = selected_orders.merge(d_map, on=['recipient_lng', 'recipient_lat'], how='inner', suffixes=('_p', '_d'))
+        # Merge for senders
+        selected_orders = area_df.merge(h_map, left_on=['sender_lng', 'sender_lat'], right_on=['lng', 'lat'], how='inner')
+        selected_orders = selected_orders.rename(columns={'cluster': 'cluster_p'})
+        # Merge for recipients
+        selected_orders = selected_orders.merge(h_map, left_on=['recipient_lng', 'recipient_lat'], right_on=['lng', 'lat'], how='inner')
+        selected_orders = selected_orders.rename(columns={'cluster': 'cluster_d'})
 
         if selected_orders.empty:
             raise ValueError(
-                "Selected pickup/delivery nodes produce no orders. Increase map size or lower min_node_hourly_orders."
+                "Selected hub nodes produce no orders. Increase map size or lower min_node_hourly_orders."
             )
 
-        selected_orders['p_id'] = selected_orders['cluster_p'].map(p_cluster_to_id)
-        selected_orders['d_id'] = selected_orders['cluster_d'].map(d_cluster_to_id)
+        selected_orders['p_id'] = selected_orders['cluster_p'].map(h_cluster_to_id)
+        selected_orders['d_id'] = selected_orders['cluster_d'].map(h_cluster_to_id)
 
         pair_orders = selected_orders.groupby(['p_id', 'd_id']).size().reset_index(name='daily_count')
         # OD demand is the hourly average over configured work hours.
         pair_orders['demand'] = pair_orders['daily_count'] / float(work_hours_count)
 
         # Prune unused clusters and compact IDs after OD aggregation.
-        active_p = sorted(pair_orders['p_id'].unique(), key=lambda x: int(x[1:]))
-        active_d = sorted(pair_orders['d_id'].unique(), key=lambda x: int(x[1:]))
-        p_old_to_new = {old: f"P{i + 1}" for i, old in enumerate(active_p)}
-        d_old_to_new = {old: f"D{i + 1}" for i, old in enumerate(active_d)}
+        # Find uniquely used IDs (union of p_id and d_id)
+        active_hubs = sorted(set(pair_orders['p_id'].unique()) | set(pair_orders['d_id'].unique()), key=lambda x: int(x[1:]))
+        h_old_to_new = {old: f"H{i + 1}" for i, old in enumerate(active_hubs)}
 
-        pair_orders['start_node'] = pair_orders['p_id'].map(p_old_to_new)
-        pair_orders['end_node'] = pair_orders['d_id'].map(d_old_to_new)
+        pair_orders['start_node'] = pair_orders['p_id'].map(h_old_to_new)
+        pair_orders['end_node'] = pair_orders['d_id'].map(h_old_to_new)
+
+        # Remove self-loops where p == d if any
+        pair_orders = pair_orders[pair_orders['start_node'] != pair_orders['end_node']]
 
         # Save simulation events mapped to compact node IDs.
         sim_events = selected_orders.copy()
-        sim_events['p_id'] = sim_events['p_id'].map(p_old_to_new)
-        sim_events['d_id'] = sim_events['d_id'].map(d_old_to_new)
+        sim_events['p_id'] = sim_events['p_id'].map(h_old_to_new)
+        sim_events['d_id'] = sim_events['d_id'].map(h_old_to_new)
         sim_events = sim_events.dropna(subset=['p_id', 'd_id'])
+        sim_events = sim_events[sim_events['p_id'] != sim_events['d_id']]
         sim_events[['platform_order_time', 'sender_lng', 'sender_lat', 'recipient_lng', 'recipient_lat', 'p_id', 'd_id']].to_csv(
             os.path.join(save_dir, "simulation_events.csv"), index=False
         )
 
-        # Build aggregated P/D locations from cluster centers (km).
+        # Build aggregated Hub locations from cluster centers (km).
         locations = []
-        p_id_to_xy = {}
-        for cluster_id, p_id_old in p_cluster_to_id.items():
-            if p_id_old not in p_old_to_new:
+        h_id_to_xy = {}
+        for cluster_id, h_id_old in h_cluster_to_id.items():
+            if h_id_old not in h_old_to_new:
                 continue
-            p_id = p_old_to_new[p_id_old]
-            x_val = float(p_kmeans.cluster_centers_[cluster_id][0])
-            y_val = float(p_kmeans.cluster_centers_[cluster_id][1])
-            locations.append({"index": p_id, "type": "P", "x": x_val, "y": y_val})
-            p_id_to_xy[p_id] = (x_val, y_val)
+            h_id = h_old_to_new[h_id_old]
+            x_val = float(h_kmeans.cluster_centers_[cluster_id][0])
+            y_val = float(h_kmeans.cluster_centers_[cluster_id][1])
+            locations.append({"index": h_id, "type": "H", "x": x_val, "y": y_val})
+            h_id_to_xy[h_id] = (x_val, y_val)
 
-        d_id_to_xy = {}
-        for cluster_id, d_id_old in d_cluster_to_id.items():
-            if d_id_old not in d_old_to_new:
-                continue
-            d_id = d_old_to_new[d_id_old]
-            x_val = float(d_kmeans.cluster_centers_[cluster_id][0])
-            y_val = float(d_kmeans.cluster_centers_[cluster_id][1])
-            locations.append({"index": d_id, "type": "D", "x": x_val, "y": y_val})
-            d_id_to_xy[d_id] = (x_val, y_val)
-
-        # Place L/E farther from PD based on configured strategy.
+        # Place L/E farther from Hubs based on configured strategy.
         base_locations = []
         placement_mode = getattr(config, "MEITUAN_LE_PLACEMENT_MODE", "centroid").lower()
         jitter_radius_km = max(0.75, float(getattr(config, "MEITUAN_LE_JITTER_RADIUS_KM", 0.75)))
@@ -287,10 +269,10 @@ class DataGenerator:
 
         if placement_mode == "centroid":
             # Weighted geometric centroid of original work-hour orders (origins) for L placement.
-            p_weights = p_filtered['daily_count'].to_numpy(dtype=float)
-            p_total_w = max(float(p_weights.sum()), 1.0)
-            l_cx = float((p_filtered['sender_x_km'] * p_weights).sum() / p_total_w)
-            l_cy = float((p_filtered['sender_y_km'] * p_weights).sum() / p_total_w)
+            h_weights = h_filtered['daily_count'].to_numpy(dtype=float)
+            h_total_w = max(float(h_weights.sum()), 1.0)
+            l_cx = float((h_filtered['x_km'] * h_weights).sum() / h_total_w)
+            l_cy = float((h_filtered['y_km'] * h_weights).sum() / h_total_w)
 
             # Ensure L-ring spacing implies E1..E_num_bases are not too close.
             if num_bases > 1:
@@ -306,10 +288,10 @@ class DataGenerator:
                 base_locations.append((x_val, y_val))
                 locations.append({"index": f"L{i + 1}", "type": "L", "x": x_val, "y": y_val})
         else:
-            pickup_hotspots = list(p_id_to_xy.values())
+            hub_hotspots = list(h_id_to_xy.values())
             for i in range(num_bases):
-                if i < len(pickup_hotspots):
-                    x_val, y_val = pickup_hotspots[i]
+                if i < len(hub_hotspots):
+                    x_val, y_val = hub_hotspots[i]
                     theta = np.random.uniform(0, 2 * np.pi)
                     x_val += jitter_radius_km * np.cos(theta)
                     y_val += jitter_radius_km * np.sin(theta)
@@ -327,11 +309,11 @@ class DataGenerator:
             existing_e_points.append((x_val, y_val))
 
         # Extra swapping stations.
-        delivery_hotspots = list(d_id_to_xy.values())
-        d_weights = d_filtered['daily_count'].to_numpy(dtype=float)
-        d_total_w = max(float(d_weights.sum()), 1.0)
-        e_cx = float((d_filtered['recipient_x_km'] * d_weights).sum() / d_total_w)
-        e_cy = float((d_filtered['recipient_y_km'] * d_weights).sum() / d_total_w)
+        hub_hotspots = list(h_id_to_xy.values())
+        h_weights = h_filtered['daily_count'].to_numpy(dtype=float)
+        h_total_w = max(float(h_weights.sum()), 1.0)
+        e_cx = float((h_filtered['x_km'] * h_weights).sum() / h_total_w)
+        e_cy = float((h_filtered['y_km'] * h_weights).sum() / h_total_w)
         ring_radius_e = min(max(spread_km, 0.5), map_half_size_km * 0.75)
 
         for i in range(num_bases + 1, num_swapping + 1):
@@ -340,8 +322,8 @@ class DataGenerator:
                 theta = (2.0 * np.pi * idx) / max(num_swapping - num_bases, 1)
                 x_val = e_cx + ring_radius_e * np.cos(theta)
                 y_val = e_cy + ring_radius_e * np.sin(theta)
-            elif idx < len(delivery_hotspots):
-                x_val, y_val = delivery_hotspots[idx]
+            elif idx < len(hub_hotspots):
+                x_val, y_val = hub_hotspots[idx]
                 theta = np.random.uniform(0, 2 * np.pi)
                 x_val += jitter_radius_km * np.cos(theta)
                 y_val += jitter_radius_km * np.sin(theta)
@@ -358,9 +340,9 @@ class DataGenerator:
         orders_out.to_csv(os.path.join(save_dir, "orders.csv"), index=False)
 
         loc_df = pd.DataFrame(locations)
-        p_coords = set(zip(loc_df[loc_df['type'] == 'P']['x'].round(6), loc_df[loc_df['type'] == 'P']['y'].round(6)))
+        h_coords = set(zip(loc_df[loc_df['type'] == 'H']['x'].round(6), loc_df[loc_df['type'] == 'H']['y'].round(6)))
         e_coords = set(zip(loc_df[loc_df['type'] == 'E']['x'].round(6), loc_df[loc_df['type'] == 'E']['y'].round(6)))
-        overlap_pe = p_coords & e_coords
+        overlap_he = h_coords & e_coords
 
         total_unique_p_day = df.groupby(['sender_lng', 'sender_lat']).size().shape[0]
         total_unique_d_day = df.groupby(['recipient_lng', 'recipient_lat']).size().shape[0]
@@ -376,22 +358,22 @@ class DataGenerator:
 
         print(
             f"Meituan real-hourly instance generated at: {save_dir}\n"
-            f"  aggregation mode: clustered to targets (P={num_pickup}, D={num_delivery})\n"
+            f"  aggregation mode: clustered to targets (H={num_hubs})\n"
             f"  L/E placement mode: {placement_mode}\n"
             f"  work-hour window: {work_hour_start}:00-{work_hour_end}:59 ({work_hours_count}h), tz={config.MEITUAN_TIMEZONE}\n"
             f"  map half-size: {map_half_size_km:.2f} km (side {2 * map_half_size_km:.2f} km)\n"
             f"  raw(date) orders={len(df)}, unique origins={total_unique_p_day}, unique destinations={total_unique_d_day}, unique OD pairs={total_pairs_day}\n"
             f"  work-hour orders={len(work_df)}, unique origins={total_unique_p_work}, unique destinations={total_unique_d_work}, unique OD pairs={total_pairs_work}\n"
             f"  in-map orders={len(area_df)}, unique origins={area_unique_p}, unique destinations={area_unique_d}, unique OD pairs={area_pairs}\n"
-            f"  after node frequency filter >= {min_node_hourly_orders:.3f}/h: P candidates={len(p_filtered)}, D candidates={len(d_filtered)}\n"
-            f"  clustered nodes before OD pruning: P={n_p}, D={n_d}; after OD pruning: P={len(p_id_to_xy)}, D={len(d_id_to_xy)}\n"
-            f"  selected nodes: P={len(p_id_to_xy)}, D={len(d_id_to_xy)}, L={num_bases}, E={num_swapping}\n"
+            f"  after node frequency filter >= {min_node_hourly_orders:.3f}/h: H candidates={len(h_filtered)}\n"
+            f"  clustered nodes before OD pruning: H={n_h}; after OD pruning: H={len(h_id_to_xy)}\n"
+            f"  selected nodes: H={len(h_id_to_xy)}, L={num_bases}, E={num_swapping}\n"
             f"  retained OD pairs: {len(orders_out)}, total clustered demand(per-hour)={orders_out['demand'].sum():.4f}\n"
             f"  min E-E target distance={min_ee_distance_km:.2f} km\n"
-            f"  P-E coordinate overlap count={len(overlap_pe)}"
+            f"  H-E coordinate overlap count={len(overlap_he)}"
         )
 
-        if overlap_pe:
-            examples = list(overlap_pe)[:5]
+        if overlap_he:
+            examples = list(overlap_he)[:5]
             print(f"  overlap examples (x_km,y_km): {examples}")
-            print(f"  note: E1..E{num_bases} are intentionally colocated with L. P-E overlap above is unintended coincidence/data geometry.")
+            print(f"  note: E1..E{num_bases} are intentionally colocated with L. H-E overlap above is unintended coincidence/data geometry.")

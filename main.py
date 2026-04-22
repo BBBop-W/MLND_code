@@ -29,8 +29,7 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
         generator.generate_meituan_hourly(
             raw_data_path=meituan_raw_file,
             save_dir=meituan_instance_dir,
-            num_pickup=config.MEITUAN_NUM_PICKUP,
-            num_delivery=config.MEITUAN_NUM_DELIVERY,
+            num_hubs=config.MEITUAN_NUM_HUBS,
             num_bases=config.MEITUAN_NUM_BASES,
             num_swapping=config.MEITUAN_NUM_SWAPPING,
             date_filter=date_filter,
@@ -45,8 +44,8 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
     loader = DataLoader()
     meituan_instance = loader.load_instance(locations_path_mei, orders_path_mei)
 
-    print(f"Nodes Loaded: {len(meituan_instance.L_hat)} Bases, {len(meituan_instance.P)} Pickups, "
-        f"{len(meituan_instance.D)} Deliveries ({len(meituan_instance.L_v)} Virtual), "
+    print(f"Nodes Loaded: {len(meituan_instance.L)} Bases, {len(meituan_instance.H)} Hubs, "
+        f"({len(meituan_instance.L_v)} Virtual), "
         f"{len(meituan_instance.E)} Swapping.")
 
     print("\nBuilding Gurobi SOCP model for Meituan...")
@@ -55,7 +54,7 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
 
     print("\nSolving model for Meituan...")
     model_mei.model.setParam('TimeLimit', 7200)
-    model_mei.model.setParam('MIPGap', 0.05) 
+    # model_mei.model.setParam('MIPGap', 0.05) 
     success_mei = model_mei.solve()
     model_mei.write_model(os.path.join(meituan_results_dir, "model0313.lp"))
 
@@ -74,21 +73,21 @@ def run_meituan(GnerateSample=False, date_filter=20221017):
 
         processor_mei.save_python_object(os.path.join(meituan_results_dir, "result_data.pkl"))
         
-        # --- RUN SIMULATION ---
-        from src.simulation.simulator import DroneSimulator
-        events_path = os.path.join(meituan_instance_dir, "simulation_events.csv")
-        if os.path.exists(events_path):
-            print("\n" + "-"*40)
-            print("RUNNING TACTICAL SIMULATION")
-            print("-"*40)
-            facilities_df = pd.read_csv(config_path_mei)
-            events_df = pd.read_csv(events_path)
+        # # --- RUN SIMULATION ---
+        # from src.simulation.simulator import DroneSimulator
+        # events_path = os.path.join(meituan_instance_dir, "simulation_events.csv")
+        # if os.path.exists(events_path):
+        #     print("\n" + "-"*40)
+        #     print("RUNNING TACTICAL SIMULATION")
+        #     print("-"*40)
+        #     facilities_df = pd.read_csv(config_path_mei)
+        #     events_df = pd.read_csv(events_path)
             
-            sim = DroneSimulator(facilities_df, events_df, use_chaining=config.USE_VIRTUAL_BASES_SIM)
-            sim.initialize(drones_per_base=10) 
-            sim.run()
-        else:
-            print("Simulation events file not found. Skipping simulation.")
+        #     sim = DroneSimulator(facilities_df, events_df, use_chaining=config.USE_VIRTUAL_BASES_SIM)
+        #     sim.initialize(drones_per_base=10) 
+        #     sim.run()
+        # else:
+        #     print("Simulation events file not found. Skipping simulation.")
     else:
         print("\nOptimization failed for Meituan instance.")
 
