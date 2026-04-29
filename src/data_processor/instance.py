@@ -96,7 +96,7 @@ class Instance:
                     all_potential_arcs.add((lv, lv2))
             for l in self.L:
                 all_potential_arcs.add((lv, l))
-                all_potential_arcs.add((l, lv))
+                # all_potential_arcs.add((l, lv))
                 
 
             

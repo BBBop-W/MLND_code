@@ -207,7 +207,7 @@ class MLNDModel:
                 gp.quicksum(psi[j, i] for j in self.H if (j, i) in self.A_HH) == phi[i, ell], 
                 name=f"hub_arrival_{i}")
             self.model.addConstr(
-                gp.quicksum(phi[u_node, ell] for u_node in self.H + self.L_tilde if (u_node, ell) in phi_keys)
+                gp.quicksum(phi[u_node, ell] for u_node in self.H + self.L_v if (u_node, ell) in phi_keys)
                 == gp.quicksum(phi[ell, v_node] for v_node in self.H + self.L_tilde if (ell, v_node) in phi_keys),
                 name=f"virt_bal_{ell}")
 

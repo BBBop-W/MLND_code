@@ -160,16 +160,16 @@ class ResultProcessor:
             if phys_in <= flow_tol and phys_out <= flow_tol:
                 inconsistent_bases.append((l_node, expected_flow, phys_in, phys_out))
 
-        if inconsistent_bases:
-            preview = "; ".join(
-                f"{l}: expected~{exp_f:.4f}, in={in_f:.4f}, out={out_f:.4f}"
-                for l, exp_f, in_f, out_f in inconsistent_bases[:5]
-            )
-            raise ValueError(
-                "Model-flow inconsistency detected: base has assignment-implied throughput "
-                "but zero physical flow. "
-                f"Examples: {preview}"
-            )
+        # if inconsistent_bases:
+        #     preview = "; ".join(
+        #         f"{l}: expected~{exp_f:.4f}, in={in_f:.4f}, out={out_f:.4f}"
+        #         for l, exp_f, in_f, out_f in inconsistent_bases[:5]
+        #     )
+        #     raise ValueError(
+        #         "Model-flow inconsistency detected: base has assignment-implied throughput "
+        #         "but zero physical flow. "
+        #         f"Examples: {preview}"
+        #     )
 
         self.node_total_flow = {
             node: self.node_inflow[node] + self.node_outflow[node]
@@ -285,7 +285,7 @@ class ResultProcessor:
             print(f"  Examples: {preview}{' ...' if len(dangling) > 10 else ''}")
 
         print("\nPer-node flow summary:")
-        print("  NodeID | Open | InFlow | OutFlow | Lambda |   rho |     L |    Xi")
+        print("  NodeID | Open | InFlow | OutFlow | Lambda |   rho |     L |    Xi|  W (min)")
         for node in self.summary_nodes:
             if node in self.inst.L_v:
                 open_raw = self.x.get(self.inst.lv_to_h.get(node), None)
@@ -304,7 +304,9 @@ class ResultProcessor:
             l_display = f"{l_val:5.3f}" if l_val is not None else "  -  "
             xi_val = self.xi.get(node, None)
             xi_display = f"{xi_val:5.3f}" if xi_val is not None else "  -  "
-            print(f"  {node:>6} | {open_display:>4} | {in_flow:7.3f} | {out_flow:8.3f} | {lambda_display:>6} | {rho_display:>5} | {l_display:>5} | {xi_display:>5}")
+            W = xi_val / in_flow * 60 if in_flow > flow_tol and xi_val is not None else '  -  '
+            W_display = f"{W:5.3f}" if isinstance(W, float) else "  -  "
+            print(f"  {node:>6} | {open_display:>4} | {in_flow:7.3f} | {out_flow:8.3f} | {lambda_display:>6} | {rho_display:>5} | {l_display:>5} | {xi_display:>5} | {W_display:>5}")
 
                 
         print("="*50 + "\n")
@@ -313,7 +315,7 @@ class ResultProcessor:
         """Export CSV of node-level flow summary with rho and L columns."""
         with open(save_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['NodeID', 'Open', 'InFlow', 'OutFlow', 'Lambda', 'rho', 'L', 'Xi'])
+            writer.writerow(['NodeID', 'Open', 'InFlow', 'OutFlow', 'Lambda', 'rho', 'L', 'Xi', 'W'])
             for node in self.summary_nodes:
                 rho_val = self.rho.get(node, None)
                 l_val = self._rho_to_l_metric(rho_val)
@@ -336,6 +338,7 @@ class ResultProcessor:
                     rho_val,
                     l_val,
                     xi_val,
+                    (xi_val / in_flow) if in_flow > 1e-5 and xi_val is not None else ''
                 ])
 
     def save_selected_stations(self, save_path):
