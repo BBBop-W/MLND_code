@@ -1,8 +1,7 @@
-import sys
 import os
-import math
+import sys
 
-# Allow absolute imports when running as main
+# Allow absolute imports when running this file directly.
 if __name__ == "__main__":
     _proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     if _proj_root not in sys.path:
@@ -10,372 +9,461 @@ if __name__ == "__main__":
 
 import gurobipy as gp
 from gurobipy import GRB
-from src.data_processor.instance import Instance
+
 from src import config
+from src.data_processor.instance import Instance
+
 
 class MLNDModel:
+    """Regime II: hub-side holding and continuous chaining."""
+
     def __init__(self, instance: Instance):
         self.inst = instance
-        self.model = gp.Model("MLND_SOCP")
-        self.model.setParam('Threads', 1)
-        
-        self.L = self.inst.L # physical bases
-        self.H = self.inst.H # Hubs
-        self.E = self.inst.E # Swapping stations
-        
-        self.L_v = self.inst.L_v
-        self.L_tilde = self.L + self.L_v
-            
-        # x decisions are only for physical nodes (H, L, E).
-        self.N_x = self.H + self.L + self.E
-        # Arc traversals may still involve virtual nodes.
-        self.N_all = self.inst.N
+        self.model = gp.Model("MLND_RegimeII_SOCP")
+        self.model.setParam("Threads", 1)
+        self._built = False
 
-        # Arcs
-        self.A = [(u, v) for (u, v) in self.inst.A]
-        self.A_HH = [(u, v) for (u, v) in self.inst.A_HH if (u, v) in self.A]
-        self.A_LH = [(u, v) for (u, v) in self.inst.A_LH if (u, v) in self.A]
-        self.A_HL = [(u, v) for (u, v) in self.inst.A_HL if (u, v) in self.A]
-        self.A_M = [(i, self.inst.h_to_lv[i]) for i in self.H if i in self.inst.h_to_lv] # M mapping
-        
-        self.E_uv = {arc: self.inst.E_uv[arc] for arc in self.A if arc in self.inst.E_uv}
-        # pre-compute t_uv^k
+        self.L = list(self.inst.L)
+        self.H = list(self.inst.H)
+        self.S = list(self.inst.S)
+        self.E = list(self.inst.E)
+        self.N_x = self.L + self.H + self.E
+        self.HLS = self.L + self.H + self.S
+
+        self.A_HH = sorted(self.inst.A_HH)
+        self.A_LH = sorted(self.inst.A_LH)
+        self.A_HS = sorted(self.inst.A_HS)
+        self.A_SH = sorted(self.inst.A_SH)
+        self.A_SL = sorted(self.inst.A_SL)
+        self.A_SS = sorted(self.inst.A_SS)
+        self.A_phi = sorted(self.inst.A_phi)
+        self.A_F = sorted(self.inst.A_F)
+
+        self.route_options = {}
         self.t = {}
-        for (u, v) in self.A:
+        self.flight_cost = {}
+        self._build_route_options()
+
+        # Filled in build() for convenient downstream access/debugging.
+        self.vars = {}
+
+    def _build_route_options(self):
+        flight_cost_rate = float(getattr(config, "COST_FLIGHT_TIME", 0.1))
+
+        for u, v in self.A_F:
+            options = []
             if self.inst.get_dist(u, v) <= config.MAX_DIRECT_DISTANCE:
-                self.t[u, v, '0'] = self.inst.get_time(u, v)
-            for k in self.E_uv.get((u, v), []):
+                options.append("0")
+                self.t[u, v, "0"] = self.inst.get_time(u, v)
+
+            for k in self.inst.E_uv.get((u, v), []):
+                options.append(k)
                 self.t[u, v, k] = self.inst.get_time(u, k) + self.inst.get_time(k, v)
 
+            # Keep deterministic order and remove accidental duplicates.
+            seen = set()
+            ordered_options = []
+            for k in options:
+                if k not in seen:
+                    ordered_options.append(k)
+                    seen.add(k)
+
+            self.route_options[u, v] = ordered_options
+            for k in ordered_options:
+                self.flight_cost[u, v, k] = flight_cost_rate * self.t[u, v, k]
+
+    def _hub_pool(self, h):
+        return self.inst.h_to_s[h]
+
+    def _node_open_expr(self, node, x):
+        if node in self.S:
+            return x[self.inst.s_to_h[node]]
+        return x[node]
+
+    def _p_chain(self, hub):
+        p_by_hub = getattr(config, "P_CHAIN_BY_HUB", None)
+        if isinstance(p_by_hub, dict):
+            return float(p_by_hub.get(hub, config.P_CHAIN))
+        return float(config.P_CHAIN)
+
     def build(self):
-        C = range(len(config.MU_HUB)) 
+        if self._built:
+            return
+
+        C = range(len(config.MU_HUB))
         mu_c = config.MU_HUB
-        f_hub = config.COST_HUB
-        p = config.P_CHAIN
-        rho_max = config.RHO_MAX
-        tau_H = config.TAU_H
-        tau_v = config.TAU_LV
-        gamma_param = config.GAMMA
-        omega = config.ENERGY_RATE_OMEGA
-        Omega_upper = config.BATTERY_CAPACITY_OMEGA_UPPER
-        epsilon = config.ENERGY_SAFETY_MARGIN_EPSILON
-        
+        rho_max = float(config.RHO_MAX)
+        tau_H = float(config.TAU_H)
+        tau_S = float(config.TAU_S)
+        omega = float(config.ENERGY_RATE_OMEGA)
+        Omega = float(config.BATTERY_CAPACITY_OMEGA_UPPER)
+        swap_capacity = float(getattr(config, "SWAP_CAPACITY", config.MU_SWAPPING))
+        max_flow = float(config.MAX_FLOW_E)
+
         x = self.model.addVars(self.N_x, vtype=GRB.BINARY, name="x")
         z = self.model.addVars(self.H, C, vtype=GRB.BINARY, name="z")
-        
-        y_keys = [(i, l) for i in self.H for l in self.L]
+
+        y_keys = [(i, l) for (l, i) in self.A_LH]
         y = self.model.addVars(y_keys, vtype=GRB.BINARY, name="y")
-        
-        rho_l = self.model.addVars(self.L, lb=0.0, ub=1.0, name="rho_l")
-        rho_ell = self.model.addVars(self.L_v, lb=0.0, ub=1.0, name="rho_ell")
-        rho_tilde = self.model.addVars(y_keys, lb=0.0, ub=1.0, name="rho_tilde")
 
-        w_keys = [(i, j) for (i, j) in self.A_HH]
-        w = self.model.addVars(w_keys, lb=0.0, name="w")
-        w_base_keys = [(i, l, j) for (i, j) in self.A_HH for l in self.L]
-        w_base = self.model.addVars(w_base_keys, lb=0.0, name="w_base")
-        w_virt = self.model.addVars(w_keys, lb=0.0, name="w_virt")
-        psi = self.model.addVars(w_keys, lb=0.0, name="psi")
-        
-        phi_keys = []
-        for l in self.L_tilde:
-            for i in self.H:
-                if (l, i) in self.A or (i, l) in self.A:
-                    phi_keys.append((l, i))
-                    phi_keys.append((i, l))
-            for ell in self.L_v:
-                if (l, ell) in self.A or (ell, l) in self.A:
-                    phi_keys.append((l, ell))
-                    phi_keys.append((ell, l))
+        rho_l = self.model.addVars(self.L, lb=0.0, ub=rho_max, name="rho_l")
+        rho_s = self.model.addVars(self.S, lb=0.0, ub=rho_max, name="rho_s")
 
-        phi_keys = list(set(phi_keys)) # Remove duplicates
-        phi = self.model.addVars(phi_keys, lb=0.0, name="phi")
+        alpha = self.model.addVars(y_keys, lb=0.0, ub=rho_max, name="alpha")
+        beta_keys = [
+            (l, i, j)
+            for (l, i) in self.A_LH
+            for (i2, j) in self.A_HH
+            if i2 == i
+        ]
+        beta = self.model.addVars(beta_keys, lb=0.0, ub=rho_max, name="beta")
 
-        # Node-open indicator used to gate phi arcs, including virtual nodes.
-        node_open = {}
-        for l in self.L:
-            node_open[l] = x[l]
-        for h in self.H:
-            node_open[h] = x[h]
-        for ell in self.L_v:
-            owner_h = self.inst.lv_to_h.get(ell)
-            if owner_h is not None:
-                node_open[ell] = x[owner_h]
-        
-        theta_keys = [(u, v, k) for (u, v, k) in self.t.keys()]
+        delta_keys = list(self.A_HH)
+        delta = self.model.addVars(delta_keys, lb=0.0, ub=rho_max, name="delta")
+
+        eta = self.model.addVars(beta_keys, lb=0.0, name="eta")
+        sigma = self.model.addVars(delta_keys, lb=0.0, name="sigma")
+        psi = self.model.addVars(delta_keys, lb=0.0, name="psi")
+
+        varphi = self.model.addVars(self.A_phi, lb=0.0, name="varphi")
+        theta_keys = [
+            (u, v, k)
+            for (u, v) in self.A_F
+            for k in self.route_options.get((u, v), [])
+        ]
         theta = self.model.addVars(theta_keys, lb=0.0, name="theta")
-        
-        lambd = self.model.addVars(self.H, lb=0.0, name="lambda")
-        xi = self.model.addVars(self.H + self.L_tilde, lb=0.0, name="xi")
-        Gamma_var = self.model.addVar(lb=0.0, name="Gamma")
 
-        r = config.ORDER_REVENUE_COEF
-        served_demand = gp.quicksum(psi[i, j] for (i, j) in self.A_HH)
-        fixed_cost = gp.quicksum(self.inst.f.get(u, config.COST_BASE) * x[u] for u in self.L + self.E)
-        fixed_cost += gp.quicksum(f_hub[c] * z[i, c] for i in self.H for c in C)
-        flight_coef = getattr(config, "COST_FLIGHT_TIME", 0.1)
-        flight_cost = gp.quicksum(theta[u, v, k] * flight_coef for (u, v, k) in theta_keys)
-        
-        self.model.setObjective(
-            r * served_demand - flight_cost - fixed_cost - config.COST_DRONE * Gamma_var,
-            GRB.MAXIMIZE
+        lambd = self.model.addVars(self.H, lb=0.0, name="lambda")
+        xi = self.model.addVars(self.HLS, lb=0.0, name="xi")
+        Gamma = self.model.addVar(lb=0.0, name="Gamma")
+
+        served_benefit = gp.quicksum(
+            float(getattr(config, "ORDER_REVENUE_COEF", 0.0))
+            * psi[i, j]
+            for i, j in self.A_HH
+        )
+        fixed_cost = gp.quicksum(
+            float(self.inst.f.get(l, config.COST_BASE)) * x[l] for l in self.L
+        )
+        fixed_cost += gp.quicksum(
+            float(getattr(config, "COST_HUB_FIXED", 0.0)) * x[i] for i in self.H
+        )
+        fixed_cost += gp.quicksum(
+            float(self.inst.f.get(k, config.COST_SWAPPING)) * x[k] for k in self.E
+        )
+        fixed_cost += gp.quicksum(
+            float(config.COST_HUB[c]) * z[i, c] for i in self.H for c in C
+        )
+        operating_cost = gp.quicksum(
+            self.flight_cost[u, v, k] * theta[u, v, k] for (u, v, k) in theta_keys
         )
 
-        # 1-3
+        self.model.setObjective(
+            served_benefit
+            - fixed_cost
+            - operating_cost
+            - float(config.COST_DRONE) * Gamma,
+            GRB.MAXIMIZE,
+        )
+
+        # Assignment and capacity activation.
         for i in self.H:
-            self.model.addConstr(gp.quicksum(y[i, l] for l in self.L) == x[i], name=f"single_assign_{i}")
-            self.model.addConstr(gp.quicksum(z[i, c] for c in C) == x[i], name=f"capacity_select_{i}")
-            for l in self.L:
-                self.model.addConstr(y[i, l] <= x[l], name=f"assign_x_{i}_{l}")
-                
-        # 4-5
+            assigned_bases = [l for (l, h) in self.A_LH if h == i]
+            self.model.addConstr(
+                gp.quicksum(y[i, l] for l in assigned_bases if (i, l) in y) == x[i],
+                name=f"assign_{i}",
+            )
+            self.model.addConstr(
+                gp.quicksum(z[i, c] for c in C) == x[i],
+                name=f"capacity_{i}",
+            )
+
+        for i, l in y_keys:
+            self.model.addConstr(y[i, l] <= x[l], name=f"assign_active_{i}_{l}")
+
         for l in self.L:
-            self.model.addConstr(rho_l[l] <= x[l], name=f"rho_base_bound_{l}")
-        for i, ell in self.A_M:
-            self.model.addConstr(rho_ell[ell] <= x[i], name=f"rho_virt_bound_{i}")
-
-        # 6-7
+            self.model.addConstr(rho_l[l] <= x[l], name=f"rho_L_{l}")
         for i in self.H:
-            for l in self.L:
-                self.model.addConstr(rho_tilde[i, l] <= rho_l[l], name=f"lin_rho_1a_{i}_{l}")
-                self.model.addConstr(rho_tilde[i, l] <= y[i, l], name=f"lin_rho_1b_{i}_{l}")
-                self.model.addConstr(rho_tilde[i, l] >= rho_l[l] + y[i, l] - 1, name=f"lin_rho_2_{i}_{l}")
+            s = self._hub_pool(i)
+            self.model.addConstr(rho_s[s] <= x[i], name=f"rho_S_{s}")
 
-        # 8-10
-        # Split linearization by source:
-        #   w_base[i,l,j] = rho_tilde[i,l] * x[j]
-        #   w_virt[i,j]   = rho_ell[ell(i)] * x[j]
-        #   w[i,j]        = (1-p) * sum_l w_base[i,l,j] + p * w_virt[i,j]
+        # alpha[i,l] = rho_l[l] * y[i,l].
+        for i, l in y_keys:
+            self.model.addConstr(alpha[i, l] <= rho_l[l], name=f"alpha_1_{i}_{l}")
+            self.model.addConstr(alpha[i, l] <= y[i, l], name=f"alpha_2_{i}_{l}")
+            self.model.addConstr(
+                alpha[i, l] >= rho_l[l] + y[i, l] - 1,
+                name=f"alpha_3_{i}_{l}",
+            )
+
+        # beta[l,i,j] = alpha[i,l] * x_j.
+        for l, i, j in beta_keys:
+            self.model.addConstr(beta[l, i, j] <= alpha[i, l], name=f"beta_1_{l}_{i}_{j}")
+            self.model.addConstr(beta[l, i, j] <= x[j], name=f"beta_2_{l}_{i}_{j}")
+            self.model.addConstr(
+                beta[l, i, j] >= alpha[i, l] + x[j] - 1,
+                name=f"beta_3_{l}_{i}_{j}",
+            )
+
+        # delta[i,j] = rho_s(i) * x_j.
+        for i, j in delta_keys:
+            s = self._hub_pool(i)
+            self.model.addConstr(delta[i, j] <= rho_s[s], name=f"delta_1_{i}_{j}")
+            self.model.addConstr(delta[i, j] <= x[j], name=f"delta_2_{i}_{j}")
+            self.model.addConstr(
+                delta[i, j] >= rho_s[s] + x[j] - 1,
+                name=f"delta_3_{i}_{j}",
+            )
+
+        for l, i, j in beta_keys:
+            p_i = self._p_chain(i)
+            demand = float(self.inst.h.get((i, j), 0.0))
+            self.model.addConstr(
+                eta[l, i, j] == (1.0 - p_i) * demand * beta[l, i, j],
+                name=f"eta_{l}_{i}_{j}",
+            )
+
+        for i, j in delta_keys:
+            p_i = self._p_chain(i)
+            demand = float(self.inst.h.get((i, j), 0.0))
+            self.model.addConstr(
+                sigma[i, j] == p_i * demand * delta[i, j],
+                name=f"sigma_{i}_{j}",
+            )
+            self.model.addConstr(
+                psi[i, j]
+                == gp.quicksum(eta[l, i, j] for (l, h) in self.A_LH if h == i and (l, i, j) in eta)
+                + sigma[i, j],
+                name=f"psi_{i}_{j}",
+            )
+
+        # Empty-drone source flows for base-side and holding-side initiations.
+        for l, i in self.A_LH:
+            self.model.addConstr(
+                varphi[l, i]
+                == gp.quicksum(eta[l, i, j] for (h, j) in self.A_HH if h == i and (l, i, j) in eta),
+                name=f"varphi_LH_{l}_{i}",
+            )
+
+        for i in self.H:
+            s = self._hub_pool(i)
+            if (s, i) in varphi:
+                self.model.addConstr(
+                    varphi[s, i] == gp.quicksum(sigma[i, j] for (h, j) in self.A_HH if h == i),
+                    name=f"varphi_SH_{s}_{i}",
+                )
+
+        for u, v in self.A_phi:
+            self.model.addConstr(
+                varphi[u, v] <= max_flow * self._node_open_expr(u, x),
+                name=f"varphi_open_u_{u}_{v}",
+            )
+            self.model.addConstr(
+                varphi[u, v] <= max_flow * self._node_open_expr(v, x),
+                name=f"varphi_open_v_{u}_{v}",
+            )
+
+        for q in self.L + self.S:
+            self.model.addConstr(
+                gp.quicksum(varphi[u, q] for (u, v) in self.A_phi if v == q)
+                == gp.quicksum(varphi[q, v] for (u, v) in self.A_phi if u == q),
+                name=f"empty_balance_{q}",
+            )
+
+        for i in self.H:
+            self.model.addConstr(
+                gp.quicksum(varphi[u, i] for (u, v) in self.A_phi if v == i)
+                == gp.quicksum(psi[i, j] for (h, j) in self.A_HH if h == i),
+                name=f"H_empty_to_loaded_{i}",
+            )
+            self.model.addConstr(
+                gp.quicksum(psi[j, i] for (j, h) in self.A_HH if h == i)
+                == gp.quicksum(varphi[i, v] for (u, v) in self.A_phi if u == i),
+                name=f"H_loaded_to_empty_{i}",
+            )
+
+        # Route-option decomposition for physical flights.
         for i, j in self.A_HH:
-            ell = self.inst.h_to_lv.get(i)
-            for l in self.L:
-                self.model.addConstr(w_base[i, l, j] <= rho_tilde[i, l], name=f"lin_wb_1a_{i}_{l}_{j}")
-                self.model.addConstr(w_base[i, l, j] <= x[j], name=f"lin_wb_1b_{i}_{l}_{j}")
-                self.model.addConstr(w_base[i, l, j] >= rho_tilde[i, l] + x[j] - 1, name=f"lin_wb_2_{i}_{l}_{j}")
-
-            if ell:
-                self.model.addConstr(w_virt[i, j] <= rho_ell[ell], name=f"lin_wv_1a_{i}_{j}")
-                self.model.addConstr(w_virt[i, j] <= x[j], name=f"lin_wv_1b_{i}_{j}")
-                self.model.addConstr(w_virt[i, j] >= rho_ell[ell] + x[j] - 1, name=f"lin_wv_2_{i}_{j}")
-                self.model.addConstr(
-                    w[i, j] == (1 - p) * gp.quicksum(w_base[i, l, j] for l in self.L) + p * w_virt[i, j],
-                    name=f"lin_w_mix_{i}_{j}",
-                )
-            else:
-                self.model.addConstr(w_virt[i, j] == 0.0, name=f"lin_wv_zero_{i}_{j}")
-                self.model.addConstr(
-                    w[i, j] == (1 - p) * gp.quicksum(w_base[i, l, j] for l in self.L),
-                    name=f"lin_w_mix_{i}_{j}",
-                )
-
-            self.model.addConstr(psi[i, j] == self.inst.h.get((i, j), 0) * w[i, j], name=f"lin_psi_{i}_{j}")
-            
-            
-            
-        # 11-13
-        for i in self.H:
             self.model.addConstr(
-                gp.quicksum(phi[l, i] for l in self.L_tilde if (l, i) in phi_keys) == 
-                gp.quicksum(psi[i, j] for j in self.H if (i, j) in self.A_HH), 
-                name=f"hub_dept_{i}")
-            
-            ell = self.inst.h_to_lv.get(i)
-            for l in self.L:
-                if (l, i) in phi_keys:
-                    self.model.addConstr(
-                        phi[l, i] == (1 - p) * gp.quicksum(
-                            self.inst.h.get((i, j), 0.0) * w_base[i, l, j]
-                            for j in self.H
-                            if (i, j) in self.A_HH
-                        ),
-                        name=f"phi_base_{l}_{i}",
-                    )
-
-            if ell and (ell, i) in phi_keys:
-                self.model.addConstr(
-                    phi[ell, i] == p * gp.quicksum(
-                        self.inst.h.get((i, j), 0.0) * w_virt[i, j]
-                        for j in self.H
-                        if (i, j) in self.A_HH
-                    ),
-                    name=f"phi_virt_{i}",
-                )
-
-                
-        for i, ell in self.A_M:
-            self.model.addConstr(
-                gp.quicksum(psi[j, i] for j in self.H if (j, i) in self.A_HH) == phi[i, ell], 
-                name=f"hub_arrival_{i}")
-            self.model.addConstr(
-                gp.quicksum(phi[u_node, ell] for u_node in self.H + self.L_v if (u_node, ell) in phi_keys)
-                == gp.quicksum(phi[ell, v_node] for v_node in self.H + self.L_tilde if (ell, v_node) in phi_keys),
-                name=f"virt_bal_{ell}")
-
-        # Gate all phi arcs by endpoint activation so closed hubs/virtual nodes
-        # cannot carry circulation flow.
-        for (u_node, v_node) in phi_keys:
-            if u_node in node_open:
-                self.model.addConstr(
-                    phi[u_node, v_node] <= config.MAX_FLOW_E * node_open[u_node],
-                    name=f"phi_open_u_{u_node}_{v_node}",
-                )
-            if v_node in node_open:
-                self.model.addConstr(
-                    phi[u_node, v_node] <= config.MAX_FLOW_E * node_open[v_node],
-                    name=f"phi_open_v_{u_node}_{v_node}",
-                )
-            
-        for l in self.L:
-            self.model.addConstr(
-                gp.quicksum(phi[l, i] for i in self.H + self.L_tilde if (l, i) in phi_keys) <= x[l] * config.MAX_FLOW_E,
-                name=f"base_out_{l}")
-            self.model.addConstr(
-                gp.quicksum(phi[i, l] for i in self.H + self.L_tilde if (i, l) in phi_keys) <= x[l] * config.MAX_FLOW_E,
-                name=f"base_in_{l}")
-
-        # 14-16 decomp
-        for i, j in self.A_HH:
-            ell = self.inst.h_to_lv.get(i)
-            v_v = self.inst.h_to_lv.get(j)
-            if ell and v_v:
-                k_sum = gp.quicksum(theta[i, j, k] for k in ["0"] + self.inst.E_uv.get((i,j), []) if (i, j, k) in theta)
-                self.model.addConstr(k_sum == psi[i, j] + (phi[ell, v_v] if (ell, v_v) in phi_keys else 0), name=f"decomp_hub_hub_{i}_{j}")
-                
-        for i, ell in self.A_M:
-            if (i, ell) in self.A:
-                k_sum_iell = gp.quicksum(
-                    theta[i, ell, k]
-                    for k in ["0"] + self.inst.E_uv.get((i, ell), [])
-                    if (i, ell, k) in theta
-                )
-                self.model.addConstr(
-                    k_sum_iell == (phi[i, ell] if (i, ell) in phi_keys else 0),
-                    name=f"decomp_hub_virt_{i}_{ell}",
-                )
-            if (ell, i) in self.A:
-                k_sum_elli = gp.quicksum(
-                    theta[ell, i, k]
-                    for k in ["0"] + self.inst.E_uv.get((ell, i), [])
-                    if (ell, i, k) in theta
-                )
-                self.model.addConstr(
-                    k_sum_elli == (phi[ell, i] if (ell, i) in phi_keys else 0),
-                    name=f"decomp_virt_hub_{ell}_{i}",
-                )
-
-            for l in self.L:
-                if (l, i) in self.A:
-                    k_sum_li = gp.quicksum(theta[l, i, k] for k in ["0"] + self.inst.E_uv.get((l,i), []) if (l, i, k) in theta)
-                    self.model.addConstr(k_sum_li == (phi[l, i] if (l, i) in phi_keys else 0), name=f"decomp_base_hub_{l}_{i}")
-                if (ell, l) in self.A:
-                    k_sum_il = gp.quicksum(theta[ell, l, k] for k in ["0"] + self.inst.E_uv.get((ell,l), []) if (ell, l, k) in theta)
-                    self.model.addConstr(k_sum_il == (phi[ell, l] if (ell, l) in phi_keys else 0), name=f"decomp_hub_base_{i}_{l}")
-
-        # Theta-level virtual-node conservation for consistent flown-leg accounting.
-        for ell in self.L_v:
-            in_theta = gp.quicksum(
-                theta[u_node, ell, k]
-                for (u_node, v_node) in self.A
-                if v_node == ell
-                for k in ["0"] + self.inst.E_uv.get((u_node, v_node), [])
-                if (u_node, v_node, k) in theta
+                gp.quicksum(theta[i, j, k] for k in self.route_options.get((i, j), []) if (i, j, k) in theta)
+                == psi[i, j],
+                name=f"route_HH_{i}_{j}",
             )
-            out_theta = gp.quicksum(
-                theta[ell, v_node, k]
-                for (u_node, v_node) in self.A
-                if u_node == ell
-                for k in ["0"] + self.inst.E_uv.get((u_node, v_node), [])
-                if (u_node, v_node, k) in theta
-            )
-            self.model.addConstr(in_theta == out_theta, name=f"theta_bal_{ell}")
 
-        # 17-20
-        for i, ell in self.A_M:
-            sum_psi = gp.quicksum(psi[j, i] for j in self.H if (j, i) in self.A_HH)
-            sum_phi_l = gp.quicksum(phi[l, i] for l in self.L if (l, i) in phi_keys)
-            phi_elli = phi[ell, i] if (ell, i) in phi_keys else 0
-            self.model.addConstr(lambd[i] == sum_psi + sum_phi_l + phi_elli, name=f"hub_thr_{i}")
-            
-            self.model.addConstr(lambd[i] <= rho_max * gp.quicksum(mu_c[c] * z[i, c] for c in C), name=f"qos_hub_stab_{i}")
-            
-            if gamma_param not in (0, 1):
-                self.model.addConstr(xi[i] <= (-tau_H / math.log(gamma_param)) * lambd[i], name=f"qos_hub_exp_{i}")
-                
-                sum_phi_iell = phi[i, ell] if (i, ell) in phi_keys else 0
-                sum_phi_vell = gp.quicksum(phi[v, ell] for v in self.L_v if (v, ell) in phi_keys)
-                self.model.addConstr(xi[ell] <= (-tau_v / math.log(gamma_param)) * (sum_phi_iell + sum_phi_vell), name=f"qos_virt_{ell}")
-
-        # 21-22 Energy
-        for i, ell in self.A_M:
-            out_arcs_i = [(i_u, i_v) for (i_u, i_v) in self.A if i_u == i or i_u == ell]
-            lhs = omega * (
-                xi[i]
-                + xi[ell]
-                + gp.quicksum(
-                    theta[i_u, v, k] * self.t[i_u, v, k]
-                    for (i_u, v) in out_arcs_i
-                    for k in ["0"] + self.inst.E_uv.get((i_u, v), [])
-                    if (i_u, v, k) in theta and (i_u, v) not in self.A_M
-                )
+        for u, v in self.A_LH + self.A_SL + self.A_SS:
+            self.model.addConstr(
+                gp.quicksum(theta[u, v, k] for k in self.route_options.get((u, v), []) if (u, v, k) in theta)
+                == varphi[u, v],
+                name=f"route_empty_{u}_{v}",
             )
-            rhs = (1 - epsilon) * Omega_upper * gp.quicksum(
-                theta[i_u, v, k]
-                for (i_u, v) in out_arcs_i
-                for k in self.inst.E_uv.get((i_u, v), [])
-                if (i_u, v, k) in theta and (i_u, v) not in self.A_M
-            )
-            self.model.addConstr(lhs <= rhs, name=f"energy_hub_{i}")
-            
-        for l in self.L:
-            lhs = omega * gp.quicksum(theta[l, i, k] * self.t[l, i, k] for i in self.H if (l, i) in self.A for k in ["0"] + self.inst.E_uv.get((l,i), []) if (l, i, k) in theta)
-            rhs = (1 - epsilon) * Omega_upper * gp.quicksum(theta[l, i, k] for i in self.H if (l, i) in self.A for k in self.inst.E_uv.get((l,i), []) if (l, i, k) in theta)
-            self.model.addConstr(lhs <= rhs, name=f"energy_base_{l}")
 
-        # 23 Swap capacity
         for k in self.E:
-            sum_th = gp.quicksum(theta[u, v, k] for (u, v) in self.A if (u, v, k) in theta)
-            self.model.addConstr(sum_th <= config.MAX_FLOW_E * x[k], name=f"swap_cap_{k}")
+            self.model.addConstr(
+                gp.quicksum(theta[u, v, k] for (u, v, kk) in theta_keys if kk == k)
+                <= swap_capacity * x[k],
+                name=f"swap_capacity_{k}",
+            )
 
-        # 24 Fleet
-        fleet_expr = gp.quicksum(xi[u] for u in self.L_tilde + self.H) + gp.quicksum(theta[u, v, k] * self.t[u, v, k] for (u, v, k) in theta_keys)
-        self.model.addConstr(fleet_expr <= Gamma_var, name="fleet_size")
+        total_queue_length = gp.quicksum(xi[u] for u in self.HLS)
+        total_flight_time = gp.quicksum(
+            self.t[u, v, k] * theta[u, v, k] for (u, v, k) in theta_keys
+        )
+        swapped_flights = gp.quicksum(
+            theta[u, v, k] for (u, v, k) in theta_keys if k in self.E
+        )
+        self.model.addConstr(
+            omega * (total_queue_length + total_flight_time) <= Omega * swapped_flights,
+            name="energy_global",
+        )
 
-        # 25-26 SOCP Wait Approximations
-        for u in self.L_tilde:
-            ru = rho_ell[u] if u in self.L_v else rho_l[u]
-            self.model.addQConstr(4  + (xi[u] + ru)**2 <= (xi[u] - ru + 2)**2, name=f"socp_base_{u}")
-            
+        for l in self.L:
+            self.model.addConstr(
+                omega
+                * gp.quicksum(
+                    self.t[l, i, k] * theta[l, i, k]
+                    for (u, i, k) in theta_keys
+                    if u == l and (l, i) in self.A_LH
+                )
+                <= Omega
+                * gp.quicksum(
+                    theta[l, i, k]
+                    for (u, i, k) in theta_keys
+                    if u == l and (l, i) in self.A_LH and k in self.E
+                ),
+                name=f"energy_L_{l}",
+            )
+
         for i in self.H:
-            mu_z = gp.quicksum(mu_c[c] * z[i, c] for c in C)
-            self.model.addQConstr(4 * mu_z + (xi[i] + lambd[i] - mu_z + 1)**2 <= (xi[i] - lambd[i] + mu_z + 1)**2, name=f"socp_hub_{i}")
+            self.model.addConstr(
+                lambd[i]
+                == gp.quicksum(psi[i, j] for (h, j) in self.A_HH if h == i)
+                + gp.quicksum(psi[j, i] for (j, h) in self.A_HH if h == i),
+                name=f"lambda_{i}",
+            )
+            mu_z = gp.quicksum(float(mu_c[c]) * z[i, c] for c in C)
+            self.model.addConstr(lambd[i] <= rho_max * mu_z, name=f"hub_stability_{i}")
+
+        for l in self.L:
+            self.model.addQConstr(
+                4 + (xi[l] + rho_l[l]) * (xi[l] + rho_l[l])
+                <= (xi[l] - rho_l[l] + 2) * (xi[l] - rho_l[l] + 2),
+                name=f"queue_L_{l}",
+            )
+
+        for s in self.S:
+            self.model.addQConstr(
+                4 + (xi[s] + rho_s[s]) * (xi[s] + rho_s[s])
+                <= (xi[s] - rho_s[s] + 2) * (xi[s] - rho_s[s] + 2),
+                name=f"queue_S_{s}",
+            )
+
+        for i in self.H:
+            mu_z = gp.quicksum(float(mu_c[c]) * z[i, c] for c in C)
+            self.model.addQConstr(
+                4 * mu_z + (xi[i] + lambd[i] - mu_z + 1) * (xi[i] + lambd[i] - mu_z + 1)
+                <= (xi[i] - lambd[i] + mu_z + 1) * (xi[i] - lambd[i] + mu_z + 1),
+                name=f"queue_H_{i}",
+            )
+            self.model.addConstr(xi[i] <= tau_H * lambd[i], name=f"mean_H_{i}")
+
+        for s in self.S:
+            self.model.addConstr(
+                xi[s] <= tau_S * gp.quicksum(varphi[s, v] for (u, v) in self.A_phi if u == s),
+                name=f"mean_S_{s}",
+            )
+
+        self.model.addConstr(
+            total_queue_length + total_flight_time <= Gamma,
+            name="fleet",
+        )
+
+        self.vars = {
+            "x": x,
+            "z": z,
+            "y": y,
+            "rho_l": rho_l,
+            "rho_s": rho_s,
+            "alpha": alpha,
+            "beta": beta,
+            "delta": delta,
+            "eta": eta,
+            "sigma": sigma,
+            "psi": psi,
+            "varphi": varphi,
+            "theta": theta,
+            "lambda": lambd,
+            "xi": xi,
+            "Gamma": Gamma,
+        }
+        self._built = True
 
     def solve(self):
-        self.build() 
+        self.build()
+        self.apply_solver_config()
         self.model.optimize()
-        self.write_model("debug_gurobi_model.lp")
-        if self.model.status == GRB.OPTIMAL:
-            print(f"Optimal objective: {self.model.objVal:.4f}")
+        if self.model.SolCount > 0:
+            if self.model.status == GRB.OPTIMAL:
+                print(f"Optimal objective: {self.model.objVal:.4f}")
+            else:
+                print(
+                    f"Best objective: {self.model.objVal:.4f} "
+                    f"(status={self.model.status}, solutions={self.model.SolCount})"
+                )
             return True
         return False
+
+    def apply_solver_config(self):
+        time_limit = getattr(config, "MODEL_TIME_LIMIT", None)
+        mip_gap = getattr(config, "MODEL_MIP_GAP", None)
+        if time_limit is not None:
+            self.model.setParam("TimeLimit", float(time_limit))
+        if mip_gap is not None:
+            self.model.setParam("MIPGap", float(mip_gap))
 
     def write_model(self, filename="model.lp"):
         self.model.write(filename)
 
-if __name__ == "__main__":
+
+def _env_flag(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "n"}
+
+
+def run_meituan_regime_ii(
+    generate_sample=None,
+    date_filter=None,
+    project_root=None,
+    save_outputs=True,
+    plot_network=True,
+):
+    """Generate/load the Meituan instance, solve Regime II, and save outputs."""
     from src.data_processor.generator import DataGenerator
     from src.data_processor.loader import DataLoader
+    from src.utils.output_processor import ResultProcessor
 
-    meituan_instance_dir = os.path.join(_proj_root, "data", "instances", "Meituan")
-    meituan_results_dir = os.path.join(_proj_root, "results", "Meituan")
-    os.makedirs(meituan_results_dir, exist_ok=True)
+    if project_root is None:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if generate_sample is None:
+        generate_sample = _env_flag("MLND_GENERATE_SAMPLE", True)
+    if date_filter is None:
+        date_filter = config.MEITUAN_DEMAND_DATES[0]
 
-    meituan_raw_file = os.path.join(_proj_root, "Meituan-TSL",
-                                    "all_waybill_info_meituan_0322.csv")
-    date_filter=20221017
-    
-    print("=== 1. Generating Test Data ===")
-    gen = DataGenerator(seed=42)
-    gen.generate_meituan_hourly(
+    period_id = f"h{config.MEITUAN_DEMAND_HOUR:02d}"
+    meituan_instance_dir = os.path.join(project_root, "data", "instances", "Meituan")
+    meituan_results_dir = os.path.join(project_root, "results", "Meituan")
+    meituan_raw_file = os.path.join(project_root, "Meituan-TSL", "all_waybill_info_meituan_0322.csv")
+    if save_outputs:
+        os.makedirs(meituan_results_dir, exist_ok=True)
+
+    print(
+        f"Regime II run: generate={generate_sample}, period={period_id}, "
+        f"time_limit={config.MODEL_TIME_LIMIT}, mip_gap={config.MODEL_MIP_GAP}"
+    )
+
+    if generate_sample:
+        DataGenerator(seed=42).generate_meituan_hourly(
             raw_data_path=meituan_raw_file,
             save_dir=meituan_instance_dir,
             num_hubs=config.MEITUAN_NUM_HUBS,
@@ -383,19 +471,41 @@ if __name__ == "__main__":
             num_swapping=config.MEITUAN_NUM_SWAPPING,
             date_filter=date_filter,
             map_half_size_km=config.MEITUAN_MAP_HALF_SIZE_KM,
-            min_node_hourly_orders=config.MEITUAN_MIN_NODE_HOURLY_ORDERS,
+            candidate_date_filter=config.MEITUAN_CANDIDATE_DATES,
+            demand_date_filter=config.MEITUAN_DEMAND_DATES,
+            candidate_hour_start=config.MEITUAN_CANDIDATE_HOUR_START,
+            candidate_hour_end=config.MEITUAN_CANDIDATE_HOUR_END,
+            demand_hour_start=config.MEITUAN_DEMAND_HOUR,
+            colocate_base_swaps=config.MEITUAN_COLOCATE_BASE_SWAPS,
         )
-    
-    print("\n=== 2. Loading Instance ===")
-    loader = DataLoader()
-    inst = loader.load_instance(
-        os.path.join(meituan_instance_dir, "locations.csv"),
-        os.path.join(meituan_instance_dir, "orders.csv")
+
+    period_path = os.path.join(meituan_instance_dir, "orders", f"{period_id}.csv")
+    load_period_id = period_id if os.path.exists(period_path) else None
+    inst = DataLoader().load_instance_dir(meituan_instance_dir, period_id=load_period_id)
+    print(
+        f"Loaded: H={len(inst.H)}, L={len(inst.L)}, S={len(inst.S)}, E={len(inst.E)}, "
+        f"OD={len(inst.h)}, A_F={len(inst.A_F)}, A_phi={len(inst.A_phi)}"
     )
-    
-    print(f"Loaded: |H|={len(inst.H)}, |L|={len(inst.L)}, |E|={len(inst.E)}, |A_HH|={len(inst.A_HH)}")
-    
-    print("\n=== 3. Building & Solving Model ===")
-    m = MLNDModel(inst)
-    m.solve()
-    m.write_model(os.path.join(_proj_root, "debug_gurobi_model.lp"))
+
+    model = MLNDModel(inst)
+    success = model.solve()
+
+    if success or model.model.SolCount > 0:
+        processor = ResultProcessor(model, inst)
+        processor.print_summary()
+        if save_outputs:
+            model.write_model(os.path.join(meituan_results_dir, "model_regime_ii.lp"))
+            processor.save_node_flow_summary(os.path.join(meituan_results_dir, "node_flow_summary.csv"))
+            processor.save_open_facilities_config(os.path.join(meituan_results_dir, "open_facilities.csv"))
+            processor.save_python_object(os.path.join(meituan_results_dir, "result_data.pkl"))
+            if plot_network:
+                processor.plot_network(save_path=os.path.join(meituan_results_dir, "network_plot.png"))
+            print(f"Saved outputs to {meituan_results_dir}")
+    else:
+        print("No feasible solution found.")
+
+    return model
+
+
+if __name__ == "__main__":
+    run_meituan_regime_ii()

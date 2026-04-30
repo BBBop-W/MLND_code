@@ -7,6 +7,23 @@ class DataLoader:
     def __init__(self):
         pass
 
+    def load_instance_dir(self, instance_dir: str, period_id: str = None) -> Instance:
+        """
+        Load an instance directory with shared locations and period-specific orders.
+
+        If period_id is omitted, this keeps backward compatibility by reading
+        <instance_dir>/orders.csv. If period_id is provided, orders are read
+        from <instance_dir>/orders/{period_id}.csv.
+        """
+        import os
+
+        locations_path = os.path.join(instance_dir, "locations.csv")
+        if period_id is None:
+            orders_path = os.path.join(instance_dir, "orders.csv")
+        else:
+            orders_path = os.path.join(instance_dir, "orders", f"{period_id}.csv")
+        return self.load_instance(locations_path, orders_path)
+
     def load_instance(self, locations_path: str, orders_path: str) -> Instance:
         """
         Reads locations.csv and orders.csv to populate and return an Instance object.
@@ -42,17 +59,14 @@ class DataLoader:
                     inst.f[node_id] = config.COST_SWAPPING
                     inst.mu[node_id] = config.MU_SWAPPING
                     
-        # 2. Virtual Bases (linked to delivery nodes)
-        for h in inst.H:
-            v_id = f"V_{h}"
-            inst.L_v.append(v_id)
-            inst.coords[v_id] = inst.coords[h]
+        # 2. Hub-side holding pools (linked to hubs, co-located physically).
+        inst.build_holding_pools()
             
         # 3. Compute Distances and Times
         if config.DRONE_SPEED_KMPH <= 0:
             raise ValueError("DRONE_SPEED_KMPH must be positive for consistent time conversion.")
 
-        all_physical_nodes = inst.L + inst.H + inst.L_v + inst.E
+        all_physical_nodes = inst.L + inst.H + inst.S + inst.E
         for u in all_physical_nodes:
             for v in all_physical_nodes:
                 dist = np.sqrt((inst.coords[u][0] - inst.coords[v][0])**2 + 

@@ -1,4 +1,5 @@
 import os
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -9,6 +10,7 @@ from src.data_processor.instance import Instance
 
 class ResultProcessor:
     def __init__(self, model, instance: Instance):
+        self.wrapper = model
         self.model = model.model
         self.inst = instance
         
@@ -35,8 +37,8 @@ class ResultProcessor:
         
         self.x = {}
         self.y = {}
-        self.u = {}
         self.eta = {}
+        self.sigma = {}
         self.xi = {}
         self.psi = {}
         self.phi = {}
@@ -55,14 +57,14 @@ class ResultProcessor:
                 parts = v.VarName[2:-1].split(',')
                 if len(parts) == 2:
                     self.y[(parts[0], parts[1])] = v.X
-            elif v.VarName.startswith("u["):
-                parts = v.VarName[2:-1].split(',')
-                if len(parts) == 2:
-                    self.u[(parts[0], int(parts[1]))] = v.X
             elif v.VarName.startswith("eta["):
                 parts = v.VarName[4:-1].split(',')
+                if len(parts) == 3:
+                    self.eta[(parts[0], parts[1], parts[2])] = v.X
+            elif v.VarName.startswith("sigma["):
+                parts = v.VarName[6:-1].split(',')
                 if len(parts) == 2:
-                    self.u[(parts[0], int(parts[1]))] = v.X
+                    self.sigma[(parts[0], parts[1])] = v.X
             elif v.VarName.startswith("xi["):
                 key = v.VarName[3:-1]
                 self.xi[key] = v.X
@@ -74,6 +76,10 @@ class ResultProcessor:
                 parts = v.VarName[4:-1].split(',')
                 if len(parts) == 2:
                     self.phi[(parts[0], parts[1])] = v.X
+            elif v.VarName.startswith("varphi["):
+                parts = v.VarName[7:-1].split(',')
+                if len(parts) == 2:
+                    self.phi[(parts[0], parts[1])] = v.X
             elif v.VarName.startswith("z["):
                 parts = v.VarName[2:-1].split(',')
                 if len(parts) == 2:
@@ -81,8 +87,8 @@ class ResultProcessor:
             elif v.VarName.startswith("rho_l["):
                 key = v.VarName[6:-1]
                 self.rho[key] = v.X
-            elif v.VarName.startswith("rho_ell["):
-                key = v.VarName[8:-1]
+            elif v.VarName.startswith("rho_s["):
+                key = v.VarName[6:-1]
                 self.rho[key] = v.X
             elif v.VarName.startswith("lambda["):
                 key = v.VarName[7:-1]
@@ -95,46 +101,91 @@ class ResultProcessor:
         self.open_L = sum(1 for node in self.inst.L if self.x.get(node, 0) > 0.5)
         self.open_H = sum(1 for node in self.inst.H if self.x.get(node, 0) > 0.5)
         self.open_E = sum(1 for node in self.inst.E if self.x.get(node, 0) > 0.5)
-        # Keep explicit alias for downstream consumers after eta rename.
-        self.eta = dict(self.u)
 
-        # Summary nodes include physical nodes plus virtual bases L_v.
-        self.summary_nodes = list(self.inst.L) + list(self.inst.L_v) + list(self.inst.H) + list(self.inst.E)
+        self.hub_capacity_level = {}
+        self.hub_mu = {}
+        for h_node in self.inst.H:
+            chosen_c = None
+            for c in range(len(config.MU_HUB)):
+                if self.z.get((h_node, c), 0.0) > 0.5:
+                    chosen_c = c
+                    break
+            self.hub_capacity_level[h_node] = chosen_c
+            self.hub_mu[h_node] = config.MU_HUB[chosen_c] if chosen_c is not None else None
+
+        self.summary_nodes = list(self.inst.L) + list(self.inst.S) + list(self.inst.H) + list(self.inst.E)
 
         # Node-level flow accounting for printed/exported summaries.
-        # Prefer theta-based leg decomposition so swapping stations (E)
-        # receive correct in/out flow. Fallback to psi/phi when theta is absent.
+        #
+        # H/S accounting follows the Regime II conservation equations instead
+        # of raw theta legs. This keeps hub handling and holding-pool movement
+        # visible in the same units as psi/varphi. Swapping stations are still
+        # counted from theta because they only appear as route options.
         self.node_inflow = {node: 0.0 for node in self.summary_nodes}
         self.node_outflow = {node: 0.0 for node in self.summary_nodes}
 
         flow_tol = 1e-5
 
-        def add_leg(u_node, v_node, flow):
-            if u_node in self.node_outflow:
-                self.node_outflow[u_node] += flow
-            if v_node in self.node_inflow:
-                self.node_inflow[v_node] += flow
+        loaded_out = {
+            h_node: sum(flow for (i_node, _), flow in self.psi.items() if i_node == h_node)
+            for h_node in self.inst.H
+        }
+        loaded_in = {
+            h_node: sum(flow for (_, j_node), flow in self.psi.items() if j_node == h_node)
+            for h_node in self.inst.H
+        }
 
-        has_theta_flow = any(flow > flow_tol for flow in self.theta.values())
-        if has_theta_flow:
-            for (u_node, v_node, k_node), flow in self.theta.items():
-                if flow <= flow_tol:
-                    continue
-                if k_node == '0':
-                    add_leg(u_node, v_node, flow)
-                else:
-                    # Swapped flow is decomposed into two flown legs.
-                    add_leg(u_node, k_node, flow)
-                    add_leg(k_node, v_node, flow)
-        else:
-            for (u_node, v_node), flow in self.psi.items():
-                if flow <= flow_tol:
-                    continue
-                add_leg(u_node, v_node, flow)
-            for (u_node, v_node), flow in self.phi.items():
-                if flow <= flow_tol:
-                    continue
-                add_leg(u_node, v_node, flow)
+        holding_nodes = list(self.inst.S)
+        h_to_s = self.inst.h_to_s
+        s_to_h = self.inst.s_to_h
+
+        for l_node in self.inst.L:
+            self.node_inflow[l_node] = sum(
+                self.phi.get((s_node, l_node), 0.0) for s_node in holding_nodes
+            )
+            self.node_outflow[l_node] = sum(
+                self.phi.get((l_node, h_node), 0.0) for h_node in self.inst.H
+            )
+
+        for h_node in self.inst.H:
+            s_node = h_to_s.get(h_node)
+            empty_from_pool = self.phi.get((s_node, h_node), 0.0) if s_node else 0.0
+            empty_from_base = sum(
+                self.phi.get((l_node, h_node), 0.0) for l_node in self.inst.L
+            )
+            empty_to_pool = self.phi.get((h_node, s_node), 0.0) if s_node else 0.0
+
+            self.node_inflow[h_node] = loaded_in[h_node] + empty_from_pool + empty_from_base
+            self.node_outflow[h_node] = loaded_out[h_node] + empty_to_pool
+
+        for s_node in holding_nodes:
+            h_node = s_to_h.get(s_node)
+            completed_to_owner = loaded_in.get(h_node, 0.0)
+            incoming_from_pools = sum(
+                self.phi.get((r_node, s_node), 0.0)
+                for r_node in holding_nodes
+                if r_node != s_node
+            )
+            outbound_to_owner_hub = self.phi.get((s_node, h_node), 0.0) if h_node else 0.0
+            outbound_to_pools = sum(
+                self.phi.get((s_node, r_node), 0.0)
+                for r_node in holding_nodes
+                if r_node != s_node
+            )
+            outbound_to_bases = sum(
+                self.phi.get((s_node, l_node), 0.0) for l_node in self.inst.L
+            )
+
+            self.node_inflow[s_node] = completed_to_owner + incoming_from_pools
+            self.node_outflow[s_node] = (
+                outbound_to_owner_hub + outbound_to_pools + outbound_to_bases
+            )
+
+        for (_, _, k_node), flow in self.theta.items():
+            if flow <= flow_tol or k_node == '0' or k_node not in self.inst.E:
+                continue
+            self.node_inflow[k_node] += flow
+            self.node_outflow[k_node] += flow
 
         # Validate consistency: if assignment implies non-zero base throughput,
         # physical base flow must not be zero.
@@ -150,32 +201,42 @@ class ResultProcessor:
             if l_node in self.base_assigned_flow and i_node in hub_outgoing:
                 self.base_assigned_flow[l_node] += y_val * hub_outgoing[i_node]
 
-        inconsistent_bases = []
+        self.node_mu_or_load = {node: None for node in self.summary_nodes}
+        for h_node in self.inst.H:
+            self.node_mu_or_load[h_node] = self.hub_mu.get(h_node)
         for l_node in self.inst.L:
-            expected_flow = self.base_assigned_flow.get(l_node, 0.0)
-            if expected_flow <= flow_tol:
-                continue
-            phys_in = self.node_inflow.get(l_node, 0.0)
-            phys_out = self.node_outflow.get(l_node, 0.0)
-            if phys_in <= flow_tol and phys_out <= flow_tol:
-                inconsistent_bases.append((l_node, expected_flow, phys_in, phys_out))
-
-        # if inconsistent_bases:
-        #     preview = "; ".join(
-        #         f"{l}: expected~{exp_f:.4f}, in={in_f:.4f}, out={out_f:.4f}"
-        #         for l, exp_f, in_f, out_f in inconsistent_bases[:5]
-        #     )
-        #     raise ValueError(
-        #         "Model-flow inconsistency detected: base has assignment-implied throughput "
-        #         "but zero physical flow. "
-        #         f"Examples: {preview}"
-        #     )
+            self.node_mu_or_load[l_node] = sum(
+                (1 - self._p_chain(i_node))
+                * self.inst.h.get((i_node, j_node), 0.0)
+                * self.x.get(i_node, 0.0)
+                * self.x.get(j_node, 0.0)
+                * self.x.get(l_node, 0.0)
+                * self.y.get((i_node, l_node), 0.0)
+                for (i_node, j_node) in self.inst.A_HH
+            )
+        for s_node in holding_nodes:
+            h_node = s_to_h.get(s_node)
+            if h_node is None:
+                self.node_mu_or_load[s_node] = 0.0
+            else:
+                self.node_mu_or_load[s_node] = (
+                    self._p_chain(h_node)
+                    * self.x.get(h_node, 0.0)
+                    * sum(
+                        self.inst.h.get((h_node, j_node), 0.0) * self.x.get(j_node, 0.0)
+                        for (i_node, j_node) in self.inst.A_HH
+                        if i_node == h_node
+                    )
+                )
+        for e_node in self.inst.E:
+            self.node_mu_or_load[e_node] = sum(
+                flow for (_, _, k_node), flow in self.theta.items() if k_node == e_node
+            )
 
         self.node_total_flow = {
             node: self.node_inflow[node] + self.node_outflow[node]
             for node in self.summary_nodes
         }
-
         # Use a flow-based served-demand metric so summaries remain stable even if
         # objective reporting changes (e.g., multi-objective/tie-break settings).
         self.served_demand = sum(
@@ -187,16 +248,27 @@ class ResultProcessor:
         self.fixed_cost = sum(
             self.inst.f.get(node, 0.0) * self.x.get(node, 0.0) for node in self.inst.L + self.inst.E
         )
+        self.fixed_cost += sum(
+            getattr(config, "COST_HUB_FIXED", 0.0) * self.x.get(node, 0.0) for node in self.inst.H
+        )
         f_hub = config.COST_HUB
         self.fixed_cost += sum(f_hub[c] * self.z.get((i, c), 0.0) for i in self.inst.H for c in range(len(config.MU_HUB)))
         flight_coef = getattr(config, "COST_FLIGHT_TIME", 0.1)
-        self.flight_cost = flight_coef * sum(v for v in self.theta.values())
+        t_lookup = getattr(self.wrapper, "t", {})
+        self.flight_cost = 0.0
+        for (u_node, v_node, k_node), flow in self.theta.items():
+            if (u_node, v_node, k_node) in t_lookup:
+                travel_time = t_lookup[u_node, v_node, k_node]
+            elif k_node == '0':
+                travel_time = self.inst.get_time(u_node, v_node)
+            else:
+                travel_time = self.inst.get_time(u_node, k_node) + self.inst.get_time(k_node, v_node)
+            self.flight_cost += flight_coef * travel_time * flow
         gamma_val = self.gamma if self.gamma is not None else 0.0
         self.drone_cost = config.COST_DRONE * gamma_val
         self.total_cost = self.fixed_cost + self.flight_cost + self.drone_cost
         self.net_profit = self.served_revenue - self.total_cost
         self.rho_avg = float(np.mean(list(self.rho.values()))) if self.rho else 0.0
-
 
 
     def _rho_to_l_metric(self, rho_val):
@@ -206,6 +278,39 @@ class ResultProcessor:
         if rho_val >= 1.0 - tol:
             return None
         return rho_val / (1.0 - rho_val)
+
+    def _p_chain(self, hub):
+        p_by_hub = getattr(config, "P_CHAIN_BY_HUB", None)
+        if isinstance(p_by_hub, dict):
+            return float(p_by_hub.get(hub, config.P_CHAIN))
+        return float(config.P_CHAIN)
+
+    def _node_open_display(self, node):
+        if node in self.inst.H:
+            chosen_c = self.hub_capacity_level.get(node)
+            if chosen_c is not None:
+                return str(chosen_c + 1)
+            return "0" if self.x.get(node, 0.0) <= 0.5 else "-"
+        if node in self.inst.S:
+            owner = self.inst.s_to_h.get(node)
+            open_raw = self.x.get(owner, None)
+        else:
+            open_raw = self.x.get(node, None)
+        return str(int(open_raw > 0.5)) if open_raw is not None else "-"
+
+    def _node_open_raw(self, node):
+        if node in self.inst.S:
+            owner = self.inst.s_to_h.get(node)
+            return self.x.get(owner, None)
+        return self.x.get(node, None)
+
+    def _node_rho(self, node):
+        if node in self.inst.H:
+            mu = self.hub_mu.get(node)
+            if mu is None or mu <= 1e-8:
+                return None
+            return self.lambd.get(node, 0.0) / mu
+        return self.rho.get(node, None)
 
 
     def _is_all_zero_row(self, open_raw, in_flow, out_flow, rho_val, l_val):
@@ -285,28 +390,27 @@ class ResultProcessor:
             print(f"  Examples: {preview}{' ...' if len(dangling) > 10 else ''}")
 
         print("\nPer-node flow summary:")
-        print("  NodeID | Open | InFlow | OutFlow | Lambda |   rho |     L |    Xi|  W (min)")
+        print("  NodeID | Open | InFlow | OutFlow | Lambda |      mu |   rho |     L |    Xi|  W (min)")
         for node in self.summary_nodes:
-            if node in self.inst.L_v:
-                open_raw = self.x.get(self.inst.lv_to_h.get(node), None)
-            else:
-                open_raw = self.x.get(node, None)
-            open_display = str(int(open_raw > 0.5)) if open_raw is not None else "-"
+            open_raw = self._node_open_raw(node)
+            open_display = self._node_open_display(node)
             in_flow = self.node_inflow.get(node, 0.0)
             out_flow = self.node_outflow.get(node, 0.0)
             lambda_val = self.lambd.get(node, None)
-            rho_val = self.rho.get(node, None)
+            mu_val = self.node_mu_or_load.get(node, None)
+            rho_val = self._node_rho(node)
             l_val = self._rho_to_l_metric(rho_val)
             if self._is_all_zero_row(open_raw, in_flow, out_flow, rho_val, l_val):
                 continue
             lambda_display = f"{lambda_val:6.3f}" if lambda_val is not None else "  -   "
+            mu_display = f"{mu_val:7.3f}" if mu_val is not None else "   -   "
             rho_display = f"{rho_val:5.3f}" if rho_val is not None else "  -  "
             l_display = f"{l_val:5.3f}" if l_val is not None else "  -  "
             xi_val = self.xi.get(node, None)
             xi_display = f"{xi_val:5.3f}" if xi_val is not None else "  -  "
             W = xi_val / in_flow * 60 if in_flow > flow_tol and xi_val is not None else '  -  '
             W_display = f"{W:5.3f}" if isinstance(W, float) else "  -  "
-            print(f"  {node:>6} | {open_display:>4} | {in_flow:7.3f} | {out_flow:8.3f} | {lambda_display:>6} | {rho_display:>5} | {l_display:>5} | {xi_display:>5} | {W_display:>5}")
+            print(f"  {node:>6} | {open_display:>4} | {in_flow:7.3f} | {out_flow:8.3f} | {lambda_display:>6} | {mu_display:>7} | {rho_display:>5} | {l_display:>5} | {xi_display:>5} | {W_display:>5}")
 
                 
         print("="*50 + "\n")
@@ -315,30 +419,29 @@ class ResultProcessor:
         """Export CSV of node-level flow summary with rho and L columns."""
         with open(save_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['NodeID', 'Open', 'InFlow', 'OutFlow', 'Lambda', 'rho', 'L', 'Xi', 'W'])
+            writer.writerow(['NodeID', 'Open', 'InFlow', 'OutFlow', 'Lambda', 'mu', 'rho', 'L', 'Xi', 'W_min'])
             for node in self.summary_nodes:
-                rho_val = self.rho.get(node, None)
+                rho_val = self._node_rho(node)
                 l_val = self._rho_to_l_metric(rho_val)
                 in_flow = self.node_inflow.get(node, 0.0)
                 out_flow = self.node_outflow.get(node, 0.0)
                 lambda_val = self.lambd.get(node, None)
+                mu_val = self.node_mu_or_load.get(node, None)
                 xi_val = self.xi.get(node, None)
-                if node in self.inst.L_v:
-                    open_raw = self.x.get(self.inst.lv_to_h.get(node), None)
-                else:
-                    open_raw = self.x.get(node, None)
+                open_raw = self._node_open_raw(node)
                 if self._is_all_zero_row(open_raw, in_flow, out_flow, rho_val, l_val):
                     continue
                 writer.writerow([
                     node,
-                    1 if (open_raw is not None and open_raw > 0.5) else (0 if open_raw is not None else ''),
+                    self._node_open_display(node),
                     in_flow,
                     out_flow,
                     lambda_val,
+                    mu_val,
                     rho_val,
                     l_val,
                     xi_val,
-                    (xi_val / in_flow) if in_flow > 1e-5 and xi_val is not None else ''
+                    (xi_val / in_flow * 60) if in_flow > 1e-5 and xi_val is not None else ''
                 ])
 
     def save_selected_stations(self, save_path):
@@ -360,9 +463,10 @@ class ResultProcessor:
                 'x': self.x,
                 'y': self.y,
                 'z': self.z,
-                'u': self.u,
                 'eta': self.eta,
+                'sigma': self.sigma,
                 'phi': self.phi,
+                'varphi': self.phi,
                 'psi': self.psi,
                 'rho': self.rho,
                 'lambda': self.lambd,
@@ -379,9 +483,8 @@ class ResultProcessor:
             pickle.dump(data, f)
 
     def save_open_facilities_config(self, save_path):
-        """Export CSV of open facilities and their parameters for simulation."""
+        """Export CSV of open facilities and their selected parameters."""
         import pandas as pd
-        from src import config
 
         rows = []
         for node in self.inst.L + self.inst.H + self.inst.E:
@@ -414,7 +517,6 @@ class ResultProcessor:
                 })
         df = pd.DataFrame(rows, columns=['index', 'type', 'x', 'y', 'mu', 'rho'])
         df.to_csv(save_path, index=False)
-        print(f"Open facilities config saved to {save_path}")
 
     def plot_network(self, save_path=None):
         G = nx.DiGraph()
@@ -428,10 +530,13 @@ class ResultProcessor:
             except ValueError:
                 return False
         
-        # Add all physical nodes
+        def display_node(node):
+            return self.inst.s_to_h.get(node, node)
+
+        # Add all physical nodes and hub-side holding pools.
         for node in self.inst.N:
-            if node in self.inst.L_v:
-                status = 'open' if self.x.get(self.inst.lv_to_h.get(node), 0) > 0.5 else 'closed'
+            if node in self.inst.S:
+                status = 'open' if self.x.get(self.inst.s_to_h.get(node), 0) > 0.5 else 'closed'
             else:
                 status = 'open' if self.x.get(node, 0) > 0.5 else 'closed'
             node_type = node[0] 
@@ -449,8 +554,8 @@ class ResultProcessor:
         direct_widths = []
         for (u, v, k), flow in self.theta.items():
             if k == '0' and flow > flow_tol:
-                u_plot = self.inst.lv_to_h.get(u, u)
-                v_plot = self.inst.lv_to_h.get(v, v)
+                u_plot = display_node(u)
+                v_plot = display_node(v)
                 if u_plot != v_plot:
                     direct_edges.append((u_plot, v_plot))
                     # Visibly thicker lines
@@ -467,8 +572,8 @@ class ResultProcessor:
         swap_widths = []
         for (u, v, k), flow in self.theta.items():
             if k != '0' and flow > flow_tol:
-                u_plot = self.inst.lv_to_h.get(u, u)
-                v_plot = self.inst.lv_to_h.get(v, v)
+                u_plot = display_node(u)
+                v_plot = display_node(v)
 
                 # Leg 1: origin to swap
                 if u_plot != k and not is_corresponding_base_swap(u_plot, k):
@@ -497,8 +602,8 @@ class ResultProcessor:
             for (u, v), flow in self.psi.items():
                 if flow <= flow_tol:
                     continue
-                u_plot = self.inst.lv_to_h.get(u, u)
-                v_plot = self.inst.lv_to_h.get(v, v)
+                u_plot = display_node(u)
+                v_plot = display_node(v)
                 if u_plot != v_plot:
                     psi_edges.append((u_plot, v_plot))
                     psi_widths.append(1.0 + 4.0 * (flow / max_psi_flow))
@@ -519,10 +624,10 @@ class ResultProcessor:
                 print("Warning: no flow edges above tolerance to plot.")
 
         # 3. Nodes - distinguish open and closed
-        shapes = {'L': 's', 'H': '^', 'E': 'D', 'V': 'o'}
-        colors_open = {'L': 'red', 'H': 'green', 'E': 'orange', 'V': 'steelblue'}
+        shapes = {'L': 's', 'S': 'o', 'H': '^', 'E': 'D'}
+        colors_open = {'L': 'red', 'S': 'steelblue', 'H': 'green', 'E': 'orange'}
         
-        for n_type in ['L', 'H', 'E', 'V']:
+        for n_type in ['L', 'S', 'H', 'E']:
             open_nodes = [n for n, attr in G.nodes(data=True) if attr['status'] == 'open' and attr['type'] == n_type]
             if open_nodes:
                 nx.draw_networkx_nodes(G, pos, nodelist=open_nodes, 
@@ -594,6 +699,6 @@ class ResultProcessor:
         
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Network plot saved to {save_path}")
+            plt.close()
         else:
             plt.show()

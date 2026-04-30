@@ -1,12 +1,3 @@
-# Model Configuration
-USE_VIRTUAL_BASES_OPT = True  # Optimization chaining flag
-USE_VIRTUAL_BASES_SIM = True  # Simulation chaining flag
-
-# Paths
-import math
-
-RAW_DATA_DIR = "Shenzhen_rawdata"
-
 # Instance Generation Parameters (Hyperparameters)
 NUM_BASES = 1
 NUM_HUBS = 5
@@ -18,51 +9,51 @@ DEMAND_MAX = 8.0
 
 # Meituan Semi-synthetic Parameters
 MEITUAN_NUM_BASES = 5
-MEITUAN_NUM_HUBS = 15
+MEITUAN_NUM_HUBS = 20
 MEITUAN_NUM_SWAPPING = 5
 MEITUAN_MAP_HALF_SIZE_KM = 8  # Side length = 2 * half size. 3.0-4.0km usually yields stable top-10/top-10 candidates.
-MEITUAN_MIN_NODE_HOURLY_ORDERS = 0.2  # Drop low-frequency nodes below this avg hourly order count.
 MEITUAN_WORK_HOUR_START = 8
 MEITUAN_WORK_HOUR_END = 23
 MEITUAN_TIMEZONE = "Asia/Shanghai"
-MEITUAN_LE_PLACEMENT_MODE = "centroid"  # "centroid" or "jitter"
-MEITUAN_LE_JITTER_RADIUS_KM = 0.75  # at least 5x of previous 0.15km when using jitter mode
-MEITUAN_LE_CENTROID_SPREAD_KM = 1.5
-MEITUAN_MIN_EE_DISTANCE_KM = 1.0
+
+# Candidate locations and demand can be generated from different periods.
+# MEITUAN_DEMAND_HOUR denotes a one-hour demand period by default.
+MEITUAN_CANDIDATE_DATES = [20221017]
+MEITUAN_CANDIDATE_HOUR_START = 8
+MEITUAN_CANDIDATE_HOUR_END = 24
+MEITUAN_DEMAND_DATES = [20221017]
+MEITUAN_DEMAND_HOUR = 12
+MEITUAN_COLOCATE_BASE_SWAPS = True
 
 # Coverage and Distance Limits
 MAX_DIRECT_DISTANCE = 3.0     # Maximum distance a drone can fly directly without swapping
 MAX_DETOUR_DISTANCE = 5.0    # Maximum total distance allowed if routed through a swapping station
 
 # Model Parameters
-P_CHAIN = 1  # Chain probability (p)
-RHO_MAX = 0.95  # Max utilization limit
-SERVICE_LEVELS = [i/100 for i in range(5, 95, 20)]  # 0.05, 0.25, ..., 0.85 for rho_s discretization in the optimization model
-# SERVICE_LEVELS += [0.95] # Discrete service levels for rho_s
+P_CHAIN = 0  # Chain probability (p)
+RHO_MAX = 0.99  # Max utilization limit
 ENERGY_RATE_OMEGA = 10
 BATTERY_CAPACITY_OMEGA_UPPER = 100.0
-ENERGY_SAFETY_MARGIN_EPSILON = 0.3
-TAU_LV = 2/60  # 1 min
-TAU_H = 6/60 # 10 min
-GAMMA = 0.05
-MAX_WAITING_FACTOR_LV = - TAU_LV / math.log(GAMMA)
-# MU_HUB = [40.0, 60.0, 80.0, 100.0, 120.0]  # Discrete service rate levels at hub stations
+TAU_S = 2/60  # 2 min
+TAU_H = 5/60 # 5 min
 MU_HUB = [60.0]  # Discrete service rate levels at hub stations
 MU_SWAPPING = 500.0 # Service rate at swapping stations
-MAX_WAITING_FACTOR_H = MU_HUB[0] + math.log(GAMMA)/TAU_H
 MAX_FLOW_E = 1000.0  # Large constant for flow constraints
+
+# Solver
+MODEL_TIME_LIMIT = 3600
+MODEL_MIP_GAP = 0.05
 
 # Costs
 
-ORDER_REVENUE_COEF = 8  # Profit coefficient: served order volume * coef (10k CNY unit)
+ORDER_REVENUE_COEF = 4  # Profit coefficient: served order volume * coef (10k CNY unit)
 
 # COST_HUB = [20.0, 30.0, 40.0, 50.0, 60.0]  # Corresponding fixed costs for MU_HUB levels
 COST_HUB = [30.0]  # Corresponding fixed costs for MU_HUB levels
 COST_SWAPPING = 10.0
 COST_BASE = 100.0
 COST_DRONE = 4.0
-# Fleet Parameters
-MAX_FLEET_PER_BASE = 500000
+COST_FLIGHT_TIME = 0.1
 
 # Units and speed (strictly used by loader/preprocessing)
 DISTANCE_UNIT = "km"
@@ -70,8 +61,4 @@ TIME_UNIT = "hour"
 DRONE_SPEED_KMPH = 30.0
 
 # Misc
-BIG_M = MEITUAN_NUM_BASES * MAX_FLEET_PER_BASE
 EPS = 1e-6
-
-# Benders options
-INDEPENDENT_MW = True
