@@ -30,13 +30,13 @@ class MLNDModel:
         self.N_x = self.L + self.H + self.E
         self.HLS = self.L + self.H + self.S
 
+        self.A = sorted(self.inst.A)
         self.A_HH = sorted(self.inst.A_HH)
         self.A_LH = sorted(self.inst.A_LH)
         self.A_HS = sorted(self.inst.A_HS)
         self.A_SH = sorted(self.inst.A_SH)
         self.A_SL = sorted(self.inst.A_SL)
         self.A_SS = sorted(self.inst.A_SS)
-        self.A_phi = sorted(self.inst.A_phi)
         self.A_F = sorted(self.inst.A_F)
 
         self.route_options = {}
@@ -44,7 +44,7 @@ class MLNDModel:
         self.flight_cost = {}
         self._build_route_options()
 
-        # Filled in build() for convenient downstream access/debugging.
+        # Filled in build() for convenient downstream access.
         self.vars = {}
 
     def _build_route_options(self):
@@ -75,11 +75,6 @@ class MLNDModel:
     def _hub_pool(self, h):
         return self.inst.h_to_s[h]
 
-    def _node_open_expr(self, node, x):
-        if node in self.S:
-            return x[self.inst.s_to_h[node]]
-        return x[node]
-
     def _p_chain(self, hub):
         p_by_hub = getattr(config, "P_CHAIN_BY_HUB", None)
         if isinstance(p_by_hub, dict):
@@ -92,12 +87,11 @@ class MLNDModel:
 
         C = range(len(config.MU_HUB))
         mu_c = config.MU_HUB
-        rho_max = float(config.RHO_MAX)
         tau_H = float(config.TAU_H)
         tau_S = float(config.TAU_S)
         omega = float(config.ENERGY_RATE_OMEGA)
         Omega = float(config.BATTERY_CAPACITY_OMEGA_UPPER)
-        swap_capacity = float(getattr(config, "SWAP_CAPACITY", config.MU_SWAPPING))
+        energy_epsilon = float(getattr(config, "ENERGY_EPSILON", getattr(config, "EPS", 0.0)))
         max_flow = float(config.MAX_FLOW_E)
 
         x = self.model.addVars(self.N_x, vtype=GRB.BINARY, name="x")
@@ -106,36 +100,32 @@ class MLNDModel:
         y_keys = [(i, l) for (l, i) in self.A_LH]
         y = self.model.addVars(y_keys, vtype=GRB.BINARY, name="y")
 
-        rho_l = self.model.addVars(self.L, lb=0.0, ub=rho_max, name="rho_l")
-        rho_s = self.model.addVars(self.S, lb=0.0, ub=rho_max, name="rho_s")
+        rho_l = self.model.addVars(self.L, lb=0.0, name="rho_l")
+        rho_s = self.model.addVars(self.S, lb=0.0, name="rho_s")
 
-        alpha = self.model.addVars(y_keys, lb=0.0, ub=rho_max, name="alpha")
-        beta_keys = [
+        alpha_keys = [
             (l, i, j)
             for (l, i) in self.A_LH
             for (i2, j) in self.A_HH
             if i2 == i
         ]
-        beta = self.model.addVars(beta_keys, lb=0.0, ub=rho_max, name="beta")
+        alpha = self.model.addVars(alpha_keys, lb=0.0, name="alpha")
 
-        delta_keys = list(self.A_HH)
-        delta = self.model.addVars(delta_keys, lb=0.0, ub=rho_max, name="delta")
+        beta_keys = list(self.A_HH)
+        beta = self.model.addVars(beta_keys, lb=0.0, name="beta")
 
-        eta = self.model.addVars(beta_keys, lb=0.0, name="eta")
-        sigma = self.model.addVars(delta_keys, lb=0.0, name="sigma")
-        psi = self.model.addVars(delta_keys, lb=0.0, name="psi")
-
-        varphi = self.model.addVars(self.A_phi, lb=0.0, name="varphi")
-        theta_keys = [
+        psi = self.model.addVars(self.A, lb=0.0, name="psi")
+        varphi_keys = [
             (u, v, k)
             for (u, v) in self.A_F
             for k in self.route_options.get((u, v), [])
         ]
-        theta = self.model.addVars(theta_keys, lb=0.0, name="theta")
+        varphi = self.model.addVars(varphi_keys, lb=0.0, name="varphi")
 
         lambd = self.model.addVars(self.H, lb=0.0, name="lambda")
+        mu = self.model.addVars(self.H, lb=0.0, name="mu")
         xi = self.model.addVars(self.HLS, lb=0.0, name="xi")
-        Gamma = self.model.addVar(lb=0.0, name="Gamma")
+        Gamma = self.model.addVar(lb=0.0, vtype=GRB.INTEGER, name="Gamma")
 
         served_benefit = gp.quicksum(
             float(getattr(config, "ORDER_REVENUE_COEF", 0.0))
@@ -155,7 +145,7 @@ class MLNDModel:
             float(config.COST_HUB[c]) * z[i, c] for i in self.H for c in C
         )
         operating_cost = gp.quicksum(
-            self.flight_cost[u, v, k] * theta[u, v, k] for (u, v, k) in theta_keys
+            self.flight_cost[u, v, k] * varphi[u, v, k] for (u, v, k) in varphi_keys
         )
 
         self.model.setObjective(
@@ -183,165 +173,179 @@ class MLNDModel:
 
         for l in self.L:
             self.model.addConstr(rho_l[l] <= x[l], name=f"rho_L_{l}")
-        for i in self.H:
-            s = self._hub_pool(i)
+        for i, s in self.A_HS:
             self.model.addConstr(rho_s[s] <= x[i], name=f"rho_S_{s}")
 
-        # alpha[i,l] = rho_l[l] * y[i,l].
-        for i, l in y_keys:
-            self.model.addConstr(alpha[i, l] <= rho_l[l], name=f"alpha_1_{i}_{l}")
-            self.model.addConstr(alpha[i, l] <= y[i, l], name=f"alpha_2_{i}_{l}")
+        # alpha[l,i,j] = rho_l[l] * y[i,l] * x[j].
+        for l, i, j in alpha_keys:
+            self.model.addConstr(alpha[l, i, j] <= rho_l[l], name=f"alpha_1_{l}_{i}_{j}")
+            self.model.addConstr(alpha[l, i, j] <= y[i, l], name=f"alpha_2_{l}_{i}_{j}")
+            self.model.addConstr(alpha[l, i, j] <= x[j], name=f"alpha_3_{l}_{i}_{j}")
             self.model.addConstr(
-                alpha[i, l] >= rho_l[l] + y[i, l] - 1,
-                name=f"alpha_3_{i}_{l}",
+                alpha[l, i, j] >= rho_l[l] + y[i, l] + x[j] - 2,
+                name=f"alpha_4_{l}_{i}_{j}",
             )
 
-        # beta[l,i,j] = alpha[i,l] * x_j.
-        for l, i, j in beta_keys:
-            self.model.addConstr(beta[l, i, j] <= alpha[i, l], name=f"beta_1_{l}_{i}_{j}")
-            self.model.addConstr(beta[l, i, j] <= x[j], name=f"beta_2_{l}_{i}_{j}")
-            self.model.addConstr(
-                beta[l, i, j] >= alpha[i, l] + x[j] - 1,
-                name=f"beta_3_{l}_{i}_{j}",
-            )
-
-        # delta[i,j] = rho_s(i) * x_j.
-        for i, j in delta_keys:
-            s = self._hub_pool(i)
-            self.model.addConstr(delta[i, j] <= rho_s[s], name=f"delta_1_{i}_{j}")
-            self.model.addConstr(delta[i, j] <= x[j], name=f"delta_2_{i}_{j}")
-            self.model.addConstr(
-                delta[i, j] >= rho_s[s] + x[j] - 1,
-                name=f"delta_3_{i}_{j}",
-            )
-
-        for l, i, j in beta_keys:
-            p_i = self._p_chain(i)
-            demand = float(self.inst.h.get((i, j), 0.0))
-            self.model.addConstr(
-                eta[l, i, j] == (1.0 - p_i) * demand * beta[l, i, j],
-                name=f"eta_{l}_{i}_{j}",
-            )
-
-        for i, j in delta_keys:
-            p_i = self._p_chain(i)
-            demand = float(self.inst.h.get((i, j), 0.0))
-            self.model.addConstr(
-                sigma[i, j] == p_i * demand * delta[i, j],
-                name=f"sigma_{i}_{j}",
-            )
-            self.model.addConstr(
-                psi[i, j]
-                == gp.quicksum(eta[l, i, j] for (l, h) in self.A_LH if h == i and (l, i, j) in eta)
-                + sigma[i, j],
-                name=f"psi_{i}_{j}",
-            )
-
-        # Empty-drone source flows for base-side and holding-side initiations.
-        for l, i in self.A_LH:
-            self.model.addConstr(
-                varphi[l, i]
-                == gp.quicksum(eta[l, i, j] for (h, j) in self.A_HH if h == i and (l, i, j) in eta),
-                name=f"varphi_LH_{l}_{i}",
-            )
-
-        for i in self.H:
-            s = self._hub_pool(i)
-            if (s, i) in varphi:
+        # beta[i,j] = rho_s * x[j] for the holding pool s linked to i.
+        for s, i in self.A_SH:
+            for h, j in self.A_HH:
+                if h != i:
+                    continue
+                self.model.addConstr(beta[i, j] <= rho_s[s], name=f"beta_1_{i}_{j}")
+                self.model.addConstr(beta[i, j] <= x[j], name=f"beta_2_{i}_{j}")
                 self.model.addConstr(
-                    varphi[s, i] == gp.quicksum(sigma[i, j] for (h, j) in self.A_HH if h == i),
-                    name=f"varphi_SH_{s}_{i}",
+                    beta[i, j] >= rho_s[s] + x[j] - 1,
+                    name=f"beta_3_{i}_{j}",
                 )
 
-        for u, v in self.A_phi:
+        for i, j in self.A_HH:
+            p_i = self._p_chain(i)
+            demand = float(self.inst.h.get((i, j), 0.0))
             self.model.addConstr(
-                varphi[u, v] <= max_flow * self._node_open_expr(u, x),
-                name=f"varphi_open_u_{u}_{v}",
-            )
-            self.model.addConstr(
-                varphi[u, v] <= max_flow * self._node_open_expr(v, x),
-                name=f"varphi_open_v_{u}_{v}",
+                psi[i, j]
+                == demand
+                * (
+                    (1.0 - p_i)
+                    * gp.quicksum(
+                        alpha[l, i, j]
+                        for (l, h) in self.A_LH
+                        if h == i and (l, i, j) in alpha
+                    )
+                    + p_i * beta[i, j]
+                ),
+                name=f"psi_HH_{i}_{j}",
             )
 
-        for q in self.L + self.S:
+        for l, i in self.A_LH:
             self.model.addConstr(
-                gp.quicksum(varphi[u, q] for (u, v) in self.A_phi if v == q)
-                == gp.quicksum(varphi[q, v] for (u, v) in self.A_phi if u == q),
-                name=f"empty_balance_{q}",
+                psi[l, i]
+                == gp.quicksum(
+                    float(self.inst.h.get((i, j), 0.0))
+                    * (1.0 - self._p_chain(i))
+                    * alpha[l, i, j]
+                    for (h, j) in self.A_HH
+                    if h == i and (l, i, j) in alpha
+                ),
+                name=f"psi_LH_{l}_{i}",
             )
 
-        for i in self.H:
+        for s, i in self.A_SH:
             self.model.addConstr(
-                gp.quicksum(varphi[u, i] for (u, v) in self.A_phi if v == i)
-                == gp.quicksum(psi[i, j] for (h, j) in self.A_HH if h == i),
-                name=f"H_empty_to_loaded_{i}",
+                psi[s, i]
+                == gp.quicksum(
+                    float(self.inst.h.get((i, j), 0.0))
+                    * self._p_chain(i)
+                    * beta[i, j]
+                    for (h, j) in self.A_HH
+                    if h == i
+                ),
+                name=f"psi_SH_{s}_{i}",
             )
+
+        for q in self.HLS:
             self.model.addConstr(
-                gp.quicksum(psi[j, i] for (j, h) in self.A_HH if h == i)
-                == gp.quicksum(varphi[i, v] for (u, v) in self.A_phi if u == i),
-                name=f"H_loaded_to_empty_{i}",
+                gp.quicksum(psi[u, q] for (u, v) in self.A if v == q)
+                == gp.quicksum(psi[q, v] for (u, v) in self.A if u == q),
+                name=f"flow_balance_{q}",
+            )
+
+        for i, s in self.A_HS:
+            self.model.addConstr(
+                gp.quicksum(psi[s, u] for (v, u) in self.A if v == s) <= max_flow * x[i],
+                name=f"pool_flow_active_{s}",
             )
 
         # Route-option decomposition for physical flights.
-        for i, j in self.A_HH:
+        for u, v in self.A_F:
             self.model.addConstr(
-                gp.quicksum(theta[i, j, k] for k in self.route_options.get((i, j), []) if (i, j, k) in theta)
-                == psi[i, j],
-                name=f"route_HH_{i}_{j}",
-            )
-
-        for u, v in self.A_LH + self.A_SL + self.A_SS:
-            self.model.addConstr(
-                gp.quicksum(theta[u, v, k] for k in self.route_options.get((u, v), []) if (u, v, k) in theta)
-                == varphi[u, v],
-                name=f"route_empty_{u}_{v}",
+                gp.quicksum(
+                    varphi[u, v, k]
+                    for k in self.route_options.get((u, v), [])
+                    if (u, v, k) in varphi
+                )
+                == psi[u, v],
+                name=f"route_{u}_{v}",
             )
 
         for k in self.E:
+            swap_capacity = float(self.inst.mu.get(k, getattr(config, "SWAP_CAPACITY", config.MU_SWAPPING)))
             self.model.addConstr(
-                gp.quicksum(theta[u, v, k] for (u, v, kk) in theta_keys if kk == k)
+                gp.quicksum(varphi[u, v, k] for (u, v, kk) in varphi_keys if kk == k)
                 <= swap_capacity * x[k],
                 name=f"swap_capacity_{k}",
             )
 
         total_queue_length = gp.quicksum(xi[u] for u in self.HLS)
         total_flight_time = gp.quicksum(
-            self.t[u, v, k] * theta[u, v, k] for (u, v, k) in theta_keys
+            self.t[u, v, k] * varphi[u, v, k] for (u, v, k) in varphi_keys
         )
-        swapped_flights = gp.quicksum(
-            theta[u, v, k] for (u, v, k) in theta_keys if k in self.E
-        )
-        self.model.addConstr(
-            omega * (total_queue_length + total_flight_time) <= Omega * swapped_flights,
-            name="energy_global",
-        )
+        usable_battery = (1.0 - energy_epsilon) * Omega
 
         for l in self.L:
             self.model.addConstr(
                 omega
                 * gp.quicksum(
-                    self.t[l, i, k] * theta[l, i, k]
-                    for (u, i, k) in theta_keys
+                    self.t[l, i, k] * varphi[l, i, k]
+                    for (u, i, k) in varphi_keys
                     if u == l and (l, i) in self.A_LH
                 )
-                <= Omega
+                <= usable_battery
                 * gp.quicksum(
-                    theta[l, i, k]
-                    for (u, i, k) in theta_keys
+                    varphi[l, i, k]
+                    for (u, i, k) in varphi_keys
                     if u == l and (l, i) in self.A_LH and k in self.E
                 ),
                 name=f"energy_L_{l}",
             )
 
         for i in self.H:
+            s = self._hub_pool(i)
             self.model.addConstr(
                 lambd[i]
-                == gp.quicksum(psi[i, j] for (h, j) in self.A_HH if h == i)
-                + gp.quicksum(psi[j, i] for (j, h) in self.A_HH if h == i),
+                == gp.quicksum(psi[u, i] for (u, v) in self.A if v == i),
                 name=f"lambda_{i}",
             )
-            mu_z = gp.quicksum(float(mu_c[c]) * z[i, c] for c in C)
-            self.model.addConstr(lambd[i] <= rho_max * mu_z, name=f"hub_stability_{i}")
+            self.model.addConstr(
+                mu[i] == gp.quicksum(float(mu_c[c]) * z[i, c] for c in C),
+                name=f"mu_{i}",
+            )
+            self.model.addConstr(
+                mu[i] - lambd[i] >= x[i] / tau_H,
+                name=f"hub_wait_{i}",
+            )
+            self.model.addConstr(
+                omega
+                * (
+                    xi[i]
+                    + xi[s]
+                    + gp.quicksum(
+                        self.t[i, j, k] * varphi[i, j, k]
+                        for (h, j, k) in varphi_keys
+                        if h == i and (i, j) in self.A_HH
+                    )
+                    + gp.quicksum(
+                        self.t[s, v, k] * varphi[s, v, k]
+                        for (u, v, k) in varphi_keys
+                        if u == s and ((s, v) in self.A_SL or (s, v) in self.A_SS)
+                    )
+                )
+                <= usable_battery
+                * (
+                    gp.quicksum(
+                        varphi[i, j, k]
+                        for (h, j, k) in varphi_keys
+                        if h == i and (i, j) in self.A_HH and k in self.E
+                    )
+                    + gp.quicksum(
+                        varphi[s, v, k]
+                        for (u, v, k) in varphi_keys
+                        if u == s
+                        and ((s, v) in self.A_SL or (s, v) in self.A_SS)
+                        and k in self.E
+                    )
+                ),
+                name=f"energy_HS_{i}",
+            )
 
         for l in self.L:
             self.model.addQConstr(
@@ -358,17 +362,15 @@ class MLNDModel:
             )
 
         for i in self.H:
-            mu_z = gp.quicksum(float(mu_c[c]) * z[i, c] for c in C)
             self.model.addQConstr(
-                4 * mu_z + (xi[i] + lambd[i] - mu_z + 1) * (xi[i] + lambd[i] - mu_z + 1)
-                <= (xi[i] - lambd[i] + mu_z + 1) * (xi[i] - lambd[i] + mu_z + 1),
+                4 * mu[i] + (xi[i] + lambd[i] - mu[i] + 1) * (xi[i] + lambd[i] - mu[i] + 1)
+                <= (xi[i] - lambd[i] + mu[i] + 1) * (xi[i] - lambd[i] + mu[i] + 1),
                 name=f"queue_H_{i}",
             )
-            self.model.addConstr(xi[i] <= tau_H * lambd[i], name=f"mean_H_{i}")
 
         for s in self.S:
             self.model.addConstr(
-                xi[s] <= tau_S * gp.quicksum(varphi[s, v] for (u, v) in self.A_phi if u == s),
+                xi[s] <= tau_S * gp.quicksum(psi[s, v] for (u, v) in self.A if u == s),
                 name=f"mean_S_{s}",
             )
 
@@ -385,13 +387,10 @@ class MLNDModel:
             "rho_s": rho_s,
             "alpha": alpha,
             "beta": beta,
-            "delta": delta,
-            "eta": eta,
-            "sigma": sigma,
             "psi": psi,
             "varphi": varphi,
-            "theta": theta,
             "lambda": lambd,
+            "mu": mu,
             "xi": xi,
             "Gamma": Gamma,
         }
@@ -484,7 +483,7 @@ def run_meituan_regime_ii(
     inst = DataLoader().load_instance_dir(meituan_instance_dir, period_id=load_period_id)
     print(
         f"Loaded: H={len(inst.H)}, L={len(inst.L)}, S={len(inst.S)}, E={len(inst.E)}, "
-        f"OD={len(inst.h)}, A_F={len(inst.A_F)}, A_phi={len(inst.A_phi)}"
+        f"OD={len(inst.h)}, A={len(inst.A)}, A_F={len(inst.A_F)}"
     )
 
     model = MLNDModel(inst)

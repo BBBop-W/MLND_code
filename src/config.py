@@ -8,9 +8,9 @@ DEMAND_MIN = 2.0
 DEMAND_MAX = 8.0
 
 # Meituan Semi-synthetic Parameters
-MEITUAN_NUM_BASES = 5
-MEITUAN_NUM_HUBS = 20
-MEITUAN_NUM_SWAPPING = 5
+MEITUAN_NUM_BASES = 20
+MEITUAN_NUM_HUBS = 60
+MEITUAN_NUM_SWAPPING = 20
 MEITUAN_MAP_HALF_SIZE_KM = 8  # Side length = 2 * half size. 3.0-4.0km usually yields stable top-10/top-10 candidates.
 MEITUAN_WORK_HOUR_START = 8
 MEITUAN_WORK_HOUR_END = 23
@@ -30,7 +30,7 @@ MAX_DIRECT_DISTANCE = 3.0     # Maximum distance a drone can fly directly withou
 MAX_DETOUR_DISTANCE = 5.0    # Maximum total distance allowed if routed through a swapping station
 
 # Model Parameters
-P_CHAIN = 0  # Chain probability (p)
+P_CHAIN = 0.3  # Chain probability (p)
 RHO_MAX = 0.99  # Max utilization limit
 ENERGY_RATE_OMEGA = 10
 BATTERY_CAPACITY_OMEGA_UPPER = 100.0

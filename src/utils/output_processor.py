@@ -37,15 +37,13 @@ class ResultProcessor:
         
         self.x = {}
         self.y = {}
-        self.eta = {}
-        self.sigma = {}
         self.xi = {}
         self.psi = {}
-        self.phi = {}
+        self.empty_psi = {}
+        self.varphi = {}
         self.z = {}
         self.rho = {}
         self.lambd = {}
-        self.theta = {}
 
         Vars = self.model.getVars()
         
@@ -57,14 +55,6 @@ class ResultProcessor:
                 parts = v.VarName[2:-1].split(',')
                 if len(parts) == 2:
                     self.y[(parts[0], parts[1])] = v.X
-            elif v.VarName.startswith("eta["):
-                parts = v.VarName[4:-1].split(',')
-                if len(parts) == 3:
-                    self.eta[(parts[0], parts[1], parts[2])] = v.X
-            elif v.VarName.startswith("sigma["):
-                parts = v.VarName[6:-1].split(',')
-                if len(parts) == 2:
-                    self.sigma[(parts[0], parts[1])] = v.X
             elif v.VarName.startswith("xi["):
                 key = v.VarName[3:-1]
                 self.xi[key] = v.X
@@ -72,14 +62,10 @@ class ResultProcessor:
                 parts = v.VarName[4:-1].split(',')
                 if len(parts) == 2:
                     self.psi[(parts[0], parts[1])] = v.X
-            elif v.VarName.startswith("phi["):
-                parts = v.VarName[4:-1].split(',')
-                if len(parts) == 2:
-                    self.phi[(parts[0], parts[1])] = v.X
             elif v.VarName.startswith("varphi["):
                 parts = v.VarName[7:-1].split(',')
-                if len(parts) == 2:
-                    self.phi[(parts[0], parts[1])] = v.X
+                if len(parts) == 3:
+                    self.varphi[(parts[0], parts[1], parts[2])] = v.X
             elif v.VarName.startswith("z["):
                 parts = v.VarName[2:-1].split(',')
                 if len(parts) == 2:
@@ -93,10 +79,13 @@ class ResultProcessor:
             elif v.VarName.startswith("lambda["):
                 key = v.VarName[7:-1]
                 self.lambd[key] = v.X
-            elif v.VarName.startswith("theta["):
-                parts = v.VarName[6:-1].split(',')
-                if len(parts) == 3:
-                    self.theta[(parts[0], parts[1], parts[2])] = v.X
+
+        if not self.empty_psi:
+            self.empty_psi = {
+                arc: flow
+                for arc, flow in self.psi.items()
+                if arc not in self.inst.A_HH
+            }
 
         self.open_L = sum(1 for node in self.inst.L if self.x.get(node, 0) > 0.5)
         self.open_H = sum(1 for node in self.inst.H if self.x.get(node, 0) > 0.5)
@@ -118,20 +107,27 @@ class ResultProcessor:
         # Node-level flow accounting for printed/exported summaries.
         #
         # H/S accounting follows the Regime II conservation equations instead
-        # of raw theta legs. This keeps hub handling and holding-pool movement
-        # visible in the same units as psi/varphi. Swapping stations are still
-        # counted from theta because they only appear as route options.
+        # of raw route legs. Swapping stations are still counted from varphi
+        # because they only appear as route options.
         self.node_inflow = {node: 0.0 for node in self.summary_nodes}
         self.node_outflow = {node: 0.0 for node in self.summary_nodes}
 
         flow_tol = 1e-5
 
         loaded_out = {
-            h_node: sum(flow for (i_node, _), flow in self.psi.items() if i_node == h_node)
+            h_node: sum(
+                flow
+                for (i_node, j_node), flow in self.psi.items()
+                if i_node == h_node and (i_node, j_node) in self.inst.A_HH
+            )
             for h_node in self.inst.H
         }
         loaded_in = {
-            h_node: sum(flow for (_, j_node), flow in self.psi.items() if j_node == h_node)
+            h_node: sum(
+                flow
+                for (i_node, j_node), flow in self.psi.items()
+                if j_node == h_node and (i_node, j_node) in self.inst.A_HH
+            )
             for h_node in self.inst.H
         }
 
@@ -141,19 +137,19 @@ class ResultProcessor:
 
         for l_node in self.inst.L:
             self.node_inflow[l_node] = sum(
-                self.phi.get((s_node, l_node), 0.0) for s_node in holding_nodes
+                self.empty_psi.get((s_node, l_node), 0.0) for s_node in holding_nodes
             )
             self.node_outflow[l_node] = sum(
-                self.phi.get((l_node, h_node), 0.0) for h_node in self.inst.H
+                self.empty_psi.get((l_node, h_node), 0.0) for h_node in self.inst.H
             )
 
         for h_node in self.inst.H:
             s_node = h_to_s.get(h_node)
-            empty_from_pool = self.phi.get((s_node, h_node), 0.0) if s_node else 0.0
+            empty_from_pool = self.empty_psi.get((s_node, h_node), 0.0) if s_node else 0.0
             empty_from_base = sum(
-                self.phi.get((l_node, h_node), 0.0) for l_node in self.inst.L
+                self.empty_psi.get((l_node, h_node), 0.0) for l_node in self.inst.L
             )
-            empty_to_pool = self.phi.get((h_node, s_node), 0.0) if s_node else 0.0
+            empty_to_pool = self.empty_psi.get((h_node, s_node), 0.0) if s_node else 0.0
 
             self.node_inflow[h_node] = loaded_in[h_node] + empty_from_pool + empty_from_base
             self.node_outflow[h_node] = loaded_out[h_node] + empty_to_pool
@@ -162,18 +158,18 @@ class ResultProcessor:
             h_node = s_to_h.get(s_node)
             completed_to_owner = loaded_in.get(h_node, 0.0)
             incoming_from_pools = sum(
-                self.phi.get((r_node, s_node), 0.0)
+                self.empty_psi.get((r_node, s_node), 0.0)
                 for r_node in holding_nodes
                 if r_node != s_node
             )
-            outbound_to_owner_hub = self.phi.get((s_node, h_node), 0.0) if h_node else 0.0
+            outbound_to_owner_hub = self.empty_psi.get((s_node, h_node), 0.0) if h_node else 0.0
             outbound_to_pools = sum(
-                self.phi.get((s_node, r_node), 0.0)
+                self.empty_psi.get((s_node, r_node), 0.0)
                 for r_node in holding_nodes
                 if r_node != s_node
             )
             outbound_to_bases = sum(
-                self.phi.get((s_node, l_node), 0.0) for l_node in self.inst.L
+                self.empty_psi.get((s_node, l_node), 0.0) for l_node in self.inst.L
             )
 
             self.node_inflow[s_node] = completed_to_owner + incoming_from_pools
@@ -181,7 +177,7 @@ class ResultProcessor:
                 outbound_to_owner_hub + outbound_to_pools + outbound_to_bases
             )
 
-        for (_, _, k_node), flow in self.theta.items():
+        for (_, _, k_node), flow in self.varphi.items():
             if flow <= flow_tol or k_node == '0' or k_node not in self.inst.E:
                 continue
             self.node_inflow[k_node] += flow
@@ -191,7 +187,7 @@ class ResultProcessor:
         # physical base flow must not be zero.
         hub_outgoing = {h_node: 0.0 for h_node in self.inst.H}
         for (i_node, j_node), flow in self.psi.items():
-            if i_node in hub_outgoing and flow > flow_tol:
+            if i_node in hub_outgoing and (i_node, j_node) in self.inst.A_HH and flow > flow_tol:
                 hub_outgoing[i_node] += flow
 
         self.base_assigned_flow = {l_node: 0.0 for l_node in self.inst.L}
@@ -230,7 +226,7 @@ class ResultProcessor:
                 )
         for e_node in self.inst.E:
             self.node_mu_or_load[e_node] = sum(
-                flow for (_, _, k_node), flow in self.theta.items() if k_node == e_node
+                flow for (_, _, k_node), flow in self.varphi.items() if k_node == e_node
             )
 
         self.node_total_flow = {
@@ -256,7 +252,7 @@ class ResultProcessor:
         flight_coef = getattr(config, "COST_FLIGHT_TIME", 0.1)
         t_lookup = getattr(self.wrapper, "t", {})
         self.flight_cost = 0.0
-        for (u_node, v_node, k_node), flow in self.theta.items():
+        for (u_node, v_node, k_node), flow in self.varphi.items():
             if (u_node, v_node, k_node) in t_lookup:
                 travel_time = t_lookup[u_node, v_node, k_node]
             elif k_node == '0':
@@ -368,13 +364,11 @@ class ResultProcessor:
             print(f"  ... and {len(y_active) - 10} more.")
 
         flow_tol = 1e-5
-        active_phi_edges = sum(1 for v in self.phi.values() if v > flow_tol)
         active_psi_edges = sum(1 for v in self.psi.values() if v > flow_tol)
-        active_theta_edges = sum(1 for v in self.theta.values() if v > flow_tol)
+        active_varphi_edges = sum(1 for v in self.varphi.values() if v > flow_tol)
         print(f"\nActive edge counts (tol={flow_tol:g}):")
-        print(f"  phi edges       : {active_phi_edges}")
         print(f"  psi edges       : {active_psi_edges}")
-        print(f"  theta edges     : {active_theta_edges}")
+        print(f"  varphi routes   : {active_varphi_edges}")
 
         # Dangling open stations: open physical nodes with no significant incident flow.
         dangling = []
@@ -463,14 +457,10 @@ class ResultProcessor:
                 'x': self.x,
                 'y': self.y,
                 'z': self.z,
-                'eta': self.eta,
-                'sigma': self.sigma,
-                'phi': self.phi,
-                'varphi': self.phi,
                 'psi': self.psi,
+                'varphi': self.varphi,
                 'rho': self.rho,
                 'lambda': self.lambd,
-                'theta': self.theta,
                 'gamma': self.gamma
             },
             'metrics': {
@@ -546,31 +536,31 @@ class ResultProcessor:
         pos = nx.get_node_attributes(G, 'pos')
         
         # Calculate max flow for scaling
-        all_flows = [f for f in self.theta.values() if f > flow_tol]
-        max_phi_flow = max(all_flows) if all_flows else 1.0
+        all_flows = [f for f in self.varphi.values() if f > flow_tol]
+        max_varphi_flow = max(all_flows) if all_flows else 1.0
         
-        # 1. Plot direct flows (phi^0) - Gray lines
+        # 1. Plot direct route flows (varphi^0) - Gray lines
         direct_edges = []
         direct_widths = []
-        for (u, v, k), flow in self.theta.items():
+        for (u, v, k), flow in self.varphi.items():
             if k == '0' and flow > flow_tol:
                 u_plot = display_node(u)
                 v_plot = display_node(v)
                 if u_plot != v_plot:
                     direct_edges.append((u_plot, v_plot))
                     # Visibly thicker lines
-                    direct_widths.append(1.0 + 4.0 * (flow / max_phi_flow))
+                    direct_widths.append(1.0 + 4.0 * (flow / max_varphi_flow))
 
         if direct_edges:
             nx.draw_networkx_edges(G, pos, edgelist=direct_edges, width=direct_widths, 
-                                edge_color='gray', alpha=0.4, arrows=True, 
-                                arrowsize=15, connectionstyle='arc3,rad=0.1', 
-                                label='Direct Flow (phi^0)')
+                                edge_color='gray', alpha=0.4, arrows=True,
+                                arrowsize=15, connectionstyle='arc3,rad=0.1',
+                                label='Direct Flow (varphi^0)')
 
-        # 2. Plot flows via swapping stations (phi^k) - Orange lines
+        # 2. Plot flows via swapping stations (varphi^k) - Orange lines
         swap_edges = []
         swap_widths = []
-        for (u, v, k), flow in self.theta.items():
+        for (u, v, k), flow in self.varphi.items():
             if k != '0' and flow > flow_tol:
                 u_plot = display_node(u)
                 v_plot = display_node(v)
@@ -581,8 +571,8 @@ class ResultProcessor:
                 # Leg 2: swap to dest
                 if k != v_plot and not is_corresponding_base_swap(k, v_plot):
                     swap_edges.append((k, v_plot))
-                
-                width = 1.0 + 4.0 * (flow / max_phi_flow)
+
+                width = 1.0 + 4.0 * (flow / max_varphi_flow)
                 if u_plot != k and not is_corresponding_base_swap(u_plot, k):
                     swap_widths.append(width)
                 if k != v_plot and not is_corresponding_base_swap(k, v_plot):
@@ -590,11 +580,11 @@ class ResultProcessor:
 
         if swap_edges:
             nx.draw_networkx_edges(G, pos, edgelist=swap_edges, width=swap_widths, 
-                                edge_color='darkorange', alpha=0.7, arrows=True, 
+                                edge_color='darkorange', alpha=0.7, arrows=True,
                                 arrowsize=15, connectionstyle='arc3,rad=0.1',
-                                label='Swapped Flow (phi^k)')
+                                label='Swapped Flow (varphi^k)')
 
-        # If phi edges are unavailable (e.g., master-only model), fall back to psi.
+        # If route edges are unavailable (e.g., master-only model), fall back to psi.
         if not direct_edges and not swap_edges:
             psi_edges = []
             psi_widths = []
