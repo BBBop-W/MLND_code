@@ -491,6 +491,7 @@ class RegimeIICallbackBenders:
         data = self.data
         model = gp.Model("RegimeII_CallbackBenders_Dual")
         model.setParam("OutputFlag", 1 if self.verbose else 0)
+        model.setParam("Threads", 1)
         model.setParam("TimeLimit", self.time_limit)
         model.setParam("MIPGap", self.mip_gap)
         model.setParam("LazyConstraints", 1)
@@ -1026,3 +1027,80 @@ def run_benders_regime_ii_callback(
     solver.solve()
     return solver
 
+
+def _env_flag(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "n"}
+
+
+def run_meituan_regime_ii_callback(
+    generate_sample=None,
+    date_filter=None,
+    project_root=None,
+    time_limit=None,
+    mip_gap=None,
+    verbose=True,
+    **kwargs,
+):
+    """Generate/load the Meituan instance and solve Regime II with callback Benders."""
+    from src.data_processor.generator import DataGenerator
+    from src.data_processor.loader import DataLoader
+
+    if project_root is None:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if generate_sample is None:
+        generate_sample = _env_flag("MLND_GENERATE_SAMPLE", True)
+    if date_filter is None:
+        date_filter = config.MEITUAN_DEMAND_DATES[0]
+    if time_limit is None:
+        time_limit = getattr(config, "MODEL_TIME_LIMIT", 120.0)
+    if mip_gap is None:
+        mip_gap = getattr(config, "MODEL_MIP_GAP", 1e-5)
+
+    period_id = f"h{config.MEITUAN_DEMAND_HOUR:02d}"
+    meituan_instance_dir = os.path.join(project_root, "data", "instances", "Meituan")
+    meituan_raw_file = os.path.join(project_root, "Meituan-TSL", "all_waybill_info_meituan_0322.csv")
+
+    print(
+        f"Regime II callback-Benders run: generate={generate_sample}, period={period_id}, "
+        f"time_limit={time_limit}, mip_gap={mip_gap}"
+    )
+
+    if generate_sample:
+        DataGenerator(seed=42).generate_meituan_hourly(
+            raw_data_path=meituan_raw_file,
+            save_dir=meituan_instance_dir,
+            num_hubs=config.MEITUAN_NUM_HUBS,
+            num_bases=config.MEITUAN_NUM_BASES,
+            num_swapping=config.MEITUAN_NUM_SWAPPING,
+            date_filter=date_filter,
+            map_half_size_km=config.MEITUAN_MAP_HALF_SIZE_KM,
+            candidate_date_filter=config.MEITUAN_CANDIDATE_DATES,
+            demand_date_filter=config.MEITUAN_DEMAND_DATES,
+            candidate_hour_start=config.MEITUAN_CANDIDATE_HOUR_START,
+            candidate_hour_end=config.MEITUAN_CANDIDATE_HOUR_END,
+            demand_hour_start=config.MEITUAN_DEMAND_HOUR,
+            colocate_base_swaps=config.MEITUAN_COLOCATE_BASE_SWAPS,
+        )
+
+    period_path = os.path.join(meituan_instance_dir, "orders", f"{period_id}.csv")
+    load_period_id = period_id if os.path.exists(period_path) else None
+    inst = DataLoader().load_instance_dir(meituan_instance_dir, period_id=load_period_id)
+    print(
+        f"Loaded: H={len(inst.H)}, L={len(inst.L)}, S={len(inst.S)}, E={len(inst.E)}, "
+        f"OD={len(inst.h)}, A={len(inst.A)}, A_F={len(inst.A_F)}"
+    )
+
+    return run_benders_regime_ii_callback(
+        inst,
+        time_limit=float(time_limit),
+        mip_gap=float(mip_gap),
+        verbose=verbose,
+        **kwargs,
+    )
+
+
+if __name__ == "__main__":
+    run_meituan_regime_ii_callback()

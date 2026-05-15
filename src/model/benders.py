@@ -246,6 +246,7 @@ class RegimeIIPrimalSubproblem:
         inst = data.inst
         m = gp.Model("RegimeII_PrimalSub")
         m.setParam("OutputFlag", 1 if self.output else 0)
+        m.setParam("Threads", 1)
         m.setParam("QCPDual", 1)
         m.setParam("DualReductions", 0)
         m.setParam("BarHomogeneous", 1)
@@ -524,6 +525,7 @@ class RegimeIIDualSubproblem:
         inst = data.inst
         m = gp.Model("RegimeII_DualSub")
         m.setParam("OutputFlag", 1 if self.output else 0)
+        m.setParam("Threads", 1)
         m.setParam("DualReductions", 0)
         m.setParam("BarHomogeneous", 1)
 
@@ -787,6 +789,7 @@ class RegimeIIBenders:
         data = self.data
         m = gp.Model(f"RegimeII_BendersMaster_{self.subproblem_mode}")
         m.setParam("OutputFlag", 1 if self.verbose else 0)
+        m.setParam("Threads", 1)
         m.setParam("TimeLimit", self.master_time_limit)
         m.setParam("MIPGap", self.master_mip_gap)
 

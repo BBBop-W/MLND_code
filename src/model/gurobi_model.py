@@ -347,24 +347,31 @@ class MLNDModel:
                 name=f"energy_HS_{i}",
             )
 
-        for l in self.L:
+        q_nodes = self.L + self.S
+        q_v1 = self.model.addVars(q_nodes, lb=-GRB.INFINITY, name="q_v1")
+        q_v2 = self.model.addVars(q_nodes, lb=-GRB.INFINITY, name="q_v2")
+        q_t = self.model.addVars(q_nodes, lb=0.0, name="q_t")
+        for q in q_nodes:
+            rho_q = rho_l[q] if q in self.L else rho_s[q]
+            self.model.addConstr(q_v1[q] == 2.0, name=f"q_v1_{q}")
+            self.model.addConstr(q_v2[q] == xi[q] + rho_q, name=f"q_v2_{q}")
+            self.model.addConstr(q_t[q] == xi[q] - rho_q + 2.0, name=f"q_t_{q}")
+            q_name = f"queue_L_{q}" if q in self.L else f"queue_S_{q}"
             self.model.addQConstr(
-                4 + (xi[l] + rho_l[l]) * (xi[l] + rho_l[l])
-                <= (xi[l] - rho_l[l] + 2) * (xi[l] - rho_l[l] + 2),
-                name=f"queue_L_{l}",
+                q_v1[q] * q_v1[q] + q_v2[q] * q_v2[q] <= q_t[q] * q_t[q],
+                name=q_name,
             )
 
-        for s in self.S:
-            self.model.addQConstr(
-                4 + (xi[s] + rho_s[s]) * (xi[s] + rho_s[s])
-                <= (xi[s] - rho_s[s] + 2) * (xi[s] - rho_s[s] + 2),
-                name=f"queue_S_{s}",
-            )
-
+        h_v1 = self.model.addVars(self.H, lb=-GRB.INFINITY, name="h_v1")
+        h_v2 = self.model.addVars(self.H, lb=-GRB.INFINITY, name="h_v2")
+        h_t = self.model.addVars(self.H, lb=0.0, name="h_t")
         for i in self.H:
+            sqrt_mu_z = gp.quicksum((float(mu_c[c]) ** 0.5) * z[i, c] for c in C)
+            self.model.addConstr(h_v1[i] == 2.0 * sqrt_mu_z, name=f"h_v1_{i}")
+            self.model.addConstr(h_v2[i] == xi[i] + lambd[i] - mu[i] + 1.0, name=f"h_v2_{i}")
+            self.model.addConstr(h_t[i] == xi[i] - lambd[i] + mu[i] + 1.0, name=f"h_t_{i}")
             self.model.addQConstr(
-                4 * mu[i] + (xi[i] + lambd[i] - mu[i] + 1) * (xi[i] + lambd[i] - mu[i] + 1)
-                <= (xi[i] - lambd[i] + mu[i] + 1) * (xi[i] - lambd[i] + mu[i] + 1),
+                h_v1[i] * h_v1[i] + h_v2[i] * h_v2[i] <= h_t[i] * h_t[i],
                 name=f"queue_H_{i}",
             )
 
@@ -393,6 +400,12 @@ class MLNDModel:
             "mu": mu,
             "xi": xi,
             "Gamma": Gamma,
+            "q_v1": q_v1,
+            "q_v2": q_v2,
+            "q_t": q_t,
+            "h_v1": h_v1,
+            "h_v2": h_v2,
+            "h_t": h_t,
         }
         self._built = True
 

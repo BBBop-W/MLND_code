@@ -200,6 +200,7 @@ class RegimeIILocalSearch:
         eval_time_limit: float = 10.0,
         eval_mip_gap: float = 1e-5,
         max_seed_hubs: int = 6,
+        max_seed_candidates: Optional[int] = 250,
         max_iter: int = 25,
         verbose: bool = False,
     ):
@@ -211,6 +212,7 @@ class RegimeIILocalSearch:
         )
         self.data = self.evaluator.data
         self.max_seed_hubs = max_seed_hubs
+        self.max_seed_candidates = max_seed_candidates
         self.max_iter = max_iter
         self.verbose = verbose
 
@@ -243,7 +245,10 @@ class RegimeIILocalSearch:
             for bases in base_sets:
                 for swaps in swap_sets:
                     seeds.append(FacilityCandidate(frozenset(bases), frozenset({h}), frozenset(swaps)))
-        return list(dict.fromkeys(self.evaluator.repair(s.bases, s.hubs, s.swaps) for s in seeds))
+        unique = list(dict.fromkeys(self.evaluator.repair(s.bases, s.hubs, s.swaps) for s in seeds))
+        if self.max_seed_candidates is not None:
+            return unique[: max(1, int(self.max_seed_candidates))]
+        return unique
 
     def _neighbors(self, candidate: FacilityCandidate) -> list[FacilityCandidate]:
         bases = set(candidate.bases)

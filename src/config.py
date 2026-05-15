@@ -8,9 +8,9 @@ DEMAND_MIN = 2.0
 DEMAND_MAX = 8.0
 
 # Meituan Semi-synthetic Parameters
-MEITUAN_NUM_BASES = 20
-MEITUAN_NUM_HUBS = 60
-MEITUAN_NUM_SWAPPING = 20
+MEITUAN_NUM_BASES = 10
+MEITUAN_NUM_HUBS = 40
+MEITUAN_NUM_SWAPPING = 10
 MEITUAN_MAP_HALF_SIZE_KM = 8  # Side length = 2 * half size. 3.0-4.0km usually yields stable top-10/top-10 candidates.
 MEITUAN_WORK_HOUR_START = 8
 MEITUAN_WORK_HOUR_END = 23
@@ -46,7 +46,7 @@ MODEL_MIP_GAP = 0.05
 
 # Costs
 
-ORDER_REVENUE_COEF = 4  # Profit coefficient: served order volume * coef (10k CNY unit)
+ORDER_REVENUE_COEF = 10  # Profit coefficient: served order volume * coef (10k CNY unit)
 
 # COST_HUB = [20.0, 30.0, 40.0, 50.0, 60.0]  # Corresponding fixed costs for MU_HUB levels
 COST_HUB = [30.0]  # Corresponding fixed costs for MU_HUB levels
