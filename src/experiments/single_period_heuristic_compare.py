@@ -16,7 +16,11 @@ from src.data_processor.generator import DataGenerator
 from src.data_processor.instance import Instance
 from src.data_processor.loader import DataLoader
 from src.model.gurobi_model import MLNDModel
-from src.model.lagrangian_heuristic import HeuristicRun, run_lagrangian_suite
+from src.model.lagrangian_heuristic import (
+    STANDARD_HEURISTIC_METHODS,
+    HeuristicRun,
+    run_standard_heuristics,
+)
 from src.model.local_search_heuristic import LocalSearchSolution, RegimeIILocalSearch
 
 
@@ -201,23 +205,32 @@ def serialize_run(
 
 
 def run_heuristics(inst: Instance, args) -> list[HeuristicRun]:
-    runs = run_lagrangian_suite(
-        inst,
-        eval_time_limit=args.eval_time_limit,
-        eval_mip_gap=args.eval_mip_gap,
-        lr_iterations=args.lr_iterations,
-        lr_eval_top=args.lr_eval_top,
-        tabu_iterations=args.tabu_iterations,
-        tabu_tenure=args.tabu_tenure,
-        tabu_candidate_hubs=args.tabu_candidate_hubs,
-        tabu_candidate_swaps=args.tabu_candidate_swaps,
-        tabu_max_neighbors=args.tabu_max_neighbors,
-        max_hubs=args.max_hubs,
-        max_swaps=args.max_swaps,
-        verbose=args.verbose,
-    )
+    methods = list(args.methods)
+    standard_methods = [method for method in methods if method in STANDARD_HEURISTIC_METHODS]
+    runs = []
+    if standard_methods:
+        runs = run_standard_heuristics(
+            inst,
+            methods=standard_methods,
+            eval_time_limit=args.eval_time_limit,
+            eval_mip_gap=args.eval_mip_gap,
+            constructive_candidate_hubs=args.constructive_candidate_hubs,
+            constructive_candidate_swaps=args.constructive_candidate_swaps,
+            constructive_eval_top=args.constructive_eval_top,
+            lr_iterations=args.lr_iterations,
+            lr_eval_top=args.lr_eval_top,
+            lr_decomposition=args.lr_decomposition,
+            tabu_iterations=args.tabu_iterations,
+            tabu_tenure=args.tabu_tenure,
+            tabu_candidate_hubs=args.tabu_candidate_hubs,
+            tabu_candidate_swaps=args.tabu_candidate_swaps,
+            tabu_max_neighbors=args.tabu_max_neighbors,
+            max_hubs=args.max_hubs,
+            max_swaps=args.max_swaps,
+            verbose=args.verbose,
+        )
 
-    if not args.skip_local_search:
+    if "local_search" in methods:
         local = RegimeIILocalSearch(
             inst,
             eval_time_limit=args.eval_time_limit,
@@ -369,10 +382,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--meituan-period", default=f"h{config.MEITUAN_DEMAND_HOUR:02d}")
     parser.add_argument("--gurobi-time-limit", type=float, default=30.0)
     parser.add_argument("--gurobi-mip-gap", type=float, default=0.01)
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=list(STANDARD_HEURISTIC_METHODS) + ["local_search"],
+        default=list(STANDARD_HEURISTIC_METHODS),
+        help="Heuristic methods to run. Defaults to the three standardized methods.",
+    )
     parser.add_argument("--eval-time-limit", type=float, default=3.0)
     parser.add_argument("--eval-mip-gap", type=float, default=0.05)
+    parser.add_argument("--constructive-candidate-hubs", type=int, default=15)
+    parser.add_argument("--constructive-candidate-swaps", type=int, default=10)
+    parser.add_argument("--constructive-eval-top", type=int, default=25)
     parser.add_argument("--lr-iterations", type=int, default=35)
     parser.add_argument("--lr-eval-top", type=int, default=25)
+    parser.add_argument("--lr-decomposition", choices=["coverage", "route_swap"], default="route_swap")
     parser.add_argument("--tabu-iterations", type=int, default=15)
     parser.add_argument("--tabu-tenure", type=int, default=5)
     parser.add_argument("--tabu-candidate-hubs", type=int, default=15)
@@ -380,7 +404,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tabu-max-neighbors", type=int, default=80)
     parser.add_argument("--max-hubs", type=int, default=None)
     parser.add_argument("--max-swaps", type=int, default=None)
-    parser.add_argument("--skip-local-search", action="store_true")
     parser.add_argument("--local-seed-hubs", type=int, default=4)
     parser.add_argument("--local-seed-candidates", type=int, default=150)
     parser.add_argument("--local-iterations", type=int, default=5)

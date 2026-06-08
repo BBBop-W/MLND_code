@@ -503,7 +503,7 @@ class RegimeIICallbackBenders:
         self.y = model.addVars([(i, l) for l, i in data.A_LH], vtype=GRB.BINARY, name="y")
         self.z = model.addVars(data.H, data.C, vtype=GRB.BINARY, name="z")
         self.Gamma = model.addVar(lb=0.0, vtype=GRB.INTEGER, name="Gamma")
-        self.Theta = model.addVar(lb=0.0, ub=max(1.0, data.total_revenue_ub), name="Theta")
+        self.Theta = model.addVar(lb=-GRB.INFINITY, ub=max(1.0, data.total_revenue_ub), name="Theta")
 
         fixed = gp.quicksum(float(self.inst.f.get(l, config.COST_BASE)) * self.x[l] for l in data.L)
         fixed += gp.quicksum(float(getattr(config, "COST_HUB_FIXED", 0.0)) * self.x[i] for i in data.H)
@@ -553,7 +553,7 @@ class RegimeIICallbackBenders:
         if gamma_start is not None:
             self.Gamma.Start = max(0.0, float(gamma_start))
         if theta_start is not None:
-            self.Theta.Start = max(0.0, min(float(theta_start), max(1.0, self.data.total_revenue_ub)))
+            self.Theta.Start = min(float(theta_start), max(1.0, self.data.total_revenue_ub))
         self.mip_start_loaded = True
 
     def _add_valid_inequalities(self, model: gp.Model) -> None:

@@ -124,6 +124,175 @@ class CandidateBuilder:
         )
 
 
+class RegimeIIConstructiveHeuristic:
+    """Simple constructive heuristic for a single Regime-II instance.
+
+    The heuristic ranks hubs by OD activity, selects a small set of ranked hub
+    prefixes, repairs bases/swaps into feasible first-stage candidates, and
+    evaluates the best candidates with the fixed first-stage SOCP evaluator.
+    """
+
+    def __init__(
+        self,
+        instance: Instance,
+        *,
+        evaluator: Optional[RegimeIIFixedEvaluator] = None,
+        max_hubs: Optional[int] = None,
+        max_swaps: Optional[int] = None,
+        candidate_hubs: int = 15,
+        candidate_swaps: int = 10,
+        eval_top: int = 25,
+        verbose: bool = False,
+    ):
+        self.inst = instance
+        self.data = RegimeIIData(instance)
+        self.evaluator = evaluator or RegimeIIFixedEvaluator(instance)
+        self.builder = CandidateBuilder(self.data)
+        self.max_hubs = max_hubs
+        self.max_swaps = max_swaps
+        self.candidate_hubs = max(1, int(candidate_hubs))
+        self.candidate_swaps = max(1, int(candidate_swaps))
+        self.eval_top = max(1, int(eval_top))
+        self.verbose = verbose
+        self.history: list[dict] = []
+
+    def _hub_fixed_cost(self) -> float:
+        hub_fixed = float(getattr(config, "COST_HUB_FIXED", 0.0))
+        if self.data.C:
+            hub_fixed += min(float(config.COST_HUB[c]) for c in self.data.C)
+        return hub_fixed
+
+    def _hub_scores(self) -> Dict[str, float]:
+        scores = {h: -self._hub_fixed_cost() for h in self.data.H}
+        for (i, j), demand in self.inst.h.items():
+            value = self.data.revenue * float(demand)
+            scores[i] = scores.get(i, 0.0) + value
+            scores[j] = scores.get(j, 0.0) + value
+        return scores
+
+    def _swap_scores(self) -> Dict[str, float]:
+        scores = {k: -float(self.inst.f.get(k, config.COST_SWAPPING)) for k in self.data.E}
+        for i, j in self.data.A_HH:
+            demand = float(self.inst.h.get((i, j), 0.0))
+            options = self.data.route_options.get((i, j), [])
+            if demand <= 0.0 or not options:
+                continue
+            direct_cost = self.data.flight_cost[i, j, "0"] if "0" in options else None
+            for k in options:
+                if k not in self.data.E:
+                    continue
+                if direct_cost is None:
+                    scores[k] += 0.25 * self.data.revenue * demand
+                else:
+                    scores[k] += max(0.0, direct_cost - self.data.flight_cost[i, j, k]) * demand
+        return scores
+
+    def _hub_sets(self, hub_scores: Dict[str, float]) -> list[set[str]]:
+        ranked = sorted(self.data.H, key=lambda h: hub_scores.get(h, 0.0), reverse=True)
+        ranked = ranked[: min(self.candidate_hubs, len(ranked))]
+        cap = len(ranked) if self.max_hubs is None else min(int(self.max_hubs), len(ranked))
+        checkpoints = {1, 2, 3, 5, 8, 13, cap}
+        positive = [h for h in ranked if hub_scores.get(h, 0.0) > 0.0]
+        if self.max_hubs is not None:
+            positive = positive[: int(self.max_hubs)]
+
+        hub_sets: list[set[str]] = []
+        if positive:
+            hub_sets.append(set(positive))
+        for size in sorted(checkpoints):
+            if size <= 0 or not ranked:
+                continue
+            hub_sets.append(set(ranked[: min(size, cap)]))
+
+        unique: list[set[str]] = []
+        seen = set()
+        for hubs in hub_sets:
+            key = tuple(sorted(hubs))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(hubs)
+        return unique
+
+    def _swap_sets(self, swap_scores: Dict[str, float]) -> list[set[str]]:
+        if not self.data.E:
+            return [set()]
+        ranked = sorted(self.data.E, key=lambda k: swap_scores.get(k, 0.0), reverse=True)
+        ranked = ranked[: min(self.candidate_swaps, len(ranked))]
+        cap = len(ranked) if self.max_swaps is None else min(int(self.max_swaps), len(ranked))
+        positive = [k for k in ranked if swap_scores.get(k, 0.0) > 0.0]
+        if self.max_swaps is not None:
+            positive = positive[: int(self.max_swaps)]
+
+        swap_sets: list[set[str]] = [set()]
+        if positive:
+            swap_sets.append(set(positive))
+        for size in (1, 2, 3, 5, cap):
+            if size <= 0:
+                continue
+            swap_sets.append(set(ranked[: min(size, cap)]))
+
+        unique: list[set[str]] = []
+        seen = set()
+        for swaps in swap_sets:
+            key = tuple(sorted(swaps))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(swaps)
+        return unique
+
+    def solve(self) -> HeuristicRun:
+        start = time.perf_counter()
+        eval_start = self.evaluator.evaluations
+        cache_start = self.evaluator.cache_hits
+
+        hub_scores = self._hub_scores()
+        swap_scores = self._swap_scores()
+        candidates: Dict[FacilityCandidate, float] = {
+            FacilityCandidate(frozenset(), frozenset(), frozenset()): 0.0
+        }
+        for hubs in self._hub_sets(hub_scores):
+            for swaps in self._swap_sets(swap_scores):
+                candidate = self.builder.build(hubs, swaps=swaps)
+                score = sum(hub_scores.get(h, 0.0) for h in candidate.hubs)
+                score += sum(swap_scores.get(k, 0.0) for k in candidate.swaps)
+                candidates[candidate] = max(candidates.get(candidate, -math.inf), score)
+
+        ranked_candidates = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
+        best_sol: Optional[LocalSearchSolution] = None
+        for candidate, score in ranked_candidates[: self.eval_top]:
+            sol = self.evaluator.evaluate(candidate)
+            if _solution_value(sol) > _solution_value(best_sol):
+                best_sol = sol
+            self.history.append(
+                {
+                    "candidate_score": score,
+                    "open_hubs": len(candidate.hubs),
+                    "open_bases": len(candidate.bases),
+                    "open_swaps": len(candidate.swaps),
+                    "obj": sol.obj,
+                }
+            )
+
+        if best_sol is None:
+            empty = FacilityCandidate(frozenset(), frozenset(), frozenset())
+            best_sol = self.evaluator.evaluate(empty)
+
+        wall = time.perf_counter() - start
+        best_sol.wall_time = wall
+        best_sol.evaluations = self.evaluator.evaluations - eval_start
+        best_sol.cache_hits = self.evaluator.cache_hits - cache_start
+        return HeuristicRun(
+            name="constructive",
+            solution=best_sol,
+            wall_time=wall,
+            evaluations=best_sol.evaluations,
+            cache_hits=best_sol.cache_hits,
+            history=self.history,
+        )
+
+
 class RegimeIILagrangianHeuristic:
     """Lagrangian-relaxation candidate generator for the single-period model.
 
@@ -637,3 +806,226 @@ def run_lagrangian_suite(
     )
     runs.append(tabu.solve(seeds))
     return runs
+
+
+STANDARD_HEURISTIC_METHODS = (
+    "constructive",
+    "lagrangian_relaxation",
+    "tabu_lagrangian_relaxation",
+)
+
+
+def run_constructive_heuristic(
+    instance: Instance,
+    *,
+    evaluator: Optional[RegimeIIFixedEvaluator] = None,
+    eval_time_limit: float = 5.0,
+    eval_mip_gap: float = 0.05,
+    constructive_candidate_hubs: int = 15,
+    constructive_candidate_swaps: int = 10,
+    constructive_eval_top: int = 25,
+    max_hubs: Optional[int] = None,
+    max_swaps: Optional[int] = None,
+    verbose: bool = False,
+) -> HeuristicRun:
+    evaluator = evaluator or RegimeIIFixedEvaluator(
+        instance,
+        eval_time_limit=eval_time_limit,
+        eval_mip_gap=eval_mip_gap,
+    )
+    return RegimeIIConstructiveHeuristic(
+        instance,
+        evaluator=evaluator,
+        max_hubs=max_hubs,
+        max_swaps=max_swaps,
+        candidate_hubs=constructive_candidate_hubs,
+        candidate_swaps=constructive_candidate_swaps,
+        eval_top=constructive_eval_top,
+        verbose=verbose,
+    ).solve()
+
+
+def run_lagrangian_relaxation(
+    instance: Instance,
+    *,
+    evaluator: Optional[RegimeIIFixedEvaluator] = None,
+    eval_time_limit: float = 5.0,
+    eval_mip_gap: float = 0.05,
+    lr_iterations: int = 40,
+    lr_eval_top: int = 30,
+    lr_decomposition: str = "route_swap",
+    max_hubs: Optional[int] = None,
+    max_swaps: Optional[int] = None,
+    verbose: bool = False,
+) -> HeuristicRun:
+    evaluator = evaluator or RegimeIIFixedEvaluator(
+        instance,
+        eval_time_limit=eval_time_limit,
+        eval_mip_gap=eval_mip_gap,
+    )
+    run = RegimeIILagrangianHeuristic(
+        instance,
+        decomposition=lr_decomposition,
+        evaluator=evaluator,
+        max_iter=lr_iterations,
+        max_hubs=max_hubs,
+        max_swaps=max_swaps,
+        eval_top=lr_eval_top,
+        verbose=verbose,
+    ).solve()
+    run.name = "lagrangian_relaxation"
+    return run
+
+
+def run_tabu_lagrangian_relaxation(
+    instance: Instance,
+    *,
+    evaluator: Optional[RegimeIIFixedEvaluator] = None,
+    seed_runs: Optional[Sequence[HeuristicRun]] = None,
+    lr_seed_run: Optional[HeuristicRun] = None,
+    eval_time_limit: float = 5.0,
+    eval_mip_gap: float = 0.05,
+    lr_iterations: int = 40,
+    lr_eval_top: int = 30,
+    lr_decomposition: str = "route_swap",
+    tabu_iterations: int = 20,
+    tabu_tenure: int = 5,
+    tabu_candidate_hubs: int = 15,
+    tabu_candidate_swaps: int = 10,
+    tabu_max_neighbors: int = 80,
+    max_hubs: Optional[int] = None,
+    max_swaps: Optional[int] = None,
+    verbose: bool = False,
+) -> HeuristicRun:
+    evaluator = evaluator or RegimeIIFixedEvaluator(
+        instance,
+        eval_time_limit=eval_time_limit,
+        eval_mip_gap=eval_mip_gap,
+    )
+
+    lr_solver = RegimeIILagrangianHeuristic(
+        instance,
+        decomposition=lr_decomposition,
+        evaluator=evaluator,
+        max_iter=lr_iterations,
+        max_hubs=max_hubs,
+        max_swaps=max_swaps,
+        eval_top=lr_eval_top,
+        verbose=verbose,
+    )
+    if lr_seed_run is None:
+        lr_seed_run = lr_solver.solve()
+    else:
+        # Still run the LR iterations when only a solution seed is supplied,
+        # because tabu needs the final multiplier-derived scores.
+        lr_solver.solve()
+
+    seeds = [lr_seed_run.solution.candidate]
+    if seed_runs is not None:
+        seeds.extend(run.solution.candidate for run in seed_runs)
+
+    run = RegimeIILagrangianTabuSearch(
+        instance,
+        evaluator=evaluator,
+        hub_scores=lr_solver.last_hub_scores,
+        swap_scores=lr_solver.last_swap_scores,
+        max_iter=tabu_iterations,
+        tenure=tabu_tenure,
+        candidate_hubs=tabu_candidate_hubs,
+        candidate_swaps=tabu_candidate_swaps,
+        max_neighbors=tabu_max_neighbors,
+        max_swaps=max_swaps,
+        verbose=verbose,
+    ).solve(seeds)
+    run.name = "tabu_lagrangian_relaxation"
+    return run
+
+
+def run_standard_heuristics(
+    instance: Instance,
+    *,
+    methods: Sequence[str] = STANDARD_HEURISTIC_METHODS,
+    eval_time_limit: float = 5.0,
+    eval_mip_gap: float = 0.05,
+    constructive_candidate_hubs: int = 15,
+    constructive_candidate_swaps: int = 10,
+    constructive_eval_top: int = 25,
+    lr_iterations: int = 40,
+    lr_eval_top: int = 30,
+    lr_decomposition: str = "route_swap",
+    tabu_iterations: int = 20,
+    tabu_tenure: int = 5,
+    tabu_candidate_hubs: int = 15,
+    tabu_candidate_swaps: int = 10,
+    tabu_max_neighbors: int = 80,
+    max_hubs: Optional[int] = None,
+    max_swaps: Optional[int] = None,
+    verbose: bool = False,
+) -> list[HeuristicRun]:
+    unknown = [method for method in methods if method not in STANDARD_HEURISTIC_METHODS]
+    if unknown:
+        raise ValueError(f"Unknown heuristic methods: {', '.join(unknown)}")
+
+    evaluator = RegimeIIFixedEvaluator(
+        instance,
+        eval_time_limit=eval_time_limit,
+        eval_mip_gap=eval_mip_gap,
+    )
+    requested = list(dict.fromkeys(methods))
+    runs: list[HeuristicRun] = []
+    by_name: Dict[str, HeuristicRun] = {}
+
+    if "constructive" in requested:
+        run = run_constructive_heuristic(
+            instance,
+            evaluator=evaluator,
+            constructive_candidate_hubs=constructive_candidate_hubs,
+            constructive_candidate_swaps=constructive_candidate_swaps,
+            constructive_eval_top=constructive_eval_top,
+            max_hubs=max_hubs,
+            max_swaps=max_swaps,
+            verbose=verbose,
+        )
+        by_name[run.name] = run
+        runs.append(run)
+
+    lr_run: Optional[HeuristicRun] = None
+    lr_solver: Optional[RegimeIILagrangianHeuristic] = None
+    if "lagrangian_relaxation" in requested or "tabu_lagrangian_relaxation" in requested:
+        lr_solver = RegimeIILagrangianHeuristic(
+            instance,
+            evaluator=evaluator,
+            decomposition=lr_decomposition,
+            max_iter=lr_iterations,
+            max_hubs=max_hubs,
+            max_swaps=max_swaps,
+            eval_top=lr_eval_top,
+            verbose=verbose,
+        )
+        lr_run = lr_solver.solve()
+        lr_run.name = "lagrangian_relaxation"
+        by_name[lr_run.name] = lr_run
+        if "lagrangian_relaxation" in requested:
+            runs.append(lr_run)
+
+    if "tabu_lagrangian_relaxation" in requested:
+        seed_runs = [run for run in by_name.values()]
+        assert lr_solver is not None
+        tabu_run = RegimeIILagrangianTabuSearch(
+            instance,
+            evaluator=evaluator,
+            hub_scores=lr_solver.last_hub_scores,
+            swap_scores=lr_solver.last_swap_scores,
+            max_iter=tabu_iterations,
+            tenure=tabu_tenure,
+            candidate_hubs=tabu_candidate_hubs,
+            candidate_swaps=tabu_candidate_swaps,
+            max_neighbors=tabu_max_neighbors,
+            max_swaps=max_swaps,
+            verbose=verbose,
+        ).solve([run.solution.candidate for run in seed_runs])
+        tabu_run.name = "tabu_lagrangian_relaxation"
+        runs.append(tabu_run)
+
+    order = {method: idx for idx, method in enumerate(requested)}
+    return sorted(runs, key=lambda run: order.get(run.name, len(order)))

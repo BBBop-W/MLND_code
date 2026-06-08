@@ -182,7 +182,7 @@ class MultiPeriodRegimeIIBenders:
             period: max(1.0, self.data_by_period[period].total_revenue_ub)
             for period in self.periods
         }
-        self.Theta = m.addVars(self.periods, lb=0.0, ub=theta_ub, name="Theta")
+        self.Theta = m.addVars(self.periods, lb=-GRB.INFINITY, ub=theta_ub, name="Theta")
 
         m.setObjective(
             gp.quicksum(self.weights[period] * self.Theta[period] for period in self.periods)

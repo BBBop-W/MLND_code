@@ -125,7 +125,7 @@ class MultiPeriodScenarioRetentionBenders(MultiPeriodRegimeIIBenders):
             period: max(1.0, self.data_by_period[period].total_revenue_ub)
             for period in self.decomposed_periods
         }
-        self.Theta = m.addVars(self.decomposed_periods, lb=0.0, ub=theta_ub, name="Theta")
+        self.Theta = m.addVars(self.decomposed_periods, lb=-GRB.INFINITY, ub=theta_ub, name="Theta")
 
         retained_obj = self._add_retained_period_blocks(m)
         theta_obj = gp.quicksum(self.weights[p] * self.Theta[p] for p in self.decomposed_periods)

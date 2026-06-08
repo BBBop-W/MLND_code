@@ -715,6 +715,8 @@ class RegimeIIBenders:
         instance: Instance,
         subproblem: str = "dual",
         use_pareto: bool = True,
+        use_valid_inequalities: bool = True,
+        use_initial_cuts: bool = True,
         max_iter: int = 30,
         gap_tol: float = 1e-3,
         master_time_limit: float = 30.0,
@@ -732,6 +734,8 @@ class RegimeIIBenders:
         self.data = RegimeIIData(instance)
         self.subproblem_mode = subproblem
         self.use_pareto = use_pareto
+        self.use_valid_inequalities = use_valid_inequalities
+        self.use_initial_cuts = use_initial_cuts
         self.max_iter = max_iter
         self.gap_tol = gap_tol
         self.master_time_limit = master_time_limit
@@ -749,6 +753,7 @@ class RegimeIIBenders:
         self.z = None
         self.Gamma = None
         self.Theta = None
+        self.q = None
         self.trust_constr = None
         self.trust_center_x: Optional[Dict[str, float]] = None
         self.best_obj = -math.inf
@@ -792,12 +797,15 @@ class RegimeIIBenders:
         m.setParam("Threads", 1)
         m.setParam("TimeLimit", self.master_time_limit)
         m.setParam("MIPGap", self.master_mip_gap)
+        m.setParam("NumericFocus", 2)
+        m.setParam("FeasibilityTol", 1e-8)
+        m.setParam("OptimalityTol", 1e-8)
 
         self.x = m.addVars(data.N_x, vtype=GRB.BINARY, name="x")
         self.y = m.addVars([(i, l) for l, i in data.A_LH], vtype=GRB.BINARY, name="y")
         self.z = m.addVars(data.H, data.C, vtype=GRB.BINARY, name="z")
         self.Gamma = m.addVar(lb=0.0, vtype=GRB.INTEGER, name="Gamma")
-        self.Theta = m.addVar(lb=0.0, ub=max(1.0, data.total_revenue_ub), name="Theta")
+        self.Theta = m.addVar(lb=-GRB.INFINITY, ub=max(1.0, data.total_revenue_ub), name="Theta")
 
         fixed = gp.quicksum(float(self.inst.f.get(l, config.COST_BASE)) * self.x[l] for l in data.L)
         fixed += gp.quicksum(float(getattr(config, "COST_HUB_FIXED", 0.0)) * self.x[i] for i in data.H)
@@ -817,6 +825,9 @@ class RegimeIIBenders:
         for l, i in data.A_LH:
             m.addConstr(self.y[i, l] <= self.x[l], name=f"assign_active_{i}_{l}")
 
+        if self.use_valid_inequalities:
+            self._add_valid_inequalities(m)
+
         self.model = m
 
         if self.use_trust_region:
@@ -829,6 +840,200 @@ class RegimeIIBenders:
                 self.trust_radius = max(self.trust_radius_min, min(self.trust_radius_max, max(2, n_x // 2)))
             else:
                 self.trust_radius = max(self.trust_radius_min, min(int(self.trust_radius), self.trust_radius_max))
+
+    def _add_valid_inequalities(self, model: gp.Model) -> None:
+        data = self.data
+
+        for i in data.H:
+            model.addConstr(
+                gp.quicksum(data.mu_levels[c] * self.z[i, c] for c in data.C) >= self.x[i] / data.tau_H,
+                name=f"master_hub_wait_feas_{i}",
+            )
+
+        if data.E:
+            model.addConstr(
+                self.Theta <= data.total_revenue_ub * gp.quicksum(self.x[k] for k in data.E),
+                name="theta_requires_swap_open",
+            )
+
+        serviceable_hh = [(i, j) for i, j in data.A_HH if data.route_options.get((i, j))]
+        if serviceable_hh:
+            self.q = model.addVars(serviceable_hh, lb=0.0, ub=1.0, name="q_hh")
+            for i, j in serviceable_hh:
+                model.addConstr(self.q[i, j] <= self.x[i], name=f"q_origin_{i}_{j}")
+                model.addConstr(self.q[i, j] <= self.x[j], name=f"q_dest_{i}_{j}")
+                model.addConstr(self.q[i, j] >= self.x[i] + self.x[j] - 1.0, name=f"q_and_{i}_{j}")
+
+            model.addConstr(
+                self.Theta
+                <= data.revenue
+                * gp.quicksum(float(self.inst.h.get((i, j), 0.0)) * self.q[i, j] for i, j in serviceable_hh),
+                name="theta_open_demand_bound",
+            )
+
+            base_service_keys = [
+                (l, i, j)
+                for l, i, j in data.alpha_keys
+                if (i, j) in data.A_HH_set and data.p_chain(i) < 1.0 - TOL
+            ]
+            if base_service_keys:
+                q_lij = model.addVars(base_service_keys, lb=0.0, ub=1.0, name="q_lij")
+                service_time_expr = gp.LinExpr()
+                for l, i, j in base_service_keys:
+                    model.addConstr(q_lij[l, i, j] <= self.y[i, l], name=f"q_lij_assign_{l}_{i}_{j}")
+                    model.addConstr(q_lij[l, i, j] <= self.x[j], name=f"q_lij_dest_{l}_{i}_{j}")
+                    usable_swaps = [k for k in data.route_options.get((l, i), []) if k in data.E]
+                    if usable_swaps:
+                        model.addConstr(
+                            q_lij[l, i, j] <= gp.quicksum(self.x[k] for k in usable_swaps),
+                            name=f"q_lij_swap_{l}_{i}_{j}",
+                        )
+                    else:
+                        model.addConstr(q_lij[l, i, j] <= 0.0, name=f"q_lij_no_swap_{l}_{i}_{j}")
+
+                    lh_time = min(
+                        (data.t[l, i, k] for k in data.route_options.get((l, i), []) if k in data.E),
+                        default=math.inf,
+                    )
+                    hh_time = min((data.t[i, j, k] for k in data.route_options.get((i, j), [])), default=math.inf)
+                    if math.isfinite(lh_time) and math.isfinite(hh_time):
+                        service_time_expr += (
+                            (1.0 - data.p_chain(i))
+                            * float(self.inst.h.get((i, j), 0.0))
+                            * (lh_time + hh_time)
+                            * q_lij[l, i, j]
+                        )
+
+                chain_bound = gp.quicksum(
+                    data.p_chain(i) * float(self.inst.h.get((i, j), 0.0)) * self.q[i, j]
+                    for i, j in serviceable_hh
+                    if data.p_chain(i) > TOL
+                )
+                base_bound = gp.quicksum(
+                    (1.0 - data.p_chain(i)) * float(self.inst.h.get((i, j), 0.0)) * q_lij[l, i, j]
+                    for l, i, j in base_service_keys
+                )
+                model.addConstr(
+                    self.Theta <= data.revenue * (base_bound + chain_bound),
+                    name="theta_assignment_swap_demand_bound",
+                )
+                model.addConstr(service_time_expr <= self.Gamma, name="fleet_assignment_time_bound")
+
+            min_loaded_time = min(
+                (data.t[i, j, k] for i, j in serviceable_hh for k in data.route_options.get((i, j), [])),
+                default=0.0,
+            )
+            if min_loaded_time > TOL:
+                model.addConstr(
+                    self.Theta <= (data.revenue / min_loaded_time) * self.Gamma,
+                    name="theta_fleet_time_bound",
+                )
+
+            min_service_time = math.inf
+            min_route_time = {
+                (u, v): min((data.t[u, v, k] for k in data.route_options.get((u, v), [])), default=math.inf)
+                for u, v in data.A_F
+            }
+            for i, j in serviceable_hh:
+                hh_time = min_route_time.get((i, j), math.inf)
+                if not math.isfinite(hh_time):
+                    continue
+                if data.p_chain(i) > TOL:
+                    min_service_time = min(min_service_time, hh_time)
+                if 1.0 - data.p_chain(i) > TOL:
+                    for l, h in data.A_LH:
+                        if h != i:
+                            continue
+                        lh_time = min_route_time.get((l, i), math.inf)
+                        if math.isfinite(lh_time):
+                            min_service_time = min(min_service_time, lh_time + hh_time)
+            if math.isfinite(min_service_time) and min_service_time > TOL:
+                model.addConstr(
+                    self.Theta <= (data.revenue / min_service_time) * self.Gamma,
+                    name="theta_service_cycle_time_bound",
+                )
+
+        model.addConstr(
+            self.Theta
+            <= 0.5
+            * data.revenue
+            * gp.quicksum(
+                gp.quicksum(data.mu_levels[c] * self.z[i, c] for c in data.C) - self.x[i] / data.tau_H
+                for i in data.H
+            ),
+            name="theta_hub_capacity_bound",
+        )
+
+    def _reference_points(self):
+        data = self.data
+        points = []
+
+        closed_x = {u: 0.0 for u in data.N_x}
+        closed_y = {(i, l): 0.0 for l, i in data.A_LH}
+        closed_z = {(i, c): 0.0 for i in data.H for c in data.C}
+        points.append((closed_x, closed_y, closed_z, 0.0))
+
+        def repaired_point(open_hubs, gamma_value):
+            x_ref = {u: 0.0 for u in data.N_x}
+            y_ref = {(i, l): 0.0 for l, i in data.A_LH}
+            z_ref = {(i, c): 0.0 for i in data.H for c in data.C}
+            cap = max(data.C, key=lambda c: data.mu_levels[c]) if data.C else 0
+            for k in data.E:
+                x_ref[k] = 1.0
+            for i in open_hubs:
+                bases = [l for l, h in data.A_LH if h == i]
+                if not bases:
+                    continue
+                best_l = min(bases, key=lambda l: self.inst.get_dist(l, i))
+                x_ref[i] = 1.0
+                x_ref[best_l] = 1.0
+                y_ref[i, best_l] = 1.0
+                z_ref[i, cap] = 1.0
+            return x_ref, y_ref, z_ref, float(gamma_value)
+
+        all_hubs = list(data.H)
+        points.append(repaired_point(all_hubs, max(1.0, math.ceil(data.core_gamma))))
+
+        hub_score = {i: 0.0 for i in data.H}
+        for (i, j), demand in self.inst.h.items():
+            hub_score[i] = hub_score.get(i, 0.0) + float(demand)
+            hub_score[j] = hub_score.get(j, 0.0) + float(demand)
+        top_hubs = [
+            h
+            for h, _ in sorted(hub_score.items(), key=lambda item: item[1], reverse=True)[: max(1, min(4, len(data.H)))]
+        ]
+        points.append(repaired_point(top_hubs, max(1.0, math.ceil(data.core_gamma / 2.0))))
+        return points
+
+    def _add_initial_cuts(self, dual_solver_for_pareto: RegimeIIDualSubproblem) -> int:
+        if not self.use_initial_cuts:
+            return 0
+        cuts = 0
+        for idx, (x_ref, y_ref, z_ref, gamma_ref) in enumerate(self._reference_points(), start=1):
+            solver = RegimeIIDualSubproblem(self.data, output=False)
+            status, sub_obj, cut_data = solver.solve(x_ref, y_ref, z_ref, gamma_ref)
+            if status != GRB.OPTIMAL or cut_data is None or sub_obj is None:
+                continue
+            self._add_cut(cut_data["duals"], f"initial_benders_{idx}_{cut_data.get('source', self.subproblem_mode)}")
+            cuts += 1
+
+            if not self.use_pareto or abs(cut_data["rhs_at_hat"]) <= TOL:
+                continue
+            mw_status, _, mw_cd = dual_solver_for_pareto.solve_pareto(
+                x_ref,
+                y_ref,
+                z_ref,
+                gamma_ref,
+                self.core_x,
+                self.core_y,
+                self.core_z,
+                self.core_gamma,
+                cut_data["rhs_at_hat"],
+            )
+            if mw_status == GRB.OPTIMAL and mw_cd is not None:
+                self._add_cut(mw_cd["duals"], f"initial_pareto_{idx}")
+                cuts += 1
+        return cuts
 
     def _coerce_initial_solution(self) -> Optional[MasterSolution]:
         if self.initial_solution is None:
@@ -857,7 +1062,7 @@ class RegimeIIBenders:
             if key in self.z:
                 self.z[key].Start = value
         self.Gamma.Start = sol.Gamma
-        if sol.theta:
+        if sol.theta is not None:
             self.Theta.Start = sol.theta
 
     def _load_initial_solution(self) -> None:
@@ -979,6 +1184,9 @@ class RegimeIIBenders:
         self._build_master()
         assert self.model is not None
         dual_solver_for_pareto = RegimeIIDualSubproblem(self.data, output=False)
+        initial_cuts = self._add_initial_cuts(dual_solver_for_pareto)
+        if self.verbose and initial_cuts:
+            print(f"[Benders-RII] added {initial_cuts} initial cuts.")
         self._load_initial_solution()
 
         for it in range(1, self.max_iter + 1):
@@ -1157,6 +1365,8 @@ def run_benders_regime_ii(
     instance: Instance,
     subproblem: str = "dual",
     use_pareto: bool = True,
+    use_valid_inequalities: bool = True,
+    use_initial_cuts: bool = True,
     max_iter: int = 20,
     master_time_limit: float = 20.0,
     master_mip_gap: float = 0.2,
@@ -1171,6 +1381,8 @@ def run_benders_regime_ii(
         instance,
         subproblem=subproblem,
         use_pareto=use_pareto,
+        use_valid_inequalities=use_valid_inequalities,
+        use_initial_cuts=use_initial_cuts,
         max_iter=max_iter,
         master_time_limit=master_time_limit,
         master_mip_gap=master_mip_gap,
