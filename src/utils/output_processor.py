@@ -191,7 +191,7 @@ class ResultProcessor:
                 hub_outgoing[i_node] += flow
 
         self.base_assigned_flow = {l_node: 0.0 for l_node in self.inst.L}
-        for (i_node, l_node), y_val in self.y.items():
+        for (l_node, i_node), y_val in self.y.items():
             if y_val <= flow_tol:
                 continue
             if l_node in self.base_assigned_flow and i_node in hub_outgoing:
@@ -207,7 +207,7 @@ class ResultProcessor:
                 * self.x.get(i_node, 0.0)
                 * self.x.get(j_node, 0.0)
                 * self.x.get(l_node, 0.0)
-                * self.y.get((i_node, l_node), 0.0)
+                * self.y.get((l_node, i_node), 0.0)
                 for (i_node, j_node) in self.inst.A_HH
             )
         for s_node in holding_nodes:
@@ -249,6 +249,15 @@ class ResultProcessor:
         )
         f_hub = config.COST_HUB
         self.fixed_cost += sum(f_hub[c] * self.z.get((i, c), 0.0) for i in self.inst.H for c in range(len(config.MU_HUB)))
+        arc_cost = getattr(config, "COST_ARC", 0.0)
+        if isinstance(arc_cost, dict):
+            self.arc_activation_cost = sum(
+                float(arc_cost.get((u_node, v_node), arc_cost.get(f"{u_node},{v_node}", arc_cost.get(f"{u_node}->{v_node}", 0.0))))
+                * y_val
+                for (u_node, v_node), y_val in self.y.items()
+            )
+        else:
+            self.arc_activation_cost = float(arc_cost) * sum(self.y.values())
         flight_coef = getattr(config, "COST_FLIGHT_TIME", 0.1)
         t_lookup = getattr(self.wrapper, "t", {})
         self.flight_cost = 0.0
@@ -262,7 +271,7 @@ class ResultProcessor:
             self.flight_cost += flight_coef * travel_time * flow
         gamma_val = self.gamma if self.gamma is not None else 0.0
         self.drone_cost = config.COST_DRONE * gamma_val
-        self.total_cost = self.fixed_cost + self.flight_cost + self.drone_cost
+        self.total_cost = self.fixed_cost + self.arc_activation_cost + self.flight_cost + self.drone_cost
         self.net_profit = self.served_revenue - self.total_cost
         self.rho_avg = float(np.mean(list(self.rho.values()))) if self.rho else 0.0
 
@@ -334,6 +343,7 @@ class ResultProcessor:
         print(f"Completed Volume Revenue     : {self.served_revenue:.4f}")
         print(f"Total Cost                   : {self.total_cost:.4f}")
         print(f"  - Fixed Station Cost       : {self.fixed_cost:.4f}")
+        print(f"  - Arc Activation Cost      : {self.arc_activation_cost:.4f}")
         print(f"  - Flight Time Cost         : {self.flight_cost:.4f}")
         print(f"  - Drone Cost               : {self.drone_cost:.4f}")
         print(
@@ -355,9 +365,13 @@ class ResultProcessor:
         print(f"  Swapping (E)    : {self.open_E} / {len(self.inst.E)}")
         
         print(f"\nActive Assignments (y_li > 0.01):")
-        y_active = [(i, l, val) for (i, l), val in self.y.items() if val > 0.01]
+        y_active = [
+            (l, i, val)
+            for (l, i), val in self.y.items()
+            if (l, i) in self.inst.A_LH and val > 0.01
+        ]
 
-        for i, l, val in y_active[:10]:
+        for l, i, val in y_active[:10]:
             rho_l = self.rho.get(l, 0.0)
             print(f"  Base {l} assigned to Hub {i} with y={val:.4f}, rho_l={rho_l:.4f}")
         if len(y_active) > 10:

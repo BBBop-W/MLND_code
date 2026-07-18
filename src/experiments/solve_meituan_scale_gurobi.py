@@ -3,13 +3,19 @@ import csv
 import json
 import os
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib")
+_MPLCONFIGDIR = os.path.join(tempfile.gettempdir(), "matplotlib")
+_XDG_CACHE_HOME = os.path.join(tempfile.gettempdir(), "xdg-cache")
+os.environ.setdefault("MPLCONFIGDIR", _MPLCONFIGDIR)
+os.environ.setdefault("XDG_CACHE_HOME", _XDG_CACHE_HOME)
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+os.makedirs(os.environ["XDG_CACHE_HOME"], exist_ok=True)
 
 from gurobipy import GRB
 
@@ -17,6 +23,9 @@ from src import config
 from src.data_processor.loader import DataLoader
 from src.model.gurobi_model import MLNDModel
 from src.utils.output_processor import ResultProcessor
+
+DEFAULT_MU_HUB_LEVELS = [60.0, 119.4, 178.1, 236.2, 293.8]
+DEFAULT_COST_HUB_LEVELS = [50.0, 100.0, 150.0, 200.0, 250.0]
 
 
 @contextmanager
@@ -63,6 +72,13 @@ def infer_instance_dir(series_root: str, hub_count: int | None = None) -> str:
     return matches[0]["instance_dir"]
 
 
+def _parse_float_list(raw: str) -> list[float]:
+    values = [float(part.strip()) for part in raw.split(",") if part.strip()]
+    if not values:
+        raise argparse.ArgumentTypeError("list must contain at least one number")
+    return values
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Solve a selected Meituan H-series instance with Gurobi.")
     parser.add_argument(
@@ -75,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--scale",
         dest="hub_count",
         type=int,
-        default=30,
+        default=20,
         help="H scale to solve, for example 20, 40, or 100. Defaults to the minimum H in the series.",
     )
     parser.add_argument(
@@ -94,9 +110,60 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output directory. Defaults to results/Meituan_H_series/Hxxx_gurobi.",
     )
-    parser.add_argument("--time-limit", type=float, default=7200.0)
+    parser.add_argument("--time-limit", type=float, default=900.0)
     parser.add_argument("--mip-gap", type=float, default=0.05)
     parser.add_argument("--threads", type=int, default=6)
+    parser.add_argument("--p-chain", type=float, default=None)
+    parser.add_argument(
+        "--demand-scale",
+        type=float,
+        default=1.0,
+        help="Multiply every OD demand by this factor after loading the instance.",
+    )
+    parser.add_argument(
+        "--transition-para",
+        type=float,
+        default=None,
+        help="Override TRANSITION_PARA and rescale dependent revenue/flight-time coefficients.",
+    )
+    parser.add_argument("--cost-arc", type=float, default=None)
+    parser.add_argument("--energy-rate-omega", type=float, default=None)
+    parser.add_argument(
+        "--hub-level-count",
+        type=int,
+        default=None,
+        help="Use the first N hub capacity/cost levels for this run.",
+    )
+    parser.add_argument(
+        "--hub-mu-levels",
+        type=_parse_float_list,
+        default=DEFAULT_MU_HUB_LEVELS,
+        help="Comma-separated full MU_HUB level list used with --hub-level-count.",
+    )
+    parser.add_argument(
+        "--hub-cost-levels",
+        type=_parse_float_list,
+        default=DEFAULT_COST_HUB_LEVELS,
+        help="Comma-separated full COST_HUB level list used with --hub-level-count.",
+    )
+    parser.add_argument(
+        "--flight-time-cost-multiplier",
+        type=float,
+        default=None,
+        help="Set COST_FLIGHT_TIME to this multiplier times the effective TRANSITION_PARA.",
+    )
+    parser.add_argument(
+        "--order-revenue-multiplier",
+        type=float,
+        default=None,
+        help="Set ORDER_REVENUE_COEF to this multiplier times TRANSITION_PARA.",
+    )
+    parser.add_argument(
+        "--order-revenue-coef",
+        type=float,
+        default=None,
+        help="Set ORDER_REVENUE_COEF directly. Mutually exclusive with --order-revenue-multiplier.",
+    )
     parser.add_argument("--write-lp", action="store_true")
     parser.add_argument("--plot-network", action="store_true")
     parser.add_argument(
@@ -111,12 +178,31 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
+    if args.order_revenue_multiplier is not None and args.order_revenue_coef is not None:
+        raise ValueError("--order-revenue-multiplier and --order-revenue-coef cannot both be set.")
+    if args.demand_scale <= 0:
+        raise ValueError("--demand-scale must be positive.")
+    if args.hub_level_count is not None:
+        if args.hub_level_count <= 0:
+            raise ValueError("--hub-level-count must be positive.")
+        if args.hub_level_count > len(args.hub_mu_levels):
+            raise ValueError("--hub-level-count exceeds --hub-mu-levels length.")
+        if args.hub_level_count > len(args.hub_cost_levels):
+            raise ValueError("--hub-level-count exceeds --hub-cost-levels length.")
+
     if args.list_scales:
         print(",".join(str(v) for v in available_hub_counts(args.series_root)))
         return
 
     instance_dir = args.instance_dir or infer_instance_dir(args.series_root, args.hub_count)
     inst = DataLoader().load_instance_dir(instance_dir, period_id=args.period_id)
+    original_total_demand = sum(float(value) for value in inst.h.values())
+    if abs(float(args.demand_scale) - 1.0) > 1e-12:
+        inst.h = {
+            od_pair: float(value) * float(args.demand_scale)
+            for od_pair, value in inst.h.items()
+        }
+    scaled_total_demand = sum(float(value) for value in inst.h.values())
 
     if args.results_dir is None:
         args.results_dir = os.path.join(
@@ -127,9 +213,46 @@ def main() -> None:
         )
     os.makedirs(args.results_dir, exist_ok=True)
 
-    model = MLNDModel(inst)
+    config_overrides = {
+        "MODEL_TIME_LIMIT": args.time_limit,
+        "MODEL_MIP_GAP": args.mip_gap,
+    }
+    base_transition = float(config.TRANSITION_PARA)
+    effective_transition = float(args.transition_para) if args.transition_para is not None else base_transition
+    if args.transition_para is not None:
+        config_overrides["TRANSITION_PARA"] = effective_transition
+    if args.p_chain is not None:
+        config_overrides["P_CHAIN"] = args.p_chain
+    if args.cost_arc is not None:
+        config_overrides["COST_ARC"] = args.cost_arc
+    if args.energy_rate_omega is not None:
+        config_overrides["ENERGY_RATE_OMEGA"] = args.energy_rate_omega
+    if args.hub_level_count is not None:
+        config_overrides["MU_HUB"] = list(args.hub_mu_levels[: args.hub_level_count])
+        config_overrides["COST_HUB"] = list(args.hub_cost_levels[: args.hub_level_count])
 
-    with override_config(MODEL_TIME_LIMIT=args.time_limit, MODEL_MIP_GAP=args.mip_gap):
+    if args.flight_time_cost_multiplier is not None:
+        config_overrides["COST_FLIGHT_TIME"] = (
+            float(args.flight_time_cost_multiplier) * effective_transition
+        )
+    elif args.transition_para is not None:
+        flight_multiplier = _safe_ratio(config.COST_FLIGHT_TIME, config.TRANSITION_PARA)
+        if flight_multiplier is not None:
+            config_overrides["COST_FLIGHT_TIME"] = flight_multiplier * effective_transition
+
+    if args.order_revenue_multiplier is not None:
+        config_overrides["ORDER_REVENUE_COEF"] = (
+            float(args.order_revenue_multiplier) * effective_transition
+        )
+    if args.order_revenue_coef is not None:
+        config_overrides["ORDER_REVENUE_COEF"] = args.order_revenue_coef
+    elif args.order_revenue_multiplier is None and args.transition_para is not None:
+        revenue_multiplier = _safe_ratio(config.ORDER_REVENUE_COEF, config.TRANSITION_PARA)
+        if revenue_multiplier is not None:
+            config_overrides["ORDER_REVENUE_COEF"] = revenue_multiplier * effective_transition
+
+    with override_config(**config_overrides):
+        model = MLNDModel(inst)
         model.build()
         model.model.setParam("Threads", int(args.threads))
         model.apply_solver_config()
@@ -139,52 +262,63 @@ def main() -> None:
         model.model.optimize()
         wall_time = time.perf_counter() - start
 
-    sol_count = int(model.model.SolCount)
-    status = int(model.model.Status)
-    status_name = _status_name(status)
-    obj = float(model.model.ObjVal) if sol_count > 0 else None
-    bound = _safe_model_attr(model.model, "ObjBound")
-    gap = _safe_model_attr(model.model, "MIPGap")
+        sol_count = int(model.model.SolCount)
+        status = int(model.model.Status)
+        status_name = _status_name(status)
+        obj = float(model.model.ObjVal) if sol_count > 0 else None
+        bound = _safe_model_attr(model.model, "ObjBound")
+        gap = _safe_model_attr(model.model, "MIPGap")
 
-    summary = {
-        "instance_dir": instance_dir,
-        "period_id": args.period_id,
-        "requested_hub_count": args.hub_count,
-        "H": len(inst.H),
-        "L": len(inst.L),
-        "S": len(inst.S),
-        "E": len(inst.E),
-        "OD": len(inst.h),
-        "arcs": len(inst.A),
-        "status": status,
-        "status_name": status_name,
-        "sol_count": sol_count,
-        "obj": obj,
-        "bound": bound,
-        "gap": gap,
-        "runtime": float(model.model.Runtime),
-        "wall_time": wall_time,
-        "time_limit": args.time_limit,
-        "mip_gap": args.mip_gap,
-        "threads": args.threads,
-        "mu_hub": list(config.MU_HUB),
-        "cost_hub": list(config.COST_HUB),
-    }
+        summary = {
+            "instance_dir": instance_dir,
+            "period_id": args.period_id,
+            "requested_hub_count": args.hub_count,
+            "H": len(inst.H),
+            "L": len(inst.L),
+            "S": len(inst.S),
+            "E": len(inst.E),
+            "OD": len(inst.h),
+            "original_total_demand": original_total_demand,
+            "demand_scale": float(args.demand_scale),
+            "scaled_total_demand": scaled_total_demand,
+            "arcs": len(inst.A),
+            "status": status,
+            "status_name": status_name,
+            "sol_count": sol_count,
+            "obj": obj,
+            "bound": bound,
+            "gap": gap,
+            "runtime": float(model.model.Runtime),
+            "wall_time": wall_time,
+            "time_limit": args.time_limit,
+            "mip_gap": args.mip_gap,
+            "threads": args.threads,
+            "p_chain": float(config.P_CHAIN),
+            "cost_arc": _jsonable_config_value(config.COST_ARC),
+            "energy_rate_omega": float(config.ENERGY_RATE_OMEGA),
+            "transition_para": float(config.TRANSITION_PARA),
+            "order_revenue_coef": float(config.ORDER_REVENUE_COEF),
+            "order_revenue_multiplier": _safe_ratio(config.ORDER_REVENUE_COEF, config.TRANSITION_PARA),
+            "cost_flight_time": float(config.COST_FLIGHT_TIME),
+            "hub_level_count": len(config.MU_HUB),
+            "mu_hub": list(config.MU_HUB),
+            "cost_hub": list(config.COST_HUB),
+        }
 
-    with open(os.path.join(args.results_dir, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2, sort_keys=True)
-    _write_summary_csv(os.path.join(args.results_dir, "summary.csv"), summary)
+        with open(os.path.join(args.results_dir, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+        _write_summary_csv(os.path.join(args.results_dir, "summary.csv"), summary)
 
-    if sol_count > 0:
-        processor = ResultProcessor(model, inst)
-        if args.print_solution_summary:
-            processor.print_summary()
-        processor.save_node_flow_summary(os.path.join(args.results_dir, "node_flow_summary.csv"))
-        processor.save_selected_stations(os.path.join(args.results_dir, "selected_stations.csv"))
-        processor.save_open_facilities_config(os.path.join(args.results_dir, "open_facilities.csv"))
-        processor.save_python_object(os.path.join(args.results_dir, "result_data.pkl"))
-        if args.plot_network:
-            processor.plot_network(os.path.join(args.results_dir, "network_plot.png"))
+        if sol_count > 0:
+            processor = ResultProcessor(model, inst)
+            if args.print_solution_summary:
+                processor.print_summary()
+            processor.save_node_flow_summary(os.path.join(args.results_dir, "node_flow_summary.csv"))
+            processor.save_selected_stations(os.path.join(args.results_dir, "selected_stations.csv"))
+            processor.save_open_facilities_config(os.path.join(args.results_dir, "open_facilities.csv"))
+            processor.save_python_object(os.path.join(args.results_dir, "result_data.pkl"))
+            if args.plot_network:
+                processor.plot_network(os.path.join(args.results_dir, "network_plot.png"))
 
     print(
         f"Solved {os.path.basename(instance_dir)}: status={status_name} "
@@ -228,6 +362,25 @@ def _status_name(status: int) -> str:
         if value is not None:
             names[int(value)] = name
     return names.get(status, str(status))
+
+
+def _safe_ratio(numerator, denominator):
+    try:
+        denominator = float(denominator)
+        if abs(denominator) <= 1e-12:
+            return None
+        return float(numerator) / denominator
+    except Exception:
+        return None
+
+
+def _jsonable_config_value(value):
+    if isinstance(value, dict):
+        return {str(key): float(item) for key, item in value.items()}
+    try:
+        return float(value)
+    except Exception:
+        return value
 
 
 def _write_summary_csv(path: str, summary: dict[str, object]) -> None:

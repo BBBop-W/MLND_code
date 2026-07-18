@@ -1,1397 +1,1541 @@
+"""Benders decomposition for the Regime-II MLND model.
+
+This file is intended to be placed next to the original Gurobi model file.
+It uses the same ``src.config`` and ``src.data_processor.instance.Instance``
+objects as the monolithic model.
+
+Implementation choice
+---------------------
+I use an explicit multi-tree Benders loop instead of a lazy-callback
+implementation.  The reason is practical: each Benders iteration solves a
+continuous SOCP subproblem and then, optionally, a Pareto/core-point SOCP.
+Solving conic subproblems inside a Gurobi MIP callback is possible in principle
+but is much less stable and much harder to debug.  The explicit loop also makes
+all generated cuts visible and reproducible.
+
+Cut strategy
+------------
+The master contains only strategic variables x, y, z, Gamma and a recourse
+upper-estimator eta.  Given a master solution, the subproblem fixes the design
+variables and optimizes all continuous operational variables.  Gurobi QCP duals
+are used to construct conic Benders optimality cuts.
+
+In addition to the incumbent cut, the solver can generate a core-point
+Pareto-stabilized cut.  This is an in-out / Magnanti-Wong-style stabilization:
+we solve an additional SOCP at a core reference design and add the resulting
+valid Benders cut.  For convex-conic subproblems, this cut is globally valid;
+it is often much stronger than relying on the single incumbent cut only.
+
+Important note
+--------------
+Gurobi returns dual values for convex QCP/SOCP models only when QCPDual=1.
+The subproblem is therefore solved with QCPDual=1.  If Gurobi reports that QCP
+duals are unavailable for your version/settings, set USE_PARETO_CUTS=False and
+fall back to ordinary Benders cuts, or replace the quadratic SOC constraints by
+native cone constraints in a solver that exposes conic duals directly.
+"""
+
+from __future__ import annotations
+
 import math
 import os
 import sys
-import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+
+# Allow absolute imports when running this file directly from a model folder.
+if __name__ == "__main__":
+    _proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if _proj_root not in sys.path:
+        sys.path.insert(0, _proj_root)
 
 import gurobipy as gp
 from gurobipy import GRB
 
-# Support both package execution and direct script execution.
-if __package__ in (None, ""):
-    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    if PROJECT_ROOT not in sys.path:
-        sys.path.insert(0, PROJECT_ROOT)
-
-    from src import config
-    from src.data_processor.instance import Instance
-else:
-    from .. import config
-    from ..data_processor.instance import Instance
+from src import config
+from src.data_processor.instance import Instance
 
 
-TOL = 1e-7
-Arc = Tuple[str, str]
-Route = Tuple[str, str, str]
-
-
-def _val(container: Any, key: Any = None) -> Any:
-    if key is None:
-        return container
-    return container[key]
-
-
-def _sum(terms: Iterable[Any], use_gurobi_expr: bool) -> Any:
-    return gp.quicksum(terms) if use_gurobi_expr else sum(terms)
+Number = Union[int, float]
+Node = Union[str, int]
+Arc = Tuple[Node, Node]
+RouteKey = Tuple[Node, Node, Node]
+AlphaKey = Tuple[Node, Node, Node]
 
 
 @dataclass
-class MasterSolution:
-    x: Dict[str, float]
-    y: Dict[Tuple[str, str], float]
-    z: Dict[Tuple[str, int], float]
-    Gamma: float
-    theta: float
-    obj: float
+class SubproblemResult:
+    """Container for one solved SOCP subproblem."""
+
+    status: int
+    obj_value: Optional[float]
+    cut_expr_data: Optional[List[Tuple[float, Callable[[Mapping[str, object]], gp.LinExpr]]]]
+    rhs_at_reference: Optional[List[float]]
+    design: Mapping[str, object]
+    label: str
 
 
-class RegimeIIData:
-    """Index sets and route data for the final Regime-II notation."""
+class BendersRegimeIISolver:
+    """Branch-and-Benders-cut solver for the Regime-II MLND model.
 
-    def __init__(self, instance: Instance):
+    Parameters
+    ----------
+    instance:
+        The generated/loaded MLND instance.
+    use_pareto_cuts:
+        Whether to generate an additional core-point Pareto-stabilized cut.
+        This is strongly recommended for this model because a single aggregate
+        eta cut is usually weak.
+    pareto_lambda:
+        Weight of the incumbent design in the stabilized reference point:
+        x_ref = lambda * x_incumbent + (1-lambda) * x_core.
+        Values in [0.3, 0.7] usually work.  Smaller values emphasize the core.
+    core_update_weight:
+        Core-point update: core <- w * core + (1-w) * incumbent.
+    """
+
+    def __init__(
+        self,
+        instance: Instance,
+        use_pareto_cuts: bool = True,
+        pareto_lambda: float = 0.5,
+        core_update_weight: float = 0.7,
+    ):
         self.inst = instance
-        self.L = list(instance.L)
-        self.H = list(instance.H)
-        self.S = list(instance.S)
-        self.E = list(instance.E)
-        self.C = list(range(len(config.MU_HUB)))
-        self.mu_levels = [float(v) for v in config.MU_HUB]
+        self.use_pareto_cuts = bool(use_pareto_cuts)
+        self.pareto_lambda = float(pareto_lambda)
+        self.core_update_weight = float(core_update_weight)
 
-        self.A = sorted(instance.A)
-        self.A_HH = sorted(instance.A_HH)
-        self.A_LH = sorted(instance.A_LH)
-        self.A_HS = sorted(instance.A_HS)
-        self.A_SH = sorted(instance.A_SH)
-        self.A_SL = sorted(instance.A_SL)
-        self.A_SS = sorted(instance.A_SS)
-        self.A_F = sorted(instance.A_F)
-
-        self.A_set = set(self.A)
-        self.A_HH_set = set(self.A_HH)
-        self.A_LH_set = set(self.A_LH)
-        self.A_HS_set = set(self.A_HS)
-        self.A_SH_set = set(self.A_SH)
-        self.A_F_set = set(self.A_F)
-
-        self.HLS = self.L + self.H + self.S
+        # Sets copied from the monolithic model.
+        self.L = list(self.inst.L)
+        self.H = list(self.inst.H)
+        self.S = list(self.inst.S)
+        self.E = list(self.inst.E)
         self.N_x = self.L + self.H + self.E
+        self.HLS = self.L + self.H + self.S
 
-        self.out_arcs: Dict[str, list[Arc]] = {}
-        self.in_arcs: Dict[str, list[Arc]] = {}
-        for arc in self.A:
-            self.out_arcs.setdefault(arc[0], []).append(arc)
-            self.in_arcs.setdefault(arc[1], []).append(arc)
+        self.A = sorted(self.inst.A)
+        self.A_HH = sorted(self.inst.A_HH)
+        self.A_LH = sorted(self.inst.A_LH)
+        self.A_HS = sorted(self.inst.A_HS)
+        self.A_SH = sorted(self.inst.A_SH)
+        self.A_SL = sorted(self.inst.A_SL)
+        self.A_SS = sorted(self.inst.A_SS)
+        self.A_F = sorted(self.inst.A_F)
+        self.A_virtual = sorted(set(self.A_HS) | set(self.A_SH))
+        self.A_hat = sorted(set(self.A) - set(self.A_virtual))
 
-        self.route_options: Dict[Arc, list[str]] = {}
-        self.t: Dict[Route, float] = {}
-        self.flight_cost: Dict[Route, float] = {}
-        self.varphi_keys: list[Route] = []
-        self.varphi_by_arc: Dict[Arc, list[str]] = {}
+        self.route_options: Dict[Arc, List[Node]] = {}
+        self.t: Dict[RouteKey, float] = {}
+        self.flight_cost: Dict[RouteKey, float] = {}
+        self.route_big_m: Dict[RouteKey, float] = {}
         self._build_route_options()
 
-        self.alpha_keys = [
-            (l, i, j)
-            for (l, i) in self.A_LH
-            for (i2, j) in self.A_HH
-            if i2 == i
-        ]
-        self.beta_keys = list(self.A_HH)
-        self.beta_support = [
-            (s, i, j)
-            for (s, i) in self.A_SH
-            for (i2, j) in self.A_HH
-            if i2 == i
-        ]
+        self.AY: List[Arc] = []
+        self.arc_cost: Dict[Arc, float] = {}
+        self._build_y_arcs()
 
-        self.gamma_cost = float(config.COST_DRONE)
-        self.revenue = float(getattr(config, "ORDER_REVENUE_COEF", 0.0))
-        self.max_flow = float(config.MAX_FLOW_E)
-        self.tau_H = float(config.TAU_H)
-        self.tau_S = float(config.TAU_S)
-        self.omega = float(config.ENERGY_RATE_OMEGA)
-        self.Omega_eff = (
-            1.0 - float(getattr(config, "ENERGY_EPSILON", getattr(config, "EPS", 0.0)))
-        ) * float(config.BATTERY_CAPACITY_OMEGA_UPPER)
-        self.route_energy_coef = {
-            (u, v, k): self.omega * self.t[u, v, k] - self.Omega_eff * (1.0 if k in self.E else 0.0)
-            for (u, v, k) in self.varphi_keys
-        }
-        self.total_revenue_ub = self.revenue * sum(float(v) for v in instance.h.values())
-        self.core_gamma = max(1.0, sum(float(v) for v in instance.h.values()))
+        self.master: Optional[gp.Model] = None
+        self.master_vars: Dict[str, object] = {}
+        self.cut_count = 0
+        self.core_point: Optional[Dict[str, object]] = None
+        self.best_design: Optional[Dict[str, object]] = None
+        self.best_total_obj = -GRB.INFINITY
+        self.best_operational_obj = -GRB.INFINITY
+        self.history: List[Dict[str, Number]] = []
+        self.zero_flow_signature_counts: Dict[Tuple[int, ...], int] = {}
+        self.initial_designs: List[Dict[str, object]] = []
+        self._initial_designs_processed = False
+
+    # ------------------------------------------------------------------
+    # Basic data helpers
+    # ------------------------------------------------------------------
 
     def _build_route_options(self) -> None:
         flight_cost_rate = float(getattr(config, "COST_FLIGHT_TIME", 0.1))
         for u, v in self.A_F:
-            options = []
+            options: List[Node] = []
             if self.inst.get_dist(u, v) <= config.MAX_DIRECT_DISTANCE:
                 options.append("0")
-                self.t[u, v, "0"] = self.inst.get_time(u, v)
+                self.t[u, v, "0"] = float(self.inst.get_time(u, v))
+
             for k in self.inst.E_uv.get((u, v), []):
                 options.append(k)
-                self.t[u, v, k] = self.inst.get_time(u, k) + self.inst.get_time(k, v)
+                self.t[u, v, k] = float(self.inst.get_time(u, k) + self.inst.get_time(k, v))
 
-            ordered = []
+            # Deterministic order and duplicate removal.
             seen = set()
+            ordered_options: List[Node] = []
             for k in options:
                 if k not in seen:
-                    ordered.append(k)
+                    ordered_options.append(k)
                     seen.add(k)
-            self.route_options[u, v] = ordered
-            self.varphi_by_arc[u, v] = ordered
-            for k in ordered:
-                self.varphi_keys.append((u, v, k))
-                self.flight_cost[u, v, k] = flight_cost_rate * self.t[u, v, k]
 
-    def p_chain(self, hub: str) -> float:
+            self.route_options[u, v] = ordered_options
+            for k in ordered_options:
+                self.flight_cost[u, v, k] = flight_cost_rate * self.t[u, v, k]
+                self.route_big_m[u, v, k] = self._route_flow_big_m(u, v, k)
+
+    def _build_y_arcs(self) -> None:
+        y_arcs = set(self.A_hat)
+        for u, v in self.A_hat:
+            for k in self.inst.E_uv.get((u, v), []):
+                y_arcs.add((u, k))
+                y_arcs.add((k, v))
+        self.AY = sorted(y_arcs)
+        for u, v in self.AY:
+            self.arc_cost[u, v] = self._arc_activation_cost(u, v)
+
+    def _route_flow_big_m(self, u: Node, v: Node, k: Node) -> float:
+        del u, v, k
+        total_demand = sum(float(value) for value in self.inst.h.values())
+        configured = float(getattr(config, "MAX_FLOW_E", 0.0))
+        return max(1.0, configured, total_demand)
+
+    def _arc_activation_cost(self, u: Node, v: Node) -> float:
+        cost = getattr(config, "COST_ARC", 0.0)
+        if isinstance(cost, dict):
+            return float(cost.get((u, v), cost.get(f"{u},{v}", cost.get(f"{u}->{v}", 0.0))))
+        return float(cost)
+
+    def _hub_pool(self, h: Node) -> Node:
+        return self.inst.h_to_s[h]
+
+    def _p_chain(self, hub: Node) -> float:
         p_by_hub = getattr(config, "P_CHAIN_BY_HUB", None)
         if isinstance(p_by_hub, dict):
             return float(p_by_hub.get(hub, config.P_CHAIN))
         return float(config.P_CHAIN)
 
-    def swap_capacity(self, k: str) -> float:
-        return float(self.inst.mu.get(k, getattr(config, "SWAP_CAPACITY", config.MU_SWAPPING)))
+    def _node_activation_value(self, design: Mapping[str, object], node: Node) -> float:
+        """Return the fixed activation value of a node in a subproblem."""
+        x_val = design["x"]
+        if node in self.S:
+            return float(x_val[self.inst.s_to_h[node]])
+        return float(x_val[node])
 
-    def fixed_cost_value(self, x_ref: Dict[str, float], z_ref: Dict[Tuple[str, int], float]) -> float:
-        fixed = sum(float(self.inst.f.get(l, config.COST_BASE)) * x_ref.get(l, 0.0) for l in self.L)
-        fixed += sum(float(getattr(config, "COST_HUB_FIXED", 0.0)) * x_ref.get(i, 0.0) for i in self.H)
-        fixed += sum(float(self.inst.f.get(k, config.COST_SWAPPING)) * x_ref.get(k, 0.0) for k in self.E)
-        fixed += sum(float(config.COST_HUB[c]) * z_ref.get((i, c), 0.0) for i in self.H for c in self.C)
-        return fixed
+    def _node_activation_expr(self, master_vars: Mapping[str, object], node: Node) -> gp.Var:
+        """Return the master activation variable/expression of a node."""
+        x = master_vars["x"]
+        if node in self.S:
+            return x[self.inst.s_to_h[node]]
+        return x[node]
 
+    # ------------------------------------------------------------------
+    # Master problem
+    # ------------------------------------------------------------------
 
-class RegimeIIDualObjective:
-    """Build the Benders cut RHS from a feasible dual solution."""
+    def build_master(self) -> None:
+        if self.master is not None:
+            return
 
-    @staticmethod
-    def mu_expr(data: RegimeIIData, z_ref: Any, i: str, use_gurobi_expr: bool) -> Any:
-        return _sum((data.mu_levels[c] * _val(z_ref, (i, c)) for c in data.C), use_gurobi_expr)
+        m = gp.Model("MLND_RegimeII_Benders_Master")
+        m.setParam("OutputFlag", int(getattr(config, "BENDERS_MASTER_LOG", 0)))
+        m.setParam("Threads", int(getattr(config, "BENDERS_MASTER_THREADS", 1)))
+        if getattr(config, "BENDERS_USE_INTEGER_REFERENCE_CUTS", False):
+            pool_solutions = int(getattr(config, "BENDERS_REFERENCE_POOL_SOLUTIONS", 4))
+            if pool_solutions > 1:
+                m.setParam("PoolSolutions", pool_solutions)
+                m.setParam("PoolSearchMode", int(getattr(config, "BENDERS_REFERENCE_POOL_SEARCH_MODE", 2)))
+                pool_gap = getattr(config, "BENDERS_REFERENCE_POOL_GAP", None)
+                if pool_gap is not None:
+                    m.setParam("PoolGap", float(pool_gap))
 
-    @staticmethod
-    def sqrt_mu_expr(data: RegimeIIData, z_ref: Any, i: str, use_gurobi_expr: bool) -> Any:
-        return _sum((math.sqrt(data.mu_levels[c]) * _val(z_ref, (i, c)) for c in data.C), use_gurobi_expr)
+        C = range(len(config.MU_HUB))
+        mu_c = config.MU_HUB
+        tau_H = float(config.TAU_H)
 
-    @staticmethod
-    def expr(
-        data: RegimeIIData,
-        duals: Dict[str, Any],
-        x_ref: Any,
-        y_ref: Any,
-        z_ref: Any,
-        gamma_ref: Any,
-        use_gurobi_expr: bool,
-    ) -> Any:
-        obj = gp.LinExpr() if use_gurobi_expr else 0.0
+        x = m.addVars(self.N_x, vtype=GRB.BINARY, name="x")
+        y = m.addVars(self.AY, vtype=GRB.BINARY, name="y")
+        z = m.addVars(self.H, C, vtype=GRB.BINARY, name="z")
+        Gamma = m.addVar(lb=0.0, vtype=GRB.INTEGER, name="Gamma")
+        eta = m.addVar(lb=-GRB.INFINITY, ub=GRB.INFINITY, name="eta")
 
-        obj += _sum((duals["rhoL"][l] * _val(x_ref, l) for l in data.L), use_gurobi_expr)
-        obj += _sum((duals["rhoS"][i, s] * _val(x_ref, i) for i, s in data.A_HS), use_gurobi_expr)
+        # Fixed-cost part of the objective.
+        fixed_cost = gp.quicksum(float(self.inst.f.get(l, config.COST_BASE)) * x[l] for l in self.L)
+        fixed_cost += gp.quicksum(float(getattr(config, "COST_HUB_FIXED", 0.0)) * x[i] for i in self.H)
+        fixed_cost += gp.quicksum(float(self.inst.f.get(k, config.COST_SWAPPING)) * x[k] for k in self.E)
+        fixed_cost += gp.quicksum(float(config.COST_HUB[c]) * z[i, c] for i in self.H for c in C)
+        arc_activation_cost = gp.quicksum(self.arc_cost[u, v] * y[u, v] for (u, v) in self.AY)
+        fleet_cost = float(config.COST_DRONE) * Gamma
+        m.setObjective(eta - fixed_cost - arc_activation_cost - fleet_cost, GRB.MAXIMIZE)
 
-        obj += _sum(
-            (
-                duals["alpha2"][l, i, j] * _val(y_ref, (i, l))
-                + duals["alpha3"][l, i, j] * _val(x_ref, j)
-                + duals["alpha4"][l, i, j] * (2.0 - _val(y_ref, (i, l)) - _val(x_ref, j))
-                for l, i, j in data.alpha_keys
-            ),
-            use_gurobi_expr,
+        # First-stage assignment and activation constraints.
+        for i in self.H:
+            assigned_bases = [l for (l, h) in self.A_LH if h == i]
+            m.addConstr(gp.quicksum(y[l, i] for l in assigned_bases if (l, i) in y) == x[i], name=f"assign_{i}")
+
+        for l, i in self.A_LH:
+            m.addConstr(y[l, i] <= x[l], name=f"assign_active_{l}_{i}")
+
+        for i in self.H:
+            m.addConstr(gp.quicksum(z[i, c] for c in C) == x[i], name=f"capacity_{i}")
+
+        for u, v in self.AY:
+            if (u, v) in self.A_LH:
+                continue
+            m.addConstr(y[u, v] <= self._node_activation_expr({"x": x}, u), name=f"arc_tail_active_{u}_{v}")
+            m.addConstr(y[u, v] <= self._node_activation_expr({"x": x}, v), name=f"arc_head_active_{u}_{v}")
+
+        # A cheap implied feasibility cut from the hub service constraint with zero workload.
+        # Without this, the master may select a capacity level that cannot even satisfy the
+        # required slack x_i/tau_H.
+        for i in self.H:
+            m.addConstr(
+                gp.quicksum(float(mu_c[c]) * z[i, c] for c in C) >= x[i] / tau_H,
+                name=f"master_hub_min_slack_{i}",
+            )
+
+        # Initial eta upper bound.  The operational subproblem maximizes revenue minus
+        # flight operating cost, so total potential revenue is a safe upper bound.
+        revenue_coef = float(getattr(config, "ORDER_REVENUE_COEF", 0.0))
+        eta_ub = revenue_coef * sum(float(self.inst.h.get((i, j), 0.0)) for i, j in self.A_HH)
+        m.addConstr(eta <= eta_ub, name="eta_trivial_ub")
+
+        # Stronger but still cheap upper bound: revenue can only be obtained on opened HH arcs.
+        # This is valid because operating costs are nonnegative.
+        m.addConstr(
+            eta <= gp.quicksum(revenue_coef * float(self.inst.h.get((i, j), 0.0)) * y[i, j] for i, j in self.A_HH),
+            name="eta_open_loaded_arc_ub",
         )
 
-        obj += _sum(
-            (
-                duals["beta2"][s, i, j] * _val(x_ref, j)
-                + duals["beta3"][s, i, j] * (1.0 - _val(x_ref, j))
-                for s, i, j in data.beta_support
-            ),
-            use_gurobi_expr,
-        )
+        od_service_ub = {}
+        route_ready = {}
+        if getattr(config, "BENDERS_USE_MASTER_RECOURSE_BOUNDS", True):
+            od_service_ub, route_ready = self._add_master_recourse_bounds(
+                m=m,
+                x=x,
+                y=y,
+                z=z,
+                Gamma=Gamma,
+                eta=eta,
+                revenue_coef=revenue_coef,
+                mu_c=mu_c,
+                tau_H=tau_H,
+            )
 
-        obj += _sum(
-            (duals["pool"][i, s] * data.max_flow * _val(x_ref, i) for i, s in data.A_HS),
-            use_gurobi_expr,
-        )
-        obj += _sum(
-            (duals["swap"][k] * data.swap_capacity(k) * _val(x_ref, k) for k in data.E),
-            use_gurobi_expr,
-        )
-
-        for i in data.H:
-            mu_i = RegimeIIDualObjective.mu_expr(data, z_ref, i, use_gurobi_expr)
-            sqrt_mu_i = RegimeIIDualObjective.sqrt_mu_expr(data, z_ref, i, use_gurobi_expr)
-            obj += duals["hubWait"][i] * (mu_i - _val(x_ref, i) / data.tau_H)
-            obj += duals["h1"][i] * (2.0 * sqrt_mu_i)
-            obj += duals["h2"][i] * (1.0 - mu_i)
-            obj += duals["h3"][i] * (1.0 + mu_i)
-
-        obj += _sum((duals["q1"][q] * 2.0 + duals["q3"][q] * 2.0 for q in data.L + data.S), use_gurobi_expr)
-        obj += duals["fleet"] * gamma_ref
-        return obj
-
-
-class RegimeIIPrimalSubproblem:
-    """Continuous SOCP subproblem; cuts are obtained from primal dual multipliers."""
-
-    def __init__(self, data: RegimeIIData, output: bool = False):
-        self.data = data
-        self.output = output
-        self.model: Optional[gp.Model] = None
-
-    def solve(
-        self,
-        x_hat: Dict[str, float],
-        y_hat: Dict[Tuple[str, str], float],
-        z_hat: Dict[Tuple[str, int], float],
-        gamma_hat: float,
-    ) -> Tuple[int, Optional[float], Optional[Dict[str, Any]]]:
-        data = self.data
-        inst = data.inst
-        m = gp.Model("RegimeII_PrimalSub")
-        m.setParam("OutputFlag", 1 if self.output else 0)
-        m.setParam("Threads", 1)
-        m.setParam("QCPDual", 1)
-        m.setParam("DualReductions", 0)
-        m.setParam("BarHomogeneous", 1)
-
-        rho_l = m.addVars(data.L, lb=0.0, name="rho_l")
-        rho_s = m.addVars(data.S, lb=0.0, name="rho_s")
-        alpha = m.addVars(data.alpha_keys, lb=0.0, name="alpha")
-        beta = m.addVars(data.beta_keys, lb=0.0, name="beta")
-        psi = m.addVars(data.A, lb=0.0, name="psi")
-        varphi = m.addVars(data.varphi_keys, lb=0.0, name="varphi")
-        lambd = m.addVars(data.H, lb=0.0, name="lambda")
-        xi = m.addVars(data.HLS, lb=0.0, name="xi")
-
-        m.setObjective(
-            data.revenue * gp.quicksum(psi[i, j] for i, j in data.A_HH)
-            - gp.quicksum(data.flight_cost[u, v, k] * varphi[u, v, k] for u, v, k in data.varphi_keys),
-            GRB.MAXIMIZE,
-        )
-
-        cons: Dict[str, Any] = {}
-        cons["rhoL"] = {l: m.addConstr(rho_l[l] <= x_hat.get(l, 0.0), name=f"rhoL_{l}") for l in data.L}
-        cons["rhoS"] = {
-            (i, s): m.addConstr(rho_s[s] <= x_hat.get(i, 0.0), name=f"rhoS_{i}_{s}")
-            for i, s in data.A_HS
+        self.master = m
+        self.master_vars = {
+            "x": x,
+            "y": y,
+            "z": z,
+            "Gamma": Gamma,
+            "eta": eta,
+            "od_service_ub": od_service_ub,
+            "route_ready": route_ready,
         }
 
-        cons["alpha1"], cons["alpha2"], cons["alpha3"], cons["alpha4"] = {}, {}, {}, {}
-        for l, i, j in data.alpha_keys:
-            cons["alpha1"][l, i, j] = m.addConstr(alpha[l, i, j] - rho_l[l] <= 0.0, name=f"alpha1_{l}_{i}_{j}")
-            cons["alpha2"][l, i, j] = m.addConstr(alpha[l, i, j] <= y_hat.get((i, l), 0.0), name=f"alpha2_{l}_{i}_{j}")
-            cons["alpha3"][l, i, j] = m.addConstr(alpha[l, i, j] <= x_hat.get(j, 0.0), name=f"alpha3_{l}_{i}_{j}")
-            cons["alpha4"][l, i, j] = m.addConstr(
-                -alpha[l, i, j] + rho_l[l] <= 2.0 - y_hat.get((i, l), 0.0) - x_hat.get(j, 0.0),
-                name=f"alpha4_{l}_{i}_{j}",
+    def _add_master_recourse_bounds(
+        self,
+        m: gp.Model,
+        x,
+        y,
+        z,
+        Gamma,
+        eta,
+        revenue_coef: float,
+        mu_c: Iterable[float],
+        tau_H: float,
+    ) -> Tuple[object, object]:
+        """Add master-only upper bounds on operational recourse.
+
+        These variables do not approximate the subproblem objective directly.
+        They describe a superset of service that any feasible subproblem can
+        realize, which gives valid upper bounds on eta before Benders cuts
+        arrive.
+        """
+        od_service_ub = m.addVars(self.A_HH, lb=0.0, ub=1.0, name="od_service_ub")
+        route_ready_keys = [
+            (i, j, k)
+            for i, j in self.A_HH
+            for k in self.route_options.get((i, j), [])
+            if k in self.E
+        ]
+        route_ready = m.addVars(route_ready_keys, lb=0.0, ub=1.0, name="route_ready")
+
+        eta_terms = []
+        fleet_terms = []
+        for i, j in self.A_HH:
+            demand = float(self.inst.h.get((i, j), 0.0))
+            options = self.route_options.get((i, j), [])
+            ready_terms = []
+
+            if (i, j) in y:
+                m.addConstr(od_service_ub[i, j] <= y[i, j], name=f"od_arc_open_ub_{i}_{j}")
+
+            if "0" in options:
+                ready_terms.append(y[i, j])
+
+            for k in options:
+                if k not in self.E:
+                    continue
+                ready = route_ready[i, j, k]
+                m.addConstr(ready <= y[i, j], name=f"route_ready_arc_{i}_{j}_{k}")
+                m.addConstr(ready <= y[i, k], name=f"route_ready_swap_in_{i}_{j}_{k}")
+                m.addConstr(ready <= y[k, j], name=f"route_ready_swap_out_{i}_{j}_{k}")
+                ready_terms.append(ready)
+
+            if ready_terms:
+                m.addConstr(
+                    od_service_ub[i, j] <= gp.quicksum(ready_terms),
+                    name=f"od_route_ready_ub_{i}_{j}",
+                )
+                min_flight_cost = min(float(self.flight_cost[i, j, k]) for k in options)
+                min_time = min(float(self.t[i, j, k]) for k in options)
+                unit_profit_ub = max(0.0, revenue_coef - min_flight_cost)
+                eta_terms.append(unit_profit_ub * demand * od_service_ub[i, j])
+                fleet_terms.append(min_time * demand * od_service_ub[i, j])
+            else:
+                m.addConstr(od_service_ub[i, j] == 0.0, name=f"od_no_route_ub_{i}_{j}")
+
+        if eta_terms:
+            m.addConstr(
+                eta <= gp.quicksum(eta_terms),
+                name="eta_route_profit_ub",
+            )
+        else:
+            m.addConstr(eta <= 0.0, name="eta_no_route_profit_ub")
+
+        if fleet_terms:
+            # Loaded HH flight time is only part of total fleet time, so this is
+            # a conservative but valid upper-bound link between eta service and Gamma.
+            m.addConstr(
+                gp.quicksum(fleet_terms) <= Gamma,
+                name="fleet_loaded_time_ub",
             )
 
-        cons["beta1"], cons["beta2"], cons["beta3"] = {}, {}, {}
-        for s, i, j in data.beta_support:
-            cons["beta1"][s, i, j] = m.addConstr(beta[i, j] - rho_s[s] <= 0.0, name=f"beta1_{s}_{i}_{j}")
-            cons["beta2"][s, i, j] = m.addConstr(beta[i, j] <= x_hat.get(j, 0.0), name=f"beta2_{s}_{i}_{j}")
-            cons["beta3"][s, i, j] = m.addConstr(-beta[i, j] + rho_s[s] <= 1.0 - x_hat.get(j, 0.0), name=f"beta3_{s}_{i}_{j}")
+        for j in self.H:
+            incoming_terms = [
+                float(self.inst.h.get((i, j), 0.0)) * od_service_ub[i, j]
+                for i, h in self.A_HH
+                if h == j
+            ]
+            if incoming_terms:
+                m.addConstr(
+                    gp.quicksum(incoming_terms)
+                    <= gp.quicksum(float(mu_c[c]) * z[j, c] for c in range(len(config.MU_HUB)))
+                    - x[j] / tau_H,
+                    name=f"hub_loaded_in_capacity_ub_{j}",
+                )
 
-        cons["psiHH"], cons["psiLH"], cons["psiSH"] = {}, {}, {}
-        for i, j in data.A_HH:
-            p_i = data.p_chain(i)
-            demand = float(inst.h.get((i, j), 0.0))
-            cons["psiHH"][i, j] = m.addConstr(
-                psi[i, j]
-                - demand
+        self._add_master_flow_relaxation_ub(m, x, y, z, Gamma, eta, revenue_coef, mu_c, tau_H)
+
+        return od_service_ub, route_ready
+
+    def _add_master_flow_relaxation_ub(
+        self,
+        m: gp.Model,
+        x,
+        y,
+        z,
+        Gamma,
+        eta,
+        revenue_coef: float,
+        mu_c: Iterable[float],
+        tau_H: float,
+    ) -> None:
+        """Add a linear operational-flow relaxation to upper-bound eta."""
+        total_demand = max(1.0, sum(float(value) for value in self.inst.h.values()))
+        varphi_keys: List[RouteKey] = [
+            (u, v, k)
+            for (u, v) in self.A_F
+            for k in self.route_options.get((u, v), [])
+        ]
+        psi_ub = m.addVars(self.A, lb=0.0, name="psi_flow_ub")
+        varphi_ub = m.addVars(varphi_keys, lb=0.0, name="varphi_flow_ub")
+        rho_l_ub = m.addVars(self.L, lb=0.0, name="rho_l_flow_ub")
+        rho_s_ub = m.addVars(self.S, lb=0.0, name="rho_s_flow_ub")
+        alpha_keys: List[AlphaKey] = [
+            (l, i, j)
+            for (l, i) in self.A_LH
+            for (i2, j) in self.A_HH
+            if i2 == i
+        ]
+        alpha_ub = m.addVars(alpha_keys, lb=0.0, name="alpha_flow_ub")
+        beta_ub = m.addVars(list(self.A_HH), lb=0.0, name="beta_flow_ub")
+
+        for l in self.L:
+            m.addConstr(rho_l_ub[l] <= x[l], name=f"flow_relax_rho_l_{l}")
+        for i, s in self.A_HS:
+            m.addConstr(rho_s_ub[s] <= x[i], name=f"flow_relax_rho_s_{s}")
+
+        for l, i, j in alpha_keys:
+            m.addConstr(alpha_ub[l, i, j] <= rho_l_ub[l], name=f"flow_relax_alpha_rho_{l}_{i}_{j}")
+            m.addConstr(alpha_ub[l, i, j] <= y[l, i], name=f"flow_relax_alpha_assign_{l}_{i}_{j}")
+            m.addConstr(alpha_ub[l, i, j] <= y[i, j], name=f"flow_relax_alpha_arc_{l}_{i}_{j}")
+            m.addConstr(
+                alpha_ub[l, i, j] >= rho_l_ub[l] + y[l, i] + y[i, j] - 2.0,
+                name=f"flow_relax_alpha_lb_{l}_{i}_{j}",
+            )
+
+        for s, i in self.A_SH:
+            for h, j in self.A_HH:
+                if h != i:
+                    continue
+                m.addConstr(beta_ub[i, j] <= rho_s_ub[s], name=f"flow_relax_beta_rho_{i}_{j}")
+                m.addConstr(beta_ub[i, j] <= y[i, j], name=f"flow_relax_beta_arc_{i}_{j}")
+                m.addConstr(
+                    beta_ub[i, j] >= rho_s_ub[s] + y[i, j] - 1.0,
+                    name=f"flow_relax_beta_lb_{i}_{j}",
+                )
+
+        for i, j in self.A_HH:
+            demand = float(self.inst.h.get((i, j), 0.0))
+            p_i = self._p_chain(i)
+            m.addConstr(
+                psi_ub[i, j]
+                == demand
                 * (
                     (1.0 - p_i)
-                    * gp.quicksum(alpha[l, i, j] for l, h in data.A_LH if h == i and (l, i, j) in alpha)
-                    + p_i * beta[i, j]
-                )
-                == 0.0,
-                name=f"psiHH_{i}_{j}",
+                    * gp.quicksum(
+                        alpha_ub[l, i, j]
+                        for (l, h) in self.A_LH
+                        if h == i and (l, i, j) in alpha_ub
+                    )
+                    + p_i * beta_ub[i, j]
+                ),
+                name=f"flow_relax_psi_hh_{i}_{j}",
+            )
+            m.addConstr(psi_ub[i, j] <= demand * y[i, j], name=f"psi_hh_demand_ub_{i}_{j}")
+
+        for l, i in self.A_LH:
+            m.addConstr(
+                psi_ub[l, i]
+                == gp.quicksum(
+                    float(self.inst.h.get((i, j), 0.0))
+                    * (1.0 - self._p_chain(i))
+                    * alpha_ub[l, i, j]
+                    for (h, j) in self.A_HH
+                    if h == i and (l, i, j) in alpha_ub
+                ),
+                name=f"flow_relax_psi_lh_{l}_{i}",
             )
 
-        for l, i in data.A_LH:
-            cons["psiLH"][l, i] = m.addConstr(
-                psi[l, i]
-                - gp.quicksum(
-                    float(inst.h.get((i, j), 0.0)) * (1.0 - data.p_chain(i)) * alpha[l, i, j]
-                    for h, j in data.A_HH
-                    if h == i and (l, i, j) in alpha
-                )
-                == 0.0,
-                name=f"psiLH_{l}_{i}",
-            )
-
-        for s, i in data.A_SH:
-            cons["psiSH"][s, i] = m.addConstr(
-                psi[s, i]
-                - gp.quicksum(
-                    float(inst.h.get((i, j), 0.0)) * data.p_chain(i) * beta[i, j]
-                    for h, j in data.A_HH
+        for s, i in self.A_SH:
+            m.addConstr(
+                psi_ub[s, i]
+                == gp.quicksum(
+                    float(self.inst.h.get((i, j), 0.0))
+                    * self._p_chain(i)
+                    * beta_ub[i, j]
+                    for (h, j) in self.A_HH
                     if h == i
+                ),
+                name=f"flow_relax_psi_sh_{s}_{i}",
+            )
+
+        for i, s in self.A_HS:
+            m.addConstr(psi_ub[i, s] <= total_demand * x[i], name=f"psi_hs_active_ub_{i}_{s}")
+
+        for u, v in self.A_hat:
+            m.addConstr(
+                gp.quicksum(
+                    varphi_ub[u, v, k]
+                    for k in self.route_options.get((u, v), [])
+                    if (u, v, k) in varphi_ub
                 )
-                == 0.0,
-                name=f"psiSH_{s}_{i}",
+                == psi_ub[u, v],
+                name=f"flow_relax_route_{u}_{v}",
             )
 
-        cons["flow"] = {}
-        for q in data.HLS:
-            cons["flow"][q] = m.addConstr(
-                gp.quicksum(psi[u, q] for u, v in data.A if v == q)
-                - gp.quicksum(psi[q, v] for u, v in data.A if u == q)
-                == 0.0,
-                name=f"flow_{q}",
+        for u, v, k in varphi_keys:
+            big_m = self.route_big_m[u, v, k]
+            m.addConstr(varphi_ub[u, v, k] <= big_m * y[u, v], name=f"flow_relax_arc_active_{u}_{v}_{k}")
+            if k in self.E:
+                m.addConstr(varphi_ub[u, v, k] <= big_m * y[u, k], name=f"flow_relax_swap_in_{u}_{v}_{k}")
+                m.addConstr(varphi_ub[u, v, k] <= big_m * y[k, v], name=f"flow_relax_swap_out_{u}_{v}_{k}")
+
+        for q in self.HLS:
+            m.addConstr(
+                gp.quicksum(psi_ub[u, q] for (u, v) in self.A if v == q)
+                == gp.quicksum(psi_ub[q, v] for (u, v) in self.A if u == q),
+                name=f"flow_relax_balance_{q}",
             )
 
-        cons["pool"] = {}
-        for i, s in data.A_HS:
-            cons["pool"][i, s] = m.addConstr(
-                gp.quicksum(psi[s, u] for v, u in data.A if v == s) <= data.max_flow * x_hat.get(i, 0.0),
-                name=f"pool_{i}_{s}",
+        total_loaded_and_empty_time = gp.quicksum(self.t[u, v, k] * varphi_ub[u, v, k] for u, v, k in varphi_keys)
+        m.addConstr(total_loaded_and_empty_time <= Gamma, name="flow_relax_fleet_time")
+
+        for j in self.H:
+            m.addConstr(
+                gp.quicksum(psi_ub[u, j] for (u, v) in self.A if v == j)
+                <= gp.quicksum(float(mu_c[c]) * z[j, c] for c in range(len(config.MU_HUB)))
+                - x[j] / tau_H,
+                name=f"flow_relax_hub_capacity_{j}",
             )
 
-        cons["route"] = {}
-        for u, v in data.A_F:
-            cons["route"][u, v] = m.addConstr(
-                gp.quicksum(varphi[u, v, k] for k in data.route_options.get((u, v), []) if (u, v, k) in varphi)
-                - psi[u, v]
-                == 0.0,
+        operating_cost = gp.quicksum(self.flight_cost[u, v, k] * varphi_ub[u, v, k] for u, v, k in varphi_keys)
+        served_benefit = gp.quicksum(revenue_coef * psi_ub[i, j] for i, j in self.A_HH)
+        m.addConstr(eta <= served_benefit - operating_cost, name="eta_flow_relax_ub")
+
+    def apply_master_solver_config(self) -> None:
+        assert self.master is not None
+        time_limit = getattr(config, "BENDERS_MASTER_TIME_LIMIT", None)
+        mip_gap = getattr(config, "BENDERS_MASTER_MIP_GAP", None)
+        if time_limit is not None:
+            self.master.setParam("TimeLimit", float(time_limit))
+        if mip_gap is not None:
+            self.master.setParam("MIPGap", float(mip_gap))
+
+    def _extract_master_design(self, solution_number: int = 0) -> Dict[str, object]:
+        assert self.master is not None
+        if solution_number > 0:
+            self.master.Params.SolutionNumber = int(solution_number)
+
+        def _value(var) -> float:
+            return float(var.Xn if solution_number > 0 else var.X)
+
+        x = self.master_vars["x"]
+        y = self.master_vars["y"]
+        z = self.master_vars["z"]
+        Gamma = self.master_vars["Gamma"]
+        C = range(len(config.MU_HUB))
+        return {
+            "x": {u: _value(x[u]) for u in self.N_x},
+            "y": {(u, v): _value(y[u, v]) for (u, v) in self.AY},
+            "z": {(i, c): _value(z[i, c]) for i in self.H for c in C},
+            "Gamma": _value(Gamma),
+        }
+
+    def _fixed_cost_value(self, design: Mapping[str, object]) -> float:
+        x = design["x"]
+        y = design["y"]
+        z = design["z"]
+        Gamma = float(design["Gamma"])
+        C = range(len(config.MU_HUB))
+        value = sum(float(self.inst.f.get(l, config.COST_BASE)) * float(x[l]) for l in self.L)
+        value += sum(float(getattr(config, "COST_HUB_FIXED", 0.0)) * float(x[i]) for i in self.H)
+        value += sum(float(self.inst.f.get(k, config.COST_SWAPPING)) * float(x[k]) for k in self.E)
+        value += sum(float(config.COST_HUB[c]) * float(z[i, c]) for i in self.H for c in C)
+        value += sum(self.arc_cost[u, v] * float(y[u, v]) for (u, v) in self.AY)
+        value += float(config.COST_DRONE) * Gamma
+        return value
+
+    def _normalize_master_design(self, design_like: object) -> Dict[str, object]:
+        """Coerce a heuristic/master solution to the current master index sets."""
+        if hasattr(design_like, "to_master_design"):
+            design_like = design_like.to_master_design()
+        if not isinstance(design_like, Mapping):
+            raise TypeError("Initial design must be a mapping or expose to_master_design().")
+
+        x_raw = design_like.get("x", {})
+        y_raw = design_like.get("y", {})
+        z_raw = design_like.get("z", {})
+        gamma_raw = design_like.get("Gamma", design_like.get("gamma", 0.0))
+        eta_raw = design_like.get("eta", design_like.get("theta", None))
+        C = range(len(config.MU_HUB))
+        normalized: Dict[str, object] = {
+            "x": {u: float(x_raw.get(u, 0.0)) for u in self.N_x},
+            "y": {(u, v): float(y_raw.get((u, v), 0.0)) for (u, v) in self.AY},
+            "z": {(i, c): float(z_raw.get((i, c), 0.0)) for i in self.H for c in C},
+            "Gamma": float(gamma_raw or 0.0),
+        }
+        if eta_raw is not None:
+            normalized["eta"] = float(eta_raw)
+        return normalized
+
+    def add_initial_design(self, design_like: object) -> None:
+        """Register a first-stage design for MIP start and initial cut generation.
+
+        Only master variables x/y/z/Gamma are required.  The continuous
+        operational variables are intentionally omitted and will be recovered by
+        solving the Benders subproblem at this design.
+        """
+        self.initial_designs.append(self._normalize_master_design(design_like))
+
+    add_initial_solution = add_initial_design
+
+    def _apply_master_start(self, design: Mapping[str, object]) -> None:
+        assert self.master is not None
+        x = self.master_vars["x"]
+        y = self.master_vars["y"]
+        z = self.master_vars["z"]
+        Gamma = self.master_vars["Gamma"]
+        eta = self.master_vars["eta"]
+        C = range(len(config.MU_HUB))
+        for u in self.N_x:
+            x[u].Start = float(design["x"].get(u, 0.0))
+        for u, v in self.AY:
+            y[u, v].Start = float(design["y"].get((u, v), 0.0))
+        for i in self.H:
+            for c in C:
+                z[i, c].Start = float(design["z"].get((i, c), 0.0))
+        Gamma.Start = float(design.get("Gamma", 0.0))
+        eta_start = design.get("eta", design.get("theta", None))
+        if eta_start is not None:
+            eta.Start = float(eta_start)
+
+    def _process_initial_designs(self, lower_bound: float) -> Tuple[float, int]:
+        if self._initial_designs_processed or not self.initial_designs:
+            return lower_bound, 0
+
+        added = 0
+        best_initial: Optional[Dict[str, object]] = None
+        best_initial_obj = -GRB.INFINITY
+        for idx, design in enumerate(self.initial_designs, 1):
+            sub = self.solve_subproblem(design, label=f"initial{idx}")
+            if sub.obj_value is None:
+                print(f"Initial design {idx}: subproblem status={sub.status}; skipped.")
+                continue
+
+            total_obj = sub.obj_value - self._fixed_cost_value(design)
+            if total_obj > lower_bound + 1e-7:
+                lower_bound = total_obj
+                self.best_total_obj = total_obj
+                self.best_operational_obj = sub.obj_value
+                self.best_design = design
+            if total_obj > best_initial_obj + 1e-7:
+                best_initial_obj = total_obj
+                best_initial = design
+
+            if sub.cut_expr_data is None or sub.rhs_at_reference is None:
+                print(f"Initial design {idx}: dual cut unavailable; kept as MIP start only.")
+                continue
+            self._add_benders_cut(sub, "initial")
+            added += 1
+
+        if best_initial is not None:
+            self._apply_master_start(best_initial)
+            self._initialize_or_update_core(best_initial)
+
+        self._initial_designs_processed = True
+        if added:
+            print(f"Loaded {added} initial Benders cut(s); initial LB={lower_bound:.4f}.")
+        return lower_bound, added
+
+    # ------------------------------------------------------------------
+    # Subproblem construction and cut extraction
+    # ------------------------------------------------------------------
+
+    def _rhs_x(self, u: Node) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        return lambda d: d["x"][u]
+
+    def _rhs_y(self, u: Node, v: Node, coef: float = 1.0) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        return lambda d: coef * d["y"][u, v]
+
+    def _rhs_node_open(self, node: Node) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        def _f(d: Mapping[str, object]) -> Union[float, gp.LinExpr]:
+            if node in self.S:
+                return d["x"][self.inst.s_to_h[node]]
+            return d["x"][node]
+        return _f
+
+    def _rhs_alpha_lb(self, l: Node, i: Node, j: Node) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        return lambda d: d["y"][l, i] + d["y"][i, j] - 2.0
+
+    def _rhs_beta_lb(self, i: Node, j: Node) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        return lambda d: d["y"][i, j] - 1.0
+
+    def _rhs_mu(self, i: Node) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        C = range(len(config.MU_HUB))
+        mu_c = config.MU_HUB
+        return lambda d: sum(float(mu_c[c]) * d["z"][i, c] for c in C)
+
+    def _rhs_sqrt_mu(self, i: Node) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        C = range(len(config.MU_HUB))
+        mu_c = config.MU_HUB
+        return lambda d: sum(2.0 * math.sqrt(float(mu_c[c])) * d["z"][i, c] for c in C)
+
+    def _rhs_hub_wait(self, i: Node) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        tau_H = float(config.TAU_H)
+        return lambda d: d["x"][i] / tau_H
+
+    def _rhs_gamma(self) -> Callable[[Mapping[str, object]], Union[float, gp.LinExpr]]:
+        return lambda d: d["Gamma"]
+
+    @staticmethod
+    def _rhs_value(rhs_fun: Callable[[Mapping[str, object]], Union[float, gp.LinExpr]], design: Mapping[str, object]) -> float:
+        value = rhs_fun(design)
+        if isinstance(value, (int, float)):
+            return float(value)
+        # This branch is not normally used for fixed designs.
+        return float(value.getValue())
+
+    def solve_subproblem(
+        self,
+        design: Mapping[str, object],
+        label: str = "incumbent",
+        bar_qcp_conv_tol: Optional[float] = None,
+        dual_retry_index: int = 0,
+    ) -> SubproblemResult:
+        """Solve the continuous SOCP subproblem for a fixed design.
+
+        The method stores all constraints whose RHS depends on master variables.
+        The returned dual multipliers and RHS functions are used to construct a
+        Benders cut in the master.
+        """
+        m = gp.Model(f"MLND_RegimeII_SOCP_Subproblem_{label}")
+        m.Params.OutputFlag = int(getattr(config, "BENDERS_SUB_LOG", 0))
+        m.Params.Threads = int(getattr(config, "BENDERS_SUB_THREADS", 1))
+        m.Params.QCPDual = 1
+        # Barrier is usually the most stable method for convex QCP/SOCP duals.
+        if getattr(config, "BENDERS_SUB_USE_BARRIER", True):
+            m.Params.Method = 2
+            m.Params.Crossover = 0
+            bar_qcp_tol = (
+                bar_qcp_conv_tol
+                if bar_qcp_conv_tol is not None
+                else getattr(config, "BENDERS_SUB_BAR_QCP_CONV_TOL", None)
+            )
+            if bar_qcp_tol is not None:
+                m.Params.BarQCPConvTol = float(bar_qcp_tol)
+
+        C = range(len(config.MU_HUB))
+        mu_c = config.MU_HUB
+        tau_H = float(config.TAU_H)
+        tau_S = float(config.TAU_S)
+        omega = float(config.ENERGY_RATE_OMEGA)
+        Omega = float(config.BATTERY_CAPACITY_OMEGA_UPPER)
+        energy_epsilon = float(getattr(config, "ENERGY_EPSILON", getattr(config, "EPS", 0.0)))
+        usable_battery = (1.0 - energy_epsilon) * Omega
+
+        # Operational variables only.
+        rho_l = m.addVars(self.L, lb=0.0, name="rho_l")
+        rho_s = m.addVars(self.S, lb=0.0, name="rho_s")
+        alpha_keys: List[AlphaKey] = [(l, i, j) for (l, i) in self.A_LH for (i2, j) in self.A_HH if i2 == i]
+        alpha = m.addVars(alpha_keys, lb=0.0, name="alpha")
+        beta = m.addVars(list(self.A_HH), lb=0.0, name="beta")
+        psi = m.addVars(self.A, lb=0.0, name="psi")
+        varphi_keys: List[RouteKey] = [(u, v, k) for (u, v) in self.A_F for k in self.route_options.get((u, v), [])]
+        varphi = m.addVars(varphi_keys, lb=0.0, name="varphi")
+        lambd = m.addVars(self.H, lb=0.0, name="lambda")
+        mu = m.addVars(self.H, lb=0.0, name="mu")
+        xi = m.addVars(self.HLS, lb=0.0, name="xi")
+
+        revenue_coef = float(getattr(config, "ORDER_REVENUE_COEF", 0.0))
+        served_benefit = gp.quicksum(revenue_coef * psi[i, j] for i, j in self.A_HH)
+        operating_cost = gp.quicksum(self.flight_cost[u, v, k] * varphi[u, v, k] for (u, v, k) in varphi_keys)
+        m.setObjective(served_benefit - operating_cost, GRB.MAXIMIZE)
+
+        # List of parameterized constraints for Benders cut extraction.
+        # Each item is (constraint, rhs_function, rhs_value_at_reference).
+        param_constrs: List[Tuple[gp.Constr, Callable[[Mapping[str, object]], Union[float, gp.LinExpr]], float]] = []
+
+        def add_le(lhs, rhs_fun, name: str):
+            rhs_val = self._rhs_value(rhs_fun, design)
+            con = m.addConstr(lhs <= rhs_val, name=name)
+            param_constrs.append((con, rhs_fun, rhs_val))
+            return con
+
+        def add_ge(lhs, rhs_fun, name: str):
+            rhs_val = self._rhs_value(rhs_fun, design)
+            con = m.addConstr(lhs >= rhs_val, name=name)
+            param_constrs.append((con, rhs_fun, rhs_val))
+            return con
+
+        def add_eq(lhs, rhs_fun, name: str):
+            rhs_val = self._rhs_value(rhs_fun, design)
+            con = m.addConstr(lhs == rhs_val, name=name)
+            param_constrs.append((con, rhs_fun, rhs_val))
+            return con
+
+        # Availability bounds.
+        for l in self.L:
+            add_le(rho_l[l], self._rhs_x(l), f"rho_L_{l}")
+        for i, s in self.A_HS:
+            add_le(rho_s[s], self._rhs_x(i), f"rho_S_{s}")
+
+        # alpha_lij linearizes rho_l * y_li * y_ij with y fixed.
+        for l, i, j in alpha_keys:
+            m.addConstr(alpha[l, i, j] <= rho_l[l], name=f"alpha_1_{l}_{i}_{j}")
+            add_le(alpha[l, i, j], self._rhs_y(l, i), f"alpha_2_{l}_{i}_{j}")
+            add_le(alpha[l, i, j], self._rhs_y(i, j), f"alpha_3_{l}_{i}_{j}")
+            add_ge(alpha[l, i, j] - rho_l[l], self._rhs_alpha_lb(l, i, j), f"alpha_4_{l}_{i}_{j}")
+
+        # beta_ij linearizes rho_s * y_ij with y fixed.
+        for s, i in self.A_SH:
+            for h, j in self.A_HH:
+                if h != i:
+                    continue
+                m.addConstr(beta[i, j] <= rho_s[s], name=f"beta_1_{i}_{j}")
+                add_le(beta[i, j], self._rhs_y(i, j), f"beta_2_{i}_{j}")
+                add_ge(beta[i, j] - rho_s[s], self._rhs_beta_lb(i, j), f"beta_3_{i}_{j}")
+
+        # Loaded hub-to-hub flow.
+        for i, j in self.A_HH:
+            p_i = self._p_chain(i)
+            demand = float(self.inst.h.get((i, j), 0.0))
+            m.addConstr(
+                psi[i, j]
+                == demand
+                * (
+                    (1.0 - p_i)
+                    * gp.quicksum(alpha[l, i, j] for (l, h) in self.A_LH if h == i and (l, i, j) in alpha)
+                    + p_i * beta[i, j]
+                ),
+                name=f"psi_HH_{i}_{j}",
+            )
+
+        # Empty base-to-hub flow.
+        for l, i in self.A_LH:
+            m.addConstr(
+                psi[l, i]
+                == gp.quicksum(
+                    float(self.inst.h.get((i, j), 0.0)) * (1.0 - self._p_chain(i)) * alpha[l, i, j]
+                    for (h, j) in self.A_HH
+                    if h == i and (l, i, j) in alpha
+                ),
+                name=f"psi_LH_{l}_{i}",
+            )
+
+        # Empty holding-pool-to-hub flow.
+        for s, i in self.A_SH:
+            m.addConstr(
+                psi[s, i]
+                == gp.quicksum(
+                    float(self.inst.h.get((i, j), 0.0)) * self._p_chain(i) * beta[i, j]
+                    for (h, j) in self.A_HH
+                    if h == i
+                ),
+                name=f"psi_SH_{s}_{i}",
+            )
+
+        # Closed-network flow balance.
+        for q in self.HLS:
+            m.addConstr(
+                gp.quicksum(psi[u, q] for (u, v) in self.A if v == q)
+                == gp.quicksum(psi[q, v] for (u, v) in self.A if u == q),
+                name=f"flow_balance_{q}",
+            )
+
+        # Route decomposition.
+        for u, v in self.A_hat:
+            m.addConstr(
+                gp.quicksum(varphi[u, v, k] for k in self.route_options.get((u, v), []) if (u, v, k) in varphi)
+                == psi[u, v],
                 name=f"route_{u}_{v}",
             )
 
-        cons["swap"] = {}
-        for k in data.E:
-            cons["swap"][k] = m.addConstr(
-                gp.quicksum(varphi[u, v, k] for u, v, kk in data.varphi_keys if kk == k)
-                <= data.swap_capacity(k) * x_hat.get(k, 0.0),
-                name=f"swap_{k}",
-            )
+        for u, v, k in varphi_keys:
+            big_m = self.route_big_m[u, v, k]
+            add_le(varphi[u, v, k], self._rhs_y(u, v, big_m), f"route_arc_active_{u}_{v}_{k}")
 
-        cons["energyL"] = {}
-        for l in data.L:
-            cons["energyL"][l] = m.addConstr(
-                gp.quicksum(
-                    data.route_energy_coef[l, i, k] * varphi[l, i, k]
-                    for u, i, k in data.varphi_keys
-                    if u == l and (l, i) in data.A_LH_set
+        for u, v, k in varphi_keys:
+            if k not in self.E:
+                continue
+            big_m = self.route_big_m[u, v, k]
+            add_le(varphi[u, v, k], self._rhs_y(u, k, big_m), f"route_swap_in_active_{u}_{v}_{k}")
+            add_le(varphi[u, v, k], self._rhs_y(k, v, big_m), f"route_swap_out_active_{u}_{v}_{k}")
+
+        # Energy constraints.  These do not contain first-stage RHS terms after
+        # route-activation constraints are enforced.
+        for l in self.L:
+            m.addConstr(
+                omega
+                * gp.quicksum(
+                    self.t[l, i, k] * varphi[l, i, k]
+                    for (u, i, k) in varphi_keys
+                    if u == l and (l, i) in self.A_hat
                 )
-                <= 0.0,
-                name=f"energyL_{l}",
+                <= usable_battery
+                * gp.quicksum(
+                    varphi[l, i, k]
+                    for (u, i, k) in varphi_keys
+                    if u == l and (l, i) in self.A_hat and k in self.E
+                ),
+                name=f"energy_L_{l}",
             )
 
-        cons["energyHS"] = {}
-        for i, s in data.A_HS:
-            cons["energyHS"][i, s] = m.addConstr(
-                data.omega * (xi[i] + xi[s])
-                + gp.quicksum(
-                    data.route_energy_coef[i, u, k] * varphi[i, u, k]
-                    for h, u, k in data.varphi_keys
-                    if h == i and (i, u) in data.A_HH_set
+        for i in self.H:
+            s = self._hub_pool(i)
+            m.addConstr(
+                omega
+                * (
+                    xi[i]
+                    + xi[s]
+                    + gp.quicksum(self.t[i, j, k] * varphi[i, j, k] for (h, j, k) in varphi_keys if h == i and (i, j) in self.A_HH)
+                    + gp.quicksum(
+                        self.t[s, v, k] * varphi[s, v, k]
+                        for (u, v, k) in varphi_keys
+                        if u == s and ((s, v) in self.A_SL or (s, v) in self.A_SS)
+                    )
                 )
-                + gp.quicksum(
-                    data.route_energy_coef[s, u, k] * varphi[s, u, k]
-                    for h, u, k in data.varphi_keys
-                    if h == s and ((s, u) in data.A_SL or (s, u) in data.A_SS)
-                )
-                <= 0.0,
-                name=f"energyHS_{i}_{s}",
+                <= usable_battery
+                * (
+                    gp.quicksum(varphi[i, j, k] for (h, j, k) in varphi_keys if h == i and (i, j) in self.A_HH and k in self.E)
+                    + gp.quicksum(
+                        varphi[s, v, k]
+                        for (u, v, k) in varphi_keys
+                        if u == s and ((s, v) in self.A_SL or (s, v) in self.A_SS) and k in self.E
+                    )
+                ),
+                name=f"energy_HS_{i}",
             )
 
-        cons["lambdaDef"], cons["hubWait"], cons["meanS"] = {}, {}, {}
-        mu_hat = {
-            i: sum(data.mu_levels[c] * z_hat.get((i, c), 0.0) for c in data.C)
-            for i in data.H
-        }
-        for i in data.H:
-            cons["lambdaDef"][i] = m.addConstr(
-                lambd[i] - gp.quicksum(psi[u, i] for u, v in data.A if v == i) == 0.0,
-                name=f"lambdaDef_{i}",
-            )
-            cons["hubWait"][i] = m.addConstr(
-                lambd[i] <= mu_hat[i] - x_hat.get(i, 0.0) / data.tau_H,
-                name=f"hubWait_{i}",
-            )
+        # lambda_i equals total incoming aggregate flow to hub i.
+        for i in self.H:
+            m.addConstr(lambd[i] == gp.quicksum(psi[u, i] for (u, v) in self.A if v == i), name=f"lambda_{i}")
 
-        for s in data.S:
-            cons["meanS"][s] = m.addConstr(
-                xi[s] - data.tau_S * gp.quicksum(psi[s, v] for u, v in data.A if u == s) <= 0.0,
-                name=f"meanS_{s}",
-            )
+        # mu_i and hub service stability; both depend on master variables.
+        for i in self.H:
+            add_eq(mu[i], self._rhs_mu(i), f"mu_{i}")
+            add_ge(mu[i] - lambd[i], self._rhs_hub_wait(i), f"hub_wait_{i}")
 
-        cons["fleet"] = m.addConstr(
-            gp.quicksum(xi[u] for u in data.HLS)
-            + gp.quicksum(data.t[u, v, k] * varphi[u, v, k] for u, v, k in data.varphi_keys)
-            <= gamma_hat,
-            name="fleet",
-        )
+        # Holding-pool mean dwell bound.
+        for s in self.S:
+            m.addConstr(xi[s] <= tau_S * gp.quicksum(psi[s, v] for (u, v) in self.A if u == s), name=f"mean_S_{s}")
 
-        v1_q = m.addVars(data.L + data.S, lb=-GRB.INFINITY, name="q_v1")
-        v2_q = m.addVars(data.L + data.S, lb=-GRB.INFINITY, name="q_v2")
-        t_q = m.addVars(data.L + data.S, lb=0.0, name="q_t")
-        cons["q1"], cons["q2"], cons["q3"] = {}, {}, {}
-        for q in data.L + data.S:
-            rho_q = rho_l[q] if q in data.L else rho_s[q]
-            cons["q1"][q] = m.addConstr(v1_q[q] == 2.0, name=f"q1_{q}")
-            cons["q2"][q] = m.addConstr(v2_q[q] - xi[q] - rho_q == 0.0, name=f"q2_{q}")
-            cons["q3"][q] = m.addConstr(t_q[q] - xi[q] + rho_q == 2.0, name=f"q3_{q}")
-            m.addQConstr(v1_q[q] * v1_q[q] + v2_q[q] * v2_q[q] <= t_q[q] * t_q[q], name=f"soc_Q_{q}")
+        # SOC: xi_u >= rho_u / (1-rho_u) for bases and pools.
+        q_nodes = self.L + self.S
+        q_v1 = m.addVars(q_nodes, lb=-GRB.INFINITY, name="q_v1")
+        q_v2 = m.addVars(q_nodes, lb=-GRB.INFINITY, name="q_v2")
+        q_t = m.addVars(q_nodes, lb=0.0, name="q_t")
+        for q in q_nodes:
+            rho_q = rho_l[q] if q in self.L else rho_s[q]
+            m.addConstr(q_v1[q] == 2.0, name=f"q_v1_{q}")
+            m.addConstr(q_v2[q] == xi[q] + rho_q, name=f"q_v2_{q}")
+            m.addConstr(q_t[q] == xi[q] - rho_q + 2.0, name=f"q_t_{q}")
+            m.addQConstr(q_v1[q] * q_v1[q] + q_v2[q] * q_v2[q] <= q_t[q] * q_t[q], name=f"queue_{q}")
 
-        v1_h = m.addVars(data.H, lb=-GRB.INFINITY, name="h_v1")
-        v2_h = m.addVars(data.H, lb=-GRB.INFINITY, name="h_v2")
-        t_h = m.addVars(data.H, lb=0.0, name="h_t")
-        cons["h1"], cons["h2"], cons["h3"] = {}, {}, {}
-        for i in data.H:
-            cons["h1"][i] = m.addConstr(v1_h[i] == 2.0 * math.sqrt(max(mu_hat[i], 0.0)), name=f"h1_{i}")
-            cons["h2"][i] = m.addConstr(v2_h[i] - xi[i] - lambd[i] == 1.0 - mu_hat[i], name=f"h2_{i}")
-            cons["h3"][i] = m.addConstr(t_h[i] - xi[i] + lambd[i] == 1.0 + mu_hat[i], name=f"h3_{i}")
-            m.addQConstr(v1_h[i] * v1_h[i] + v2_h[i] * v2_h[i] <= t_h[i] * t_h[i], name=f"soc_H_{i}")
+        # SOC: xi_i >= lambda_i / (mu_i-lambda_i) for hubs.
+        h_v1 = m.addVars(self.H, lb=-GRB.INFINITY, name="h_v1")
+        h_v2 = m.addVars(self.H, lb=-GRB.INFINITY, name="h_v2")
+        h_t = m.addVars(self.H, lb=0.0, name="h_t")
+        for i in self.H:
+            add_eq(h_v1[i], self._rhs_sqrt_mu(i), f"h_v1_{i}")
+            m.addConstr(h_v2[i] == xi[i] + lambd[i] - mu[i] + 1.0, name=f"h_v2_{i}")
+            m.addConstr(h_t[i] == xi[i] - lambd[i] + mu[i] + 1.0, name=f"h_t_{i}")
+            m.addQConstr(h_v1[i] * h_v1[i] + h_v2[i] * h_v2[i] <= h_t[i] * h_t[i], name=f"queue_H_{i}")
+
+        total_queue_length = gp.quicksum(xi[u] for u in self.HLS)
+        total_flight_time = gp.quicksum(self.t[u, v, k] * varphi[u, v, k] for (u, v, k) in varphi_keys)
+        add_le(total_queue_length + total_flight_time, self._rhs_gamma(), "fleet")
+
+        sub_time_limit = getattr(config, "BENDERS_SUB_TIME_LIMIT", None)
+        if sub_time_limit is not None:
+            m.Params.TimeLimit = float(sub_time_limit)
 
         m.optimize()
-        self.model = m
 
-        if m.Status != GRB.OPTIMAL:
-            return m.Status, None, None
+        if m.status != GRB.OPTIMAL or m.SolCount == 0:
+            if (
+                m.SolCount > 0
+                and m.status in {GRB.SUBOPTIMAL, GRB.TIME_LIMIT}
+            ):
+                return SubproblemResult(
+                    status=m.status,
+                    obj_value=float(m.ObjVal),
+                    cut_expr_data=None,
+                    rhs_at_reference=None,
+                    design=design,
+                    label=label,
+                )
+            return SubproblemResult(status=m.status, obj_value=None, cut_expr_data=None, rhs_at_reference=None, design=design, label=label)
 
-        pi_failures: list[str] = []
-
-        def pi(name: str, c: gp.Constr) -> float:
+        # Extract linear dual multipliers for the parameterized constraints.
+        # Gurobi's Pi is the sensitivity of the objective to the constraint RHS.
+        cut_expr_data: List[Tuple[float, Callable[[Mapping[str, object]], gp.LinExpr]]] = []
+        rhs_values: List[float] = []
+        dual_tol = float(getattr(config, "BENDERS_DUAL_TOL", 1e-8))
+        for con, rhs_fun, rhs_val in param_constrs:
             try:
-                val = float(c.Pi)
-            except (AttributeError, gp.GurobiError):
-                pi_failures.append(name)
-                return 0.0
-            return 0.0 if abs(val) <= TOL else val
+                pi = float(con.Pi)
+            except (gp.GurobiError, AttributeError):
+                retry_tols = getattr(config, "BENDERS_SUB_DUAL_RETRY_BAR_QCP_CONV_TOLS", (1e-7, 1e-8))
+                if dual_retry_index < len(retry_tols):
+                    return self.solve_subproblem(
+                        design,
+                        label=f"{label}_dual_retry{dual_retry_index + 1}",
+                        bar_qcp_conv_tol=float(retry_tols[dual_retry_index]),
+                        dual_retry_index=dual_retry_index + 1,
+                    )
+                return SubproblemResult(
+                    status=m.status,
+                    obj_value=float(m.ObjVal),
+                    cut_expr_data=None,
+                    rhs_at_reference=None,
+                    design=design,
+                    label=label,
+                )
+            if abs(pi) > dual_tol:
+                cut_expr_data.append((pi, rhs_fun))
+                rhs_values.append(rhs_val)
 
-        duals: Dict[str, Any] = {}
-        for name, item in cons.items():
-            if hasattr(item, "items"):
-                duals[name] = {key: pi(f"{name}{key}", constr) for key, constr in item.items()}
-            else:
-                duals[name] = pi(name, item)
+        return SubproblemResult(
+            status=m.status,
+            obj_value=float(m.ObjVal),
+            cut_expr_data=cut_expr_data,
+            rhs_at_reference=rhs_values,
+            design=design,
+            label=label,
+        )
 
-        rhs_value = RegimeIIDualObjective.expr(data, duals, x_hat, y_hat, z_hat, gamma_hat, use_gurobi_expr=False)
-        tight_tol = 1e-7 + 1e-7 * max(1.0, abs(float(m.ObjVal)))
-        degenerate_zero = abs(float(m.ObjVal)) <= 1e-6
-        if pi_failures or degenerate_zero or abs(rhs_value - float(m.ObjVal)) > tight_tol:
-            if pi_failures:
-                reason = "pi"
-            elif degenerate_zero:
-                reason = "degenerate"
-            else:
-                reason = "tightness"
-            fallback = self._dual_fallback(
-                x_hat,
-                y_hat,
-                z_hat,
-                gamma_hat,
-                float(m.ObjVal),
-                reason,
-            )
-            if fallback is not None:
-                return m.Status, m.ObjVal, fallback
-            if pi_failures:
-                return m.Status, m.ObjVal, None
+    def _add_benders_cut(self, sub_result: SubproblemResult, cut_name_prefix: str) -> None:
+        """Add eta <= Q(x_ref) + pi^T [rhs(x)-rhs(x_ref)]."""
+        assert self.master is not None
+        if sub_result.obj_value is None or sub_result.cut_expr_data is None or sub_result.rhs_at_reference is None:
+            raise ValueError("Cannot add a Benders cut from an unsolved subproblem.")
 
-        return m.Status, m.ObjVal, {
-            "kind": "optimality",
-            "z_star": m.ObjVal,
-            "duals": duals,
-            "rhs_at_hat": rhs_value,
-            "source": "primal",
+        eta = self.master_vars["eta"]
+        # Build expression for master RHS at current master variables.
+        master_dict = {
+            "x": self.master_vars["x"],
+            "y": self.master_vars["y"],
+            "z": self.master_vars["z"],
+            "Gamma": self.master_vars["Gamma"],
         }
+        cut_rhs = gp.LinExpr(float(sub_result.obj_value))
+        for (pi, rhs_fun), rhs_ref in zip(sub_result.cut_expr_data, sub_result.rhs_at_reference):
+            rhs_expr = rhs_fun(master_dict)
+            cut_rhs += pi * (rhs_expr - rhs_ref)
 
-    def _dual_fallback(
+        self.cut_count += 1
+        self.master.addConstr(eta <= cut_rhs, name=f"{cut_name_prefix}_{self.cut_count}")
+
+    # ------------------------------------------------------------------
+    # Core-point/Pareto stabilization
+    # ------------------------------------------------------------------
+
+    def _initialize_or_update_core(self, design: Mapping[str, object]) -> None:
+        """Maintain a fractional core point as a convex combination of incumbents."""
+        C = range(len(config.MU_HUB))
+        if self.core_point is None:
+            self.core_point = {
+                "x": {u: float(design["x"][u]) for u in self.N_x},
+                "y": {(u, v): float(design["y"][u, v]) for (u, v) in self.AY},
+                "z": {(i, c): float(design["z"][i, c]) for i in self.H for c in C},
+                "Gamma": float(design["Gamma"]),
+            }
+            return
+
+        w = self.core_update_weight
+        for u in self.N_x:
+            self.core_point["x"][u] = w * float(self.core_point["x"][u]) + (1.0 - w) * float(design["x"][u])
+        for u, v in self.AY:
+            self.core_point["y"][u, v] = w * float(self.core_point["y"][u, v]) + (1.0 - w) * float(design["y"][u, v])
+        for i in self.H:
+            for c in C:
+                self.core_point["z"][i, c] = w * float(self.core_point["z"][i, c]) + (1.0 - w) * float(design["z"][i, c])
+        self.core_point["Gamma"] = w * float(self.core_point["Gamma"]) + (1.0 - w) * float(design["Gamma"])
+
+    def _pareto_reference_design(self, incumbent_design: Mapping[str, object]) -> Dict[str, object]:
+        """Return a stabilized core/incumbent reference design.
+
+        This is the point used to generate the additional Pareto-stabilized cut.
+        It remains feasible for the linear master constraints because it is a
+        convex combination of feasible master designs.
+        """
+        if self.core_point is None:
+            return {
+                "x": dict(incumbent_design["x"]),
+                "y": dict(incumbent_design["y"]),
+                "z": dict(incumbent_design["z"]),
+                "Gamma": float(incumbent_design["Gamma"]),
+            }
+        lam = self.pareto_lambda
+        C = range(len(config.MU_HUB))
+        ref = {
+            "x": {},
+            "y": {},
+            "z": {},
+            "Gamma": lam * float(incumbent_design["Gamma"]) + (1.0 - lam) * float(self.core_point["Gamma"]),
+        }
+        for u in self.N_x:
+            ref["x"][u] = lam * float(incumbent_design["x"][u]) + (1.0 - lam) * float(self.core_point["x"][u])
+        for u, v in self.AY:
+            ref["y"][u, v] = lam * float(incumbent_design["y"][u, v]) + (1.0 - lam) * float(self.core_point["y"][u, v])
+        for i in self.H:
+            for c in C:
+                ref["z"][i, c] = lam * float(incumbent_design["z"][i, c]) + (1.0 - lam) * float(self.core_point["z"][i, c])
+        return ref
+
+    # ------------------------------------------------------------------
+    # Integer reference cuts
+    # ------------------------------------------------------------------
+
+    def _collect_integer_reference_designs(self, incumbent_design: Mapping[str, object]) -> List[Dict[str, object]]:
+        """Collect extra integer master solutions for additional full subproblem cuts."""
+        if not getattr(config, "BENDERS_USE_INTEGER_REFERENCE_CUTS", False):
+            return []
+
+        assert self.master is not None
+        max_refs = int(getattr(config, "BENDERS_REFERENCE_MAX_PER_ITER", 2))
+        pool_limit = int(getattr(config, "BENDERS_REFERENCE_POOL_SOLUTIONS", 4))
+        if max_refs <= 0 or pool_limit <= 1 or self.master.SolCount <= 1:
+            return []
+
+        reference_designs: List[Dict[str, object]] = []
+        seen = {self._reference_design_signature(incumbent_design)}
+        for solution_number in range(1, min(int(self.master.SolCount), pool_limit)):
+            try:
+                design = self._extract_master_design(solution_number=solution_number)
+            except (gp.GurobiError, AttributeError):
+                continue
+            signature = self._reference_design_signature(design)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            reference_designs.append(design)
+            if len(reference_designs) >= max_refs:
+                break
+        return reference_designs
+
+    def _add_integer_reference_cuts(
         self,
-        x_hat: Dict[str, float],
-        y_hat: Dict[Tuple[str, str], float],
-        z_hat: Dict[Tuple[str, int], float],
-        gamma_hat: float,
-        primal_obj: float,
-        reason: str,
-    ) -> Optional[Dict[str, Any]]:
-        solver = RegimeIIDualSubproblem(self.data, output=False)
-        status, _, cut_data = solver.solve(x_hat, y_hat, z_hat, gamma_hat)
-        if status == GRB.OPTIMAL and cut_data is not None:
-            cut_data["source"] = f"primal_fallback_dual_{reason}"
-            cut_data["primal_obj"] = primal_obj
-            return cut_data
-        return None
+        iteration: int,
+        reference_designs: List[Dict[str, object]],
+        lower_bound: float,
+    ) -> Tuple[float, int]:
+        """Solve full subproblems at extra integer designs and add global cuts."""
+        if not reference_designs:
+            return lower_bound, 0
 
+        added = 0
+        for ref_idx, ref_design in enumerate(reference_designs, 1):
+            sub = self.solve_subproblem(ref_design, label=f"iref{iteration}_{ref_idx}")
+            if sub.obj_value is None:
+                continue
 
-class RegimeIIDualSubproblem:
-    """Explicit SOCP dual. Also used for Magnanti-Wong Pareto cuts."""
+            total_obj = sub.obj_value - self._fixed_cost_value(ref_design)
+            if total_obj > lower_bound + 1e-7:
+                lower_bound = total_obj
+                self.best_total_obj = total_obj
+                self.best_operational_obj = sub.obj_value
+                self.best_design = ref_design
 
-    def __init__(self, data: RegimeIIData, output: bool = False):
-        self.data = data
-        self.output = output
+            if sub.cut_expr_data is None or sub.rhs_at_reference is None:
+                continue
 
-    def _build_model(self) -> Tuple[gp.Model, Dict[str, Any]]:
-        data = self.data
-        inst = data.inst
-        m = gp.Model("RegimeII_DualSub")
-        m.setParam("OutputFlag", 1 if self.output else 0)
-        m.setParam("Threads", 1)
-        m.setParam("DualReductions", 0)
-        m.setParam("BarHomogeneous", 1)
+            self._add_benders_cut(sub, "integer_ref")
+            added += 1
+        return lower_bound, added
 
-        d: Dict[str, Any] = {}
-        d["rhoL"] = m.addVars(data.L, lb=0.0, name="rhoL")
-        d["rhoS"] = m.addVars(data.A_HS, lb=0.0, name="rhoS")
-        for name in ["alpha1", "alpha2", "alpha3", "alpha4"]:
-            d[name] = m.addVars(data.alpha_keys, lb=0.0, name=name)
-        for name in ["beta1", "beta2", "beta3"]:
-            d[name] = m.addVars(data.beta_support, lb=0.0, name=name)
-
-        d["psiHH"] = m.addVars(data.A_HH, lb=-GRB.INFINITY, name="psiHH")
-        d["psiLH"] = m.addVars(data.A_LH, lb=-GRB.INFINITY, name="psiLH")
-        d["psiSH"] = m.addVars(data.A_SH, lb=-GRB.INFINITY, name="psiSH")
-        d["flow"] = m.addVars(data.HLS, lb=-GRB.INFINITY, name="flow")
-        d["pool"] = m.addVars(data.A_HS, lb=0.0, name="pool")
-        d["route"] = m.addVars(data.A_F, lb=-GRB.INFINITY, name="route")
-        d["swap"] = m.addVars(data.E, lb=0.0, name="swap")
-        d["energyL"] = m.addVars(data.L, lb=0.0, name="energyL")
-        d["energyHS"] = m.addVars(data.A_HS, lb=0.0, name="energyHS")
-        d["lambdaDef"] = m.addVars(data.H, lb=-GRB.INFINITY, name="lambdaDef")
-        d["hubWait"] = m.addVars(data.H, lb=0.0, name="hubWait")
-        d["meanS"] = m.addVars(data.S, lb=0.0, name="meanS")
-        d["fleet"] = m.addVar(lb=0.0, name="fleet")
-        d["q1"] = m.addVars(data.L + data.S, lb=-GRB.INFINITY, name="q1")
-        d["q2"] = m.addVars(data.L + data.S, lb=-GRB.INFINITY, name="q2")
-        d["q3"] = m.addVars(data.L + data.S, lb=0.0, name="q3")
-        d["h1"] = m.addVars(data.H, lb=-GRB.INFINITY, name="h1")
-        d["h2"] = m.addVars(data.H, lb=-GRB.INFINITY, name="h2")
-        d["h3"] = m.addVars(data.H, lb=0.0, name="h3")
-
-        for l in data.L:
-            expr = d["rhoL"][l]
-            expr += gp.quicksum(-d["alpha1"][l, i, j] + d["alpha4"][l, i, j] for ll, i, j in data.alpha_keys if ll == l)
-            expr += -d["q2"][l] + d["q3"][l]
-            m.addConstr(expr >= 0.0, name=f"dual_rhoL_{l}")
-
-        for s in data.S:
-            expr = gp.quicksum(d["rhoS"][i, ss] for i, ss in data.A_HS if ss == s)
-            expr += gp.quicksum(-d["beta1"][ss, i, j] + d["beta3"][ss, i, j] for ss, i, j in data.beta_support if ss == s)
-            expr += -d["q2"][s] + d["q3"][s]
-            m.addConstr(expr >= 0.0, name=f"dual_rhoS_{s}")
-
-        for l, i, j in data.alpha_keys:
-            p_i = data.p_chain(i)
-            demand = float(inst.h.get((i, j), 0.0))
-            expr = d["alpha1"][l, i, j] + d["alpha2"][l, i, j] + d["alpha3"][l, i, j] - d["alpha4"][l, i, j]
-            expr += -demand * (1.0 - p_i) * d["psiHH"][i, j]
-            expr += -demand * (1.0 - p_i) * d["psiLH"][l, i]
-            m.addConstr(expr >= 0.0, name=f"dual_alpha_{l}_{i}_{j}")
-
-        for i, j in data.beta_keys:
-            p_i = data.p_chain(i)
-            demand = float(inst.h.get((i, j), 0.0))
-            expr = gp.quicksum(d["beta1"][s, i, j] + d["beta2"][s, i, j] - d["beta3"][s, i, j] for s, h, jj in data.beta_support if h == i and jj == j)
-            expr += -demand * p_i * d["psiHH"][i, j]
-            expr += gp.quicksum(-demand * p_i * d["psiSH"][s, i] for s, h in data.A_SH if h == i)
-            m.addConstr(expr >= 0.0, name=f"dual_beta_{i}_{j}")
-
-        for u, v in data.A:
-            expr = gp.LinExpr()
-            if (u, v) in data.A_HH_set:
-                expr += d["psiHH"][u, v]
-            if (u, v) in data.A_LH_set:
-                expr += d["psiLH"][u, v]
-            if (u, v) in data.A_SH_set:
-                expr += d["psiSH"][u, v]
-            if v in data.HLS:
-                expr += d["flow"][v]
-            if u in data.HLS:
-                expr -= d["flow"][u]
-            if u in data.S:
-                expr += gp.quicksum(d["pool"][i, s] for i, s in data.A_HS if s == u)
-                expr -= data.tau_S * d["meanS"][u]
-            if (u, v) in data.A_F_set:
-                expr -= d["route"][u, v]
-            if v in data.H:
-                expr -= d["lambdaDef"][v]
-            rhs = data.revenue if (u, v) in data.A_HH_set else 0.0
-            m.addConstr(expr >= rhs, name=f"dual_psi_{u}_{v}")
-
-        for u, v, k in data.varphi_keys:
-            expr = d["route"][u, v] + d["fleet"] * data.t[u, v, k]
-            if k in data.E:
-                expr += d["swap"][k]
-            if u in data.L and (u, v) in data.A_LH_set:
-                expr += d["energyL"][u] * data.route_energy_coef[u, v, k]
-            expr += gp.quicksum(
-                d["energyHS"][i, s] * data.route_energy_coef[u, v, k]
-                for i, s in data.A_HS
-                if u == i or u == s
-            )
-            m.addConstr(expr >= -data.flight_cost[u, v, k], name=f"dual_varphi_{u}_{v}_{k}")
-
-        for i in data.H:
-            expr = d["lambdaDef"][i] + d["hubWait"][i] - d["h2"][i] + d["h3"][i]
-            m.addConstr(expr >= 0.0, name=f"dual_lambda_{i}")
-
-        for l in data.L:
-            m.addConstr(d["fleet"] - d["q2"][l] - d["q3"][l] >= 0.0, name=f"dual_xi_L_{l}")
-
-        for s in data.S:
-            expr = d["fleet"] + d["meanS"][s] - d["q2"][s] - d["q3"][s]
-            expr += gp.quicksum(data.omega * d["energyHS"][i, ss] for i, ss in data.A_HS if ss == s)
-            m.addConstr(expr >= 0.0, name=f"dual_xi_S_{s}")
-
-        for i in data.H:
-            expr = d["fleet"] - d["h2"][i] - d["h3"][i]
-            expr += gp.quicksum(data.omega * d["energyHS"][ii, s] for ii, s in data.A_HS if ii == i)
-            m.addConstr(expr >= 0.0, name=f"dual_xi_H_{i}")
-
-        for q in data.L + data.S:
-            m.addQConstr(d["q1"][q] * d["q1"][q] + d["q2"][q] * d["q2"][q] <= d["q3"][q] * d["q3"][q], name=f"dual_soc_Q_{q}")
-
-        for i in data.H:
-            m.addQConstr(d["h1"][i] * d["h1"][i] + d["h2"][i] * d["h2"][i] <= d["h3"][i] * d["h3"][i], name=f"dual_soc_H_{i}")
-
-        return m, d
-
-    @staticmethod
-    def _extract(container: Any) -> Any:
-        if hasattr(container, "items"):
-            return {k: float(v.X) for k, v in container.items()}
-        return float(container.X)
-
-    def _collect(self, d: Dict[str, Any]) -> Dict[str, Any]:
-        return {name: self._extract(container) for name, container in d.items()}
+    # ------------------------------------------------------------------
+    # Main Benders loop
+    # ------------------------------------------------------------------
 
     def solve(
         self,
-        x_ref: Dict[str, float],
-        y_ref: Dict[Tuple[str, str], float],
-        z_ref: Dict[Tuple[str, int], float],
-        gamma_ref: float,
-    ) -> Tuple[int, Optional[float], Optional[Dict[str, Any]]]:
-        m, d = self._build_model()
-        m.setObjective(RegimeIIDualObjective.expr(self.data, d, x_ref, y_ref, z_ref, gamma_ref, True), GRB.MINIMIZE)
-        m.optimize()
-        if m.Status != GRB.OPTIMAL:
-            return m.Status, None, None
-        duals = self._collect(d)
-        return m.Status, m.ObjVal, {
-            "kind": "optimality",
-            "z_star": m.ObjVal,
-            "duals": duals,
-            "rhs_at_hat": RegimeIIDualObjective.expr(self.data, duals, x_ref, y_ref, z_ref, gamma_ref, False),
-            "source": "dual",
-        }
+        max_iterations: Optional[int] = None,
+        tolerance: Optional[float] = None,
+        time_limit: Optional[float] = None,
+    ) -> bool:
+        """Solve the Benders master/subproblem loop.
 
-    def solve_pareto(
-        self,
-        x_hat: Dict[str, float],
-        y_hat: Dict[Tuple[str, str], float],
-        z_hat: Dict[Tuple[str, int], float],
-        gamma_hat: float,
-        core_x: Dict[str, float],
-        core_y: Dict[Tuple[str, str], float],
-        core_z: Dict[Tuple[str, int], float],
-        core_gamma: float,
-        z_star: float,
-    ) -> Tuple[int, Optional[float], Optional[Dict[str, Any]]]:
-        m, d = self._build_model()
-        anchor = RegimeIIDualObjective.expr(self.data, d, x_hat, y_hat, z_hat, gamma_hat, True)
-        eps = 1e-5 + 1e-5 * max(1.0, abs(float(z_star)))
-        m.addConstr(anchor >= z_star - eps, name="mw_anchor_lb")
-        m.addConstr(anchor <= z_star + eps, name="mw_anchor_ub")
-        m.setObjective(RegimeIIDualObjective.expr(self.data, d, core_x, core_y, core_z, core_gamma, True), GRB.MINIMIZE)
-        m.optimize()
-        if m.Status != GRB.OPTIMAL:
-            return m.Status, None, None
-        duals = self._collect(d)
-        return m.Status, m.ObjVal, {
-            "kind": "optimality",
-            "z_star": z_star,
-            "duals": duals,
-            "rhs_at_hat": RegimeIIDualObjective.expr(self.data, duals, x_hat, y_hat, z_hat, gamma_hat, False),
-            "mw_obj": m.ObjVal,
-            "source": "pareto",
-        }
+        Returns True if at least one feasible incumbent is obtained.
+        """
+        self.build_master()
+        assert self.master is not None
+        self.apply_master_solver_config()
 
+        max_iterations = int(max_iterations if max_iterations is not None else getattr(config, "BENDERS_MAX_ITER", 100))
+        tolerance = float(tolerance if tolerance is not None else getattr(config, "BENDERS_TOL", 1e-4))
+        time_limit = float(time_limit if time_limit is not None else getattr(config, "BENDERS_TIME_LIMIT", getattr(config, "MODEL_TIME_LIMIT", 3600.0)))
+        start_time = gp.tupledict()  # dummy to avoid importing time lazily in old environments
+        del start_time
+        import time
 
-class RegimeIIBenders:
-    """Iterative Benders solver for the final Regime-II formulation."""
+        t0 = time.time()
+        lower_bound = -GRB.INFINITY
+        upper_bound = GRB.INFINITY
+        lower_bound, initial_cut_count = self._process_initial_designs(lower_bound)
 
-    def __init__(
-        self,
-        instance: Instance,
-        subproblem: str = "dual",
-        use_pareto: bool = True,
-        use_valid_inequalities: bool = True,
-        use_initial_cuts: bool = True,
-        max_iter: int = 30,
-        gap_tol: float = 1e-3,
-        master_time_limit: float = 30.0,
-        master_mip_gap: float = 0.2,
-        verbose: bool = True,
-        use_trust_region: bool = False,
-        trust_radius: Optional[int] = None,
-        trust_radius_min: int = 1,
-        trust_radius_max: Optional[int] = None,
-        initial_solution: Optional[Any] = None,
-    ):
-        if subproblem not in {"primal", "dual"}:
-            raise ValueError("subproblem must be 'primal' or 'dual'.")
-        self.inst = instance
-        self.data = RegimeIIData(instance)
-        self.subproblem_mode = subproblem
-        self.use_pareto = use_pareto
-        self.use_valid_inequalities = use_valid_inequalities
-        self.use_initial_cuts = use_initial_cuts
-        self.max_iter = max_iter
-        self.gap_tol = gap_tol
-        self.master_time_limit = master_time_limit
-        self.master_mip_gap = master_mip_gap
-        self.verbose = verbose
-        self.use_trust_region = use_trust_region
-        self.trust_radius_min = max(1, int(trust_radius_min))
-        self.trust_radius_max = trust_radius_max
-        self.trust_radius = trust_radius
-        self.initial_solution = initial_solution
+        for it in range(1, max_iterations + 1):
+            elapsed = time.time() - t0
+            if elapsed >= time_limit:
+                print(f"Benders stopped by time limit before iteration {it}.")
+                break
+            self.master.Params.TimeLimit = max(1.0, time_limit - elapsed)
+            self.master.optimize()
 
-        self.model: Optional[gp.Model] = None
-        self.x = None
-        self.y = None
-        self.z = None
-        self.Gamma = None
-        self.Theta = None
-        self.q = None
-        self.trust_constr = None
-        self.trust_center_x: Optional[Dict[str, float]] = None
-        self.best_obj = -math.inf
-        self.best_solution: Optional[MasterSolution] = None
-        self.history: list[Dict[str, Any]] = []
-        self.subproblem_time = 0.0
-        self.mw_time = 0.0
-        self.global_check_time = 0.0
-        self.stop_reason: Optional[str] = None
-        self.converged = False
-
-        self.core_x, self.core_y, self.core_z, self.core_gamma = self._initial_core_point()
-
-    def _initial_core_point(self):
-        data = self.data
-        core_x = {u: 1.0 for u in data.N_x}
-        core_y: Dict[Tuple[str, str], float] = {}
-        for i in data.H:
-            bases = [l for l, h in data.A_LH if h == i]
-            denom = max(1, len(bases))
-            for l in bases:
-                core_y[i, l] = 1.0 / denom
-        for i, l in [(h, b) for b, h in data.A_LH]:
-            core_y.setdefault((i, l), 0.0)
-        core_z = {(i, c): 1.0 / max(1, len(data.C)) for i in data.H for c in data.C}
-        return core_x, core_y, core_z, data.core_gamma
-
-    def _update_core(self, sol: MasterSolution) -> None:
-        for u in self.data.N_x:
-            self.core_x[u] = 0.5 * self.core_x.get(u, 0.0) + 0.5 * sol.x.get(u, 0.0)
-        for key in self.core_y:
-            self.core_y[key] = 0.5 * self.core_y.get(key, 0.0) + 0.5 * sol.y.get(key, 0.0)
-        for key in self.core_z:
-            self.core_z[key] = 0.5 * self.core_z.get(key, 0.0) + 0.5 * sol.z.get(key, 0.0)
-        self.core_gamma = 0.5 * self.core_gamma + 0.5 * sol.Gamma
-
-    def _build_master(self) -> None:
-        data = self.data
-        m = gp.Model(f"RegimeII_BendersMaster_{self.subproblem_mode}")
-        m.setParam("OutputFlag", 1 if self.verbose else 0)
-        m.setParam("Threads", 1)
-        m.setParam("TimeLimit", self.master_time_limit)
-        m.setParam("MIPGap", self.master_mip_gap)
-        m.setParam("NumericFocus", 2)
-        m.setParam("FeasibilityTol", 1e-8)
-        m.setParam("OptimalityTol", 1e-8)
-
-        self.x = m.addVars(data.N_x, vtype=GRB.BINARY, name="x")
-        self.y = m.addVars([(i, l) for l, i in data.A_LH], vtype=GRB.BINARY, name="y")
-        self.z = m.addVars(data.H, data.C, vtype=GRB.BINARY, name="z")
-        self.Gamma = m.addVar(lb=0.0, vtype=GRB.INTEGER, name="Gamma")
-        self.Theta = m.addVar(lb=-GRB.INFINITY, ub=max(1.0, data.total_revenue_ub), name="Theta")
-
-        fixed = gp.quicksum(float(self.inst.f.get(l, config.COST_BASE)) * self.x[l] for l in data.L)
-        fixed += gp.quicksum(float(getattr(config, "COST_HUB_FIXED", 0.0)) * self.x[i] for i in data.H)
-        fixed += gp.quicksum(float(self.inst.f.get(k, config.COST_SWAPPING)) * self.x[k] for k in data.E)
-        fixed += gp.quicksum(float(config.COST_HUB[c]) * self.z[i, c] for i in data.H for c in data.C)
-
-        m.setObjective(self.Theta - fixed - data.gamma_cost * self.Gamma, GRB.MAXIMIZE)
-
-        for i in data.H:
-            bases = [l for l, h in data.A_LH if h == i]
-            if bases:
-                m.addConstr(gp.quicksum(self.y[i, l] for l in bases) == self.x[i], name=f"assign_{i}")
-            else:
-                m.addConstr(self.x[i] == 0, name=f"no_assign_{i}")
-            m.addConstr(gp.quicksum(self.z[i, c] for c in data.C) == self.x[i], name=f"capacity_{i}")
-
-        for l, i in data.A_LH:
-            m.addConstr(self.y[i, l] <= self.x[l], name=f"assign_active_{i}_{l}")
-
-        if self.use_valid_inequalities:
-            self._add_valid_inequalities(m)
-
-        self.model = m
-
-        if self.use_trust_region:
-            n_x = max(1, len(data.N_x))
-            if self.trust_radius_max is None:
-                self.trust_radius_max = n_x
-            else:
-                self.trust_radius_max = max(self.trust_radius_min, min(int(self.trust_radius_max), n_x))
-            if self.trust_radius is None:
-                self.trust_radius = max(self.trust_radius_min, min(self.trust_radius_max, max(2, n_x // 2)))
-            else:
-                self.trust_radius = max(self.trust_radius_min, min(int(self.trust_radius), self.trust_radius_max))
-
-    def _add_valid_inequalities(self, model: gp.Model) -> None:
-        data = self.data
-
-        for i in data.H:
-            model.addConstr(
-                gp.quicksum(data.mu_levels[c] * self.z[i, c] for c in data.C) >= self.x[i] / data.tau_H,
-                name=f"master_hub_wait_feas_{i}",
-            )
-
-        if data.E:
-            model.addConstr(
-                self.Theta <= data.total_revenue_ub * gp.quicksum(self.x[k] for k in data.E),
-                name="theta_requires_swap_open",
-            )
-
-        serviceable_hh = [(i, j) for i, j in data.A_HH if data.route_options.get((i, j))]
-        if serviceable_hh:
-            self.q = model.addVars(serviceable_hh, lb=0.0, ub=1.0, name="q_hh")
-            for i, j in serviceable_hh:
-                model.addConstr(self.q[i, j] <= self.x[i], name=f"q_origin_{i}_{j}")
-                model.addConstr(self.q[i, j] <= self.x[j], name=f"q_dest_{i}_{j}")
-                model.addConstr(self.q[i, j] >= self.x[i] + self.x[j] - 1.0, name=f"q_and_{i}_{j}")
-
-            model.addConstr(
-                self.Theta
-                <= data.revenue
-                * gp.quicksum(float(self.inst.h.get((i, j), 0.0)) * self.q[i, j] for i, j in serviceable_hh),
-                name="theta_open_demand_bound",
-            )
-
-            base_service_keys = [
-                (l, i, j)
-                for l, i, j in data.alpha_keys
-                if (i, j) in data.A_HH_set and data.p_chain(i) < 1.0 - TOL
-            ]
-            if base_service_keys:
-                q_lij = model.addVars(base_service_keys, lb=0.0, ub=1.0, name="q_lij")
-                service_time_expr = gp.LinExpr()
-                for l, i, j in base_service_keys:
-                    model.addConstr(q_lij[l, i, j] <= self.y[i, l], name=f"q_lij_assign_{l}_{i}_{j}")
-                    model.addConstr(q_lij[l, i, j] <= self.x[j], name=f"q_lij_dest_{l}_{i}_{j}")
-                    usable_swaps = [k for k in data.route_options.get((l, i), []) if k in data.E]
-                    if usable_swaps:
-                        model.addConstr(
-                            q_lij[l, i, j] <= gp.quicksum(self.x[k] for k in usable_swaps),
-                            name=f"q_lij_swap_{l}_{i}_{j}",
-                        )
-                    else:
-                        model.addConstr(q_lij[l, i, j] <= 0.0, name=f"q_lij_no_swap_{l}_{i}_{j}")
-
-                    lh_time = min(
-                        (data.t[l, i, k] for k in data.route_options.get((l, i), []) if k in data.E),
-                        default=math.inf,
-                    )
-                    hh_time = min((data.t[i, j, k] for k in data.route_options.get((i, j), [])), default=math.inf)
-                    if math.isfinite(lh_time) and math.isfinite(hh_time):
-                        service_time_expr += (
-                            (1.0 - data.p_chain(i))
-                            * float(self.inst.h.get((i, j), 0.0))
-                            * (lh_time + hh_time)
-                            * q_lij[l, i, j]
-                        )
-
-                chain_bound = gp.quicksum(
-                    data.p_chain(i) * float(self.inst.h.get((i, j), 0.0)) * self.q[i, j]
-                    for i, j in serviceable_hh
-                    if data.p_chain(i) > TOL
-                )
-                base_bound = gp.quicksum(
-                    (1.0 - data.p_chain(i)) * float(self.inst.h.get((i, j), 0.0)) * q_lij[l, i, j]
-                    for l, i, j in base_service_keys
-                )
-                model.addConstr(
-                    self.Theta <= data.revenue * (base_bound + chain_bound),
-                    name="theta_assignment_swap_demand_bound",
-                )
-                model.addConstr(service_time_expr <= self.Gamma, name="fleet_assignment_time_bound")
-
-            min_loaded_time = min(
-                (data.t[i, j, k] for i, j in serviceable_hh for k in data.route_options.get((i, j), [])),
-                default=0.0,
-            )
-            if min_loaded_time > TOL:
-                model.addConstr(
-                    self.Theta <= (data.revenue / min_loaded_time) * self.Gamma,
-                    name="theta_fleet_time_bound",
-                )
-
-            min_service_time = math.inf
-            min_route_time = {
-                (u, v): min((data.t[u, v, k] for k in data.route_options.get((u, v), [])), default=math.inf)
-                for u, v in data.A_F
-            }
-            for i, j in serviceable_hh:
-                hh_time = min_route_time.get((i, j), math.inf)
-                if not math.isfinite(hh_time):
-                    continue
-                if data.p_chain(i) > TOL:
-                    min_service_time = min(min_service_time, hh_time)
-                if 1.0 - data.p_chain(i) > TOL:
-                    for l, h in data.A_LH:
-                        if h != i:
-                            continue
-                        lh_time = min_route_time.get((l, i), math.inf)
-                        if math.isfinite(lh_time):
-                            min_service_time = min(min_service_time, lh_time + hh_time)
-            if math.isfinite(min_service_time) and min_service_time > TOL:
-                model.addConstr(
-                    self.Theta <= (data.revenue / min_service_time) * self.Gamma,
-                    name="theta_service_cycle_time_bound",
-                )
-
-        model.addConstr(
-            self.Theta
-            <= 0.5
-            * data.revenue
-            * gp.quicksum(
-                gp.quicksum(data.mu_levels[c] * self.z[i, c] for c in data.C) - self.x[i] / data.tau_H
-                for i in data.H
-            ),
-            name="theta_hub_capacity_bound",
-        )
-
-    def _reference_points(self):
-        data = self.data
-        points = []
-
-        closed_x = {u: 0.0 for u in data.N_x}
-        closed_y = {(i, l): 0.0 for l, i in data.A_LH}
-        closed_z = {(i, c): 0.0 for i in data.H for c in data.C}
-        points.append((closed_x, closed_y, closed_z, 0.0))
-
-        def repaired_point(open_hubs, gamma_value):
-            x_ref = {u: 0.0 for u in data.N_x}
-            y_ref = {(i, l): 0.0 for l, i in data.A_LH}
-            z_ref = {(i, c): 0.0 for i in data.H for c in data.C}
-            cap = max(data.C, key=lambda c: data.mu_levels[c]) if data.C else 0
-            for k in data.E:
-                x_ref[k] = 1.0
-            for i in open_hubs:
-                bases = [l for l, h in data.A_LH if h == i]
-                if not bases:
-                    continue
-                best_l = min(bases, key=lambda l: self.inst.get_dist(l, i))
-                x_ref[i] = 1.0
-                x_ref[best_l] = 1.0
-                y_ref[i, best_l] = 1.0
-                z_ref[i, cap] = 1.0
-            return x_ref, y_ref, z_ref, float(gamma_value)
-
-        all_hubs = list(data.H)
-        points.append(repaired_point(all_hubs, max(1.0, math.ceil(data.core_gamma))))
-
-        hub_score = {i: 0.0 for i in data.H}
-        for (i, j), demand in self.inst.h.items():
-            hub_score[i] = hub_score.get(i, 0.0) + float(demand)
-            hub_score[j] = hub_score.get(j, 0.0) + float(demand)
-        top_hubs = [
-            h
-            for h, _ in sorted(hub_score.items(), key=lambda item: item[1], reverse=True)[: max(1, min(4, len(data.H)))]
-        ]
-        points.append(repaired_point(top_hubs, max(1.0, math.ceil(data.core_gamma / 2.0))))
-        return points
-
-    def _add_initial_cuts(self, dual_solver_for_pareto: RegimeIIDualSubproblem) -> int:
-        if not self.use_initial_cuts:
-            return 0
-        cuts = 0
-        for idx, (x_ref, y_ref, z_ref, gamma_ref) in enumerate(self._reference_points(), start=1):
-            solver = RegimeIIDualSubproblem(self.data, output=False)
-            status, sub_obj, cut_data = solver.solve(x_ref, y_ref, z_ref, gamma_ref)
-            if status != GRB.OPTIMAL or cut_data is None or sub_obj is None:
-                continue
-            self._add_cut(cut_data["duals"], f"initial_benders_{idx}_{cut_data.get('source', self.subproblem_mode)}")
-            cuts += 1
-
-            if not self.use_pareto or abs(cut_data["rhs_at_hat"]) <= TOL:
-                continue
-            mw_status, _, mw_cd = dual_solver_for_pareto.solve_pareto(
-                x_ref,
-                y_ref,
-                z_ref,
-                gamma_ref,
-                self.core_x,
-                self.core_y,
-                self.core_z,
-                self.core_gamma,
-                cut_data["rhs_at_hat"],
-            )
-            if mw_status == GRB.OPTIMAL and mw_cd is not None:
-                self._add_cut(mw_cd["duals"], f"initial_pareto_{idx}")
-                cuts += 1
-        return cuts
-
-    def _coerce_initial_solution(self) -> Optional[MasterSolution]:
-        if self.initial_solution is None:
-            return None
-        init = self.initial_solution
-        gamma = getattr(init, "Gamma", getattr(init, "gamma", None))
-        if gamma is None:
-            return None
-        return MasterSolution(
-            x=dict(getattr(init, "x")),
-            y=dict(getattr(init, "y")),
-            z=dict(getattr(init, "z")),
-            Gamma=float(gamma),
-            theta=float(getattr(init, "theta", 0.0) or 0.0),
-            obj=float(getattr(init, "obj", 0.0) or 0.0),
-        )
-
-    def _apply_initial_start(self, sol: MasterSolution) -> None:
-        for u, value in sol.x.items():
-            if u in self.x:
-                self.x[u].Start = value
-        for key, value in sol.y.items():
-            if key in self.y:
-                self.y[key].Start = value
-        for key, value in sol.z.items():
-            if key in self.z:
-                self.z[key].Start = value
-        self.Gamma.Start = sol.Gamma
-        if sol.theta is not None:
-            self.Theta.Start = sol.theta
-
-    def _load_initial_solution(self) -> None:
-        sol = self._coerce_initial_solution()
-        if sol is None:
-            return
-        self._apply_initial_start(sol)
-        status, sub_obj, cut_data = self._solve_subproblem(sol)
-        if status != GRB.OPTIMAL or sub_obj is None or cut_data is None:
-            if self.verbose:
-                print(f"[Benders-RII] initial solution rejected by subproblem status={status}.")
-            return
-        self._add_cut(cut_data["duals"], f"initial_{cut_data.get('source', self.subproblem_mode)}")
-        fixed = self.data.fixed_cost_value(sol.x, sol.z)
-        self.best_obj = float(sub_obj) - fixed - self.data.gamma_cost * sol.Gamma
-        self.best_solution = sol
-        if self.use_trust_region:
-            self.trust_center_x = dict(sol.x)
-        if self.verbose:
-            print(f"[Benders-RII] loaded initial feasible solution obj={self.best_obj:.4f}.")
-
-    def _refresh_trust_region(self) -> None:
-        if not self.use_trust_region or self.trust_center_x is None:
-            return
-        assert self.model is not None
-        if self.trust_constr is not None:
-            self.model.remove(self.trust_constr)
-            self.trust_constr = None
-
-        expr = gp.LinExpr()
-        for u in self.data.N_x:
-            if self.trust_center_x.get(u, 0.0) > 0.5:
-                expr += 1.0 - self.x[u]
-            else:
-                expr += self.x[u]
-        self.trust_constr = self.model.addConstr(
-            expr <= int(self.trust_radius),
-            name=f"trust_region_r{int(self.trust_radius)}",
-        )
-
-    def _update_trust_region(self, sol: MasterSolution, improved: bool) -> None:
-        if not self.use_trust_region:
-            return
-        if self.trust_center_x is None or improved:
-            self.trust_center_x = dict(sol.x)
-            if self.trust_radius is not None and self.trust_radius_max is not None:
-                self.trust_radius = min(self.trust_radius_max, int(self.trust_radius) + 1)
-            return
-        if self.trust_radius is not None:
-            self.trust_radius = max(self.trust_radius_min, int(self.trust_radius) - 1)
-
-    def _unrestricted_master_solution(self) -> Optional[Tuple[MasterSolution, float]]:
-        if not self.use_trust_region or self.trust_constr is None:
-            return None
-        assert self.model is not None
-
-        saved = self.trust_constr
-        self.model.remove(saved)
-        self.trust_constr = None
-        self.model.update()
-        start = time.perf_counter()
-        self.model.optimize()
-        self.global_check_time += time.perf_counter() - start
-        if self.model.SolCount == 0:
-            self._refresh_trust_region()
-            return None
-        sol = self._solution()
-        bound = float(self.model.ObjBound)
-        self._refresh_trust_region()
-        return sol, bound
-
-    def _solution(self) -> MasterSolution:
-        assert self.model is not None
-        x_hat = {u: float(self.x[u].X) for u in self.data.N_x}
-        y_hat = {(i, l): float(self.y[i, l].X) for l, i in self.data.A_LH}
-        z_hat = {(i, c): float(self.z[i, c].X) for i in self.data.H for c in self.data.C}
-        return MasterSolution(
-            x=x_hat,
-            y=y_hat,
-            z=z_hat,
-            Gamma=float(self.Gamma.X),
-            theta=float(self.Theta.X),
-            obj=float(self.model.ObjVal),
-        )
-
-    def _add_cut(self, duals: Dict[str, Any], name: str) -> None:
-        assert self.model is not None
-        rhs = RegimeIIDualObjective.expr(self.data, duals, self.x, self.y, self.z, self.Gamma, True)
-        self.model.addConstr(self.Theta <= rhs, name=name)
-
-    def _solve_subproblem(self, sol: MasterSolution):
-        if self.subproblem_mode == "primal":
-            solver = RegimeIIPrimalSubproblem(self.data, output=False)
-            status, obj, cut_data = solver.solve(sol.x, sol.y, sol.z, sol.Gamma)
-            if status == GRB.OPTIMAL and cut_data is not None:
-                return status, obj, cut_data
-
-            fallback = RegimeIIDualSubproblem(self.data, output=False)
-            d_status, d_obj, d_cut_data = fallback.solve(sol.x, sol.y, sol.z, sol.Gamma)
-            if d_status == GRB.OPTIMAL and d_cut_data is not None:
-                d_cut_data["source"] = f"primal_status_{status}_fallback_dual"
-                return d_status, d_obj, d_cut_data
-            return status, obj, cut_data
-
-        solver = RegimeIIDualSubproblem(self.data, output=False)
-        status, obj, cut_data = solver.solve(sol.x, sol.y, sol.z, sol.Gamma)
-        if status == GRB.OPTIMAL and cut_data is not None:
-            return status, obj, cut_data
-
-        fallback = RegimeIIPrimalSubproblem(self.data, output=False)
-        p_status, p_obj, p_cut_data = fallback.solve(sol.x, sol.y, sol.z, sol.Gamma)
-        if p_status == GRB.OPTIMAL and p_cut_data is not None:
-            p_cut_data["source"] = f"dual_fallback_{p_cut_data.get('source', 'primal')}"
-            return p_status, p_obj, p_cut_data
-
-        return status, obj, cut_data
-
-    def solve(self) -> Optional[float]:
-        self._build_master()
-        assert self.model is not None
-        dual_solver_for_pareto = RegimeIIDualSubproblem(self.data, output=False)
-        initial_cuts = self._add_initial_cuts(dual_solver_for_pareto)
-        if self.verbose and initial_cuts:
-            print(f"[Benders-RII] added {initial_cuts} initial cuts.")
-        self._load_initial_solution()
-
-        for it in range(1, self.max_iter + 1):
-            t0 = time.perf_counter()
-            self._refresh_trust_region()
-            self.model.optimize()
-            if self.model.SolCount == 0:
-                if self.verbose:
-                    print("[Benders-RII] master has no incumbent.")
-                self.stop_reason = "master_no_incumbent"
-                return None
-
-            sol = self._solution()
-            sub_start = time.perf_counter()
-            status, sub_obj, cut_data = self._solve_subproblem(sol)
-            sub_elapsed = time.perf_counter() - sub_start
-            self.subproblem_time += sub_elapsed
-            if status != GRB.OPTIMAL or cut_data is None or sub_obj is None:
-                if self.verbose:
-                    print(f"[Benders-RII] subproblem status={status}; adding no-good fallback.")
-                self._add_nogood(sol, f"nogood_{it}")
-                continue
-
-            chosen_cut = cut_data
-            mw_elapsed = 0.0
-            if self.use_pareto:
-                mw_start = time.perf_counter()
-                mw_status, mw_obj, mw_cd = dual_solver_for_pareto.solve_pareto(
-                    sol.x,
-                    sol.y,
-                    sol.z,
-                    sol.Gamma,
-                    self.core_x,
-                    self.core_y,
-                    self.core_z,
-                    self.core_gamma,
-                    cut_data.get("rhs_at_hat", sub_obj),
-                )
-                mw_elapsed = time.perf_counter() - mw_start
-                self.mw_time += mw_elapsed
-                if mw_status == GRB.OPTIMAL and mw_cd is not None:
-                    chosen_cut = mw_cd
-
-            self._add_cut(chosen_cut["duals"], f"benders_{it}_{chosen_cut.get('source', self.subproblem_mode)}")
-            fixed = self.data.fixed_cost_value(sol.x, sol.z)
-            eval_sub_obj = sub_obj
-            if self.subproblem_mode == "dual":
-                p_status, p_obj, _ = RegimeIIPrimalSubproblem(self.data, output=False).solve(
-                    sol.x,
-                    sol.y,
-                    sol.z,
-                    sol.Gamma,
-                )
-                if p_status == GRB.OPTIMAL and p_obj is not None:
-                    eval_sub_obj = p_obj
-
-            true_obj = eval_sub_obj - fixed - self.data.gamma_cost * sol.Gamma
-            improved = true_obj > self.best_obj + 1e-6
-            if true_obj > self.best_obj:
-                self.best_obj = true_obj
-                self.best_solution = sol
-            self._update_trust_region(sol, improved)
-
-            master_bound = float(self.model.ObjBound) if self.model.Status in {GRB.OPTIMAL, GRB.TIME_LIMIT} else sol.obj
-            gap = (master_bound - self.best_obj) / max(1.0, abs(self.best_obj))
-            global_bound = None
-            global_gap = None
-            global_cut_source = None
-            global_sub_obj = None
-            global_status = None
-            if self.use_trust_region and gap <= self.gap_tol:
-                global_result = self._unrestricted_master_solution()
-                if global_result is not None:
-                    global_sol, global_bound = global_result
-                    global_gap = (global_bound - self.best_obj) / max(1.0, abs(self.best_obj))
-                    if global_gap > self.gap_tol:
-                        global_sub_start = time.perf_counter()
-                        g_status, g_sub_obj, g_cut_data = self._solve_subproblem(global_sol)
-                        global_sub_elapsed = time.perf_counter() - global_sub_start
-                        self.subproblem_time += global_sub_elapsed
-                        global_status = g_status
-                        if g_status == GRB.OPTIMAL and g_cut_data is not None and g_sub_obj is not None:
-                            global_chosen_cut = g_cut_data
-                            if self.use_pareto:
-                                mw_start = time.perf_counter()
-                                g_mw_status, _, g_mw_cd = dual_solver_for_pareto.solve_pareto(
-                                    global_sol.x,
-                                    global_sol.y,
-                                    global_sol.z,
-                                    global_sol.Gamma,
-                                    self.core_x,
-                                    self.core_y,
-                                    self.core_z,
-                                    self.core_gamma,
-                                    g_cut_data.get("rhs_at_hat", g_sub_obj),
-                                )
-                                g_mw_elapsed = time.perf_counter() - mw_start
-                                self.mw_time += g_mw_elapsed
-                                if g_mw_status == GRB.OPTIMAL and g_mw_cd is not None:
-                                    global_chosen_cut = g_mw_cd
-                            self._add_cut(
-                                global_chosen_cut["duals"],
-                                f"global_benders_{it}_{global_chosen_cut.get('source', self.subproblem_mode)}",
-                            )
-                            global_cut_source = global_chosen_cut.get("source")
-                            global_sub_obj = g_sub_obj
-                            global_true_obj = (
-                                g_sub_obj
-                                - self.data.fixed_cost_value(global_sol.x, global_sol.z)
-                                - self.data.gamma_cost * global_sol.Gamma
-                            )
-                            if global_true_obj > self.best_obj + 1e-6:
-                                self.best_obj = global_true_obj
-                                self.best_solution = global_sol
-                                self._update_trust_region(global_sol, True)
-                        else:
-                            self._add_nogood(global_sol, f"global_nogood_{it}_{g_status}")
-                            global_cut_source = f"nogood_status_{g_status}"
-            row = {
-                "iter": it,
-                "master_obj": sol.obj,
-                "master_bound": master_bound,
-                "global_bound": global_bound,
-                "theta": sol.theta,
-                "sub_obj": sub_obj,
-                "eval_sub_obj": eval_sub_obj,
-                "true_obj": true_obj,
-                "best_obj": self.best_obj,
-                "gap": gap,
-                "global_gap": global_gap,
-                "sub_source": cut_data.get("source"),
-                "cut_source": chosen_cut.get("source"),
-                "global_cut_source": global_cut_source,
-                "global_sub_obj": global_sub_obj,
-                "global_status": global_status,
-                "rhs_at_hat": chosen_cut.get("rhs_at_hat"),
-                "subproblem_time": sub_elapsed,
-                "mw_time": mw_elapsed,
-                "trust_radius": self.trust_radius if self.use_trust_region else None,
-                "trust_active": self.use_trust_region and self.trust_center_x is not None,
-                "time": time.perf_counter() - t0,
-            }
-            self.history.append(row)
-            if self.verbose:
-                trust_msg = ""
-                if self.use_trust_region:
-                    trust_msg = f" tr={self.trust_radius}"
-                print(
-                    "[Benders-RII] "
-                    f"it={it} master={sol.obj:.4f} theta={sol.theta:.4f} "
-                    f"sub={sub_obj:.4f} true={true_obj:.4f} best={self.best_obj:.4f} "
-                    f"gap={gap:.2%} cut={row['cut_source']}{trust_msg}"
-                )
-
-            self._update_core(sol)
-            opt_tol = 1e-4 + 1e-7 * max(1.0, abs(float(sub_obj)))
-            if sol.theta <= sub_obj + opt_tol and gap <= self.gap_tol:
-                if self.use_trust_region and (global_gap is None or global_gap > self.gap_tol):
-                    continue
-                self.converged = True
-                self.stop_reason = "gap_tol"
+            if self.master.status not in {GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SUBOPTIMAL} or self.master.SolCount == 0:
+                print(f"Master did not return a solution. status={self.master.status}")
                 break
 
-        if self.stop_reason is None:
-            self.stop_reason = "max_iter"
-        return self.best_obj if self.best_obj > -math.inf else None
+            master_bound = float(self.master.ObjBound)
+            if not math.isfinite(master_bound):
+                master_bound = float(self.master.ObjVal)
+            upper_bound = min(upper_bound, master_bound)
+            design = self._extract_master_design()
+            integer_reference_designs = self._collect_integer_reference_designs(design)
+            eta_val = float(self.master_vars["eta"].X)
+            fixed_value = self._fixed_cost_value(design)
 
-    def _add_nogood(self, sol: MasterSolution, name: str) -> None:
-        assert self.model is not None
-        ones = [self.x[u] for u, val in sol.x.items() if val > 0.5]
-        zeros = [self.x[u] for u, val in sol.x.items() if val <= 0.5]
-        self.model.addConstr(gp.quicksum(1 - v for v in ones) + gp.quicksum(zeros) >= 1, name=name)
+            # Exact incumbent subproblem.
+            sub = self.solve_subproblem(design, label=f"iter{it}")
+            if sub.obj_value is None:
+                # This should be rare because zero flow is normally feasible. Only an
+                # actual infeasibility status justifies excluding the integer design.
+                if sub.status in {GRB.INFEASIBLE, GRB.INF_OR_UNBD}:
+                    print(f"Iteration {it}: subproblem infeasible/status={sub.status}; adding fallback no-good cut.")
+                    self._add_no_good_cut(design)
+                    continue
+                print(f"Iteration {it}: subproblem did not solve to optimality, status={sub.status}; stopping.")
+                break
+
+            total_obj = sub.obj_value - fixed_value
+            if total_obj > lower_bound + 1e-7:
+                lower_bound = total_obj
+                self.best_total_obj = total_obj
+                self.best_operational_obj = sub.obj_value
+                self.best_design = design
+
+            zero_flow_cut_added = self._add_zero_flow_design_cut(
+                design,
+                eta_val=eta_val,
+                sub_obj=sub.obj_value,
+                fixed_value=fixed_value,
+            )
+
+            # Add the incumbent exact conic Benders cut.
+            if sub.cut_expr_data is None or sub.rhs_at_reference is None:
+                if zero_flow_cut_added or self._add_zero_flow_design_cut(
+                    design,
+                    eta_val=eta_val,
+                    sub_obj=sub.obj_value,
+                    fixed_value=fixed_value,
+                ):
+                    print(f"Iteration {it}: zero-flow subproblem duals unavailable; added Gamma-lift cut.")
+                    continue
+                print(f"Iteration {it}: incumbent subproblem duals are unavailable; stopping.")
+                break
+            self._add_benders_cut(sub, "benders")
+
+            # Add the Pareto/core-point cut.  It is valid as an ordinary Benders cut
+            # generated at a stabilized reference design, and usually improves convergence
+            # when the incumbent cut is weak/degenerate.
+            if self.use_pareto_cuts:
+                self._initialize_or_update_core(design)
+                ref_design = self._pareto_reference_design(design)
+                pareto_sub = self.solve_subproblem(ref_design, label=f"pareto{it}")
+                if pareto_sub.obj_value is not None and pareto_sub.cut_expr_data is not None:
+                    self._add_benders_cut(pareto_sub, "pareto")
+                else:
+                    print(f"Iteration {it}: Pareto reference subproblem failed, status={pareto_sub.status}.")
+
+            lower_bound, integer_ref_cuts = self._add_integer_reference_cuts(
+                iteration=it,
+                reference_designs=integer_reference_designs,
+                lower_bound=lower_bound,
+            )
+
+            abs_gap = upper_bound - lower_bound
+            rel_gap = abs_gap / max(1.0, abs(lower_bound))
+            self.history.append(
+                {
+                    "iter": it,
+                    "UB": upper_bound,
+                    "LB": lower_bound,
+                    "abs_gap": abs_gap,
+                    "rel_gap": rel_gap,
+                    "eta": eta_val,
+                    "sub_obj": sub.obj_value,
+                    "fixed_cost": fixed_value,
+                    "cuts": self.cut_count,
+                    "initial_cuts": initial_cut_count if it == 1 else 0,
+                    "integer_ref_cuts": integer_ref_cuts,
+                    "time": time.time() - t0,
+                }
+            )
+            print(
+                f"Iter {it:03d}: UB={upper_bound:.4f}, LB={lower_bound:.4f}, "
+                f"gap={rel_gap:.4%}, eta={eta_val:.4f}, sub={sub.obj_value:.4f}, cuts={self.cut_count}"
+            )
+
+            if abs_gap <= tolerance * max(1.0, abs(lower_bound)):
+                print("Benders converged.")
+                break
+
+        return self.best_design is not None
+
+    def _add_no_good_cut(self, design: Mapping[str, object]) -> None:
+        """Fallback no-good cut for an infeasible integer master design.
+
+        For this model, zero flow is normally feasible, so this cut is only a
+        defensive safeguard.  It excludes the exact binary design x,y,z.  Gamma
+        is not included because increasing fleet size might repair infeasibility.
+        """
+        assert self.master is not None
+        x = self.master_vars["x"]
+        y = self.master_vars["y"]
+        z = self.master_vars["z"]
+        C = range(len(config.MU_HUB))
+        terms = []
+        for u in self.N_x:
+            terms.append(1 - x[u] if float(design["x"][u]) > 0.5 else x[u])
+        for u, v in self.AY:
+            terms.append(1 - y[u, v] if float(design["y"][u, v]) > 0.5 else y[u, v])
+        for i in self.H:
+            for c in C:
+                terms.append(1 - z[i, c] if float(design["z"][i, c]) > 0.5 else z[i, c])
+        self.master.addConstr(gp.quicksum(terms) >= 1, name=f"nogood_{self.cut_count + 1}")
+        self.cut_count += 1
+
+    def _add_zero_flow_design_cut(
+        self,
+        design: Mapping[str, object],
+        eta_val: float,
+        sub_obj: float,
+        fixed_value: float,
+    ) -> bool:
+        """Conditionally lift Gamma for a zero-recourse design.
+
+        If the same binary network has zero operational value at the current
+        Gamma, then all lower Gamma values also have zero operational value.
+        Since close-all is feasible with objective 0, such positive-fixed-cost
+        points cannot be optimal.  The cut still allows the same network to be
+        retried with a larger Gamma.
+        """
+        if not getattr(config, "BENDERS_ADD_ZERO_FLOW_DESIGN_CUT", True):
+            return False
+
+        eps = float(getattr(config, "EPS", 1e-6))
+        if sub_obj > eps or eta_val <= eps or fixed_value <= eps:
+            return False
+
+        assert self.master is not None
+        x = self.master_vars["x"]
+        y = self.master_vars["y"]
+        z = self.master_vars["z"]
+        Gamma = self.master_vars["Gamma"]
+        C = range(len(config.MU_HUB))
+        terms = []
+        for u in self.N_x:
+            terms.append(1 - x[u] if float(design["x"][u]) > 0.5 else x[u])
+        for u, v in self.AY:
+            terms.append(1 - y[u, v] if float(design["y"][u, v]) > 0.5 else y[u, v])
+        for i in self.H:
+            for c in C:
+                terms.append(1 - z[i, c] if float(design["z"][i, c]) > 0.5 else z[i, c])
+
+        signature = self._binary_design_signature(design)
+        repeat_count = self.zero_flow_signature_counts.get(signature, 0) + 1
+        self.zero_flow_signature_counts[signature] = repeat_count
+        nogood_after = int(getattr(config, "BENDERS_ZERO_FLOW_NOGOOD_AFTER", 3))
+        if nogood_after > 0 and repeat_count >= nogood_after:
+            self.cut_count += 1
+            self.master.addConstr(
+                gp.quicksum(terms) >= 1.0,
+                name=f"zero_flow_nogood_{self.cut_count}",
+            )
+            return True
+
+        gamma_next = math.floor(float(design["Gamma"]) + eps) + 1.0
+        big_m = float(getattr(config, "BENDERS_ZERO_FLOW_GAMMA_BIG_M", 1e6))
+        self.cut_count += 1
+        self.master.addConstr(
+            Gamma >= gamma_next - big_m * gp.quicksum(terms),
+            name=f"zero_flow_design_{self.cut_count}",
+        )
+        return True
+
+    def _binary_design_signature(self, design: Mapping[str, object]) -> Tuple[int, ...]:
+        values: List[int] = []
+        values.extend(1 if float(design["x"][u]) > 0.5 else 0 for u in self.N_x)
+        values.extend(1 if float(design["y"][u, v]) > 0.5 else 0 for u, v in self.AY)
+        for i in self.H:
+            values.extend(1 if float(design["z"][i, c]) > 0.5 else 0 for c in range(len(config.MU_HUB)))
+        return tuple(values)
+
+    def _reference_design_signature(self, design: Mapping[str, object]) -> Tuple[int, ...]:
+        gamma_value = int(round(float(design["Gamma"])))
+        return self._binary_design_signature(design) + (gamma_value,)
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    def write_master(self, filename: str = "benders_master.lp") -> None:
+        self.build_master()
+        assert self.master is not None
+        self.master.write(filename)
+
+    def save_history_csv(self, filename: str) -> None:
+        import csv
+
+        if not self.history:
+            return
+        keys = list(self.history[0].keys())
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=keys)
+            writer.writeheader()
+            writer.writerows(self.history)
 
 
-def run_benders_regime_ii(
-    instance: Instance,
-    subproblem: str = "dual",
-    use_pareto: bool = True,
-    use_valid_inequalities: bool = True,
-    use_initial_cuts: bool = True,
-    max_iter: int = 20,
-    master_time_limit: float = 20.0,
-    master_mip_gap: float = 0.2,
-    verbose: bool = True,
-    use_trust_region: bool = False,
-    trust_radius: Optional[int] = None,
-    trust_radius_min: int = 1,
-    trust_radius_max: Optional[int] = None,
-    initial_solution: Optional[Any] = None,
-) -> RegimeIIBenders:
-    solver = RegimeIIBenders(
-        instance,
-        subproblem=subproblem,
-        use_pareto=use_pareto,
-        use_valid_inequalities=use_valid_inequalities,
-        use_initial_cuts=use_initial_cuts,
-        max_iter=max_iter,
-        master_time_limit=master_time_limit,
-        master_mip_gap=master_mip_gap,
-        verbose=verbose,
-        use_trust_region=use_trust_region,
-        trust_radius=trust_radius,
-        trust_radius_min=trust_radius_min,
-        trust_radius_max=trust_radius_max,
-        initial_solution=initial_solution,
+# ----------------------------------------------------------------------
+# Convenience runner mirroring the original Regime-II script.
+# ----------------------------------------------------------------------
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "n"}
+
+
+def run_meituan_regime_ii_benders(
+    generate_sample: Optional[bool] = None,
+    date_filter: Optional[str] = None,
+    project_root: Optional[str] = None,
+    save_outputs: bool = True,
+):
+    """Generate/load the Meituan instance and solve it by Benders."""
+    from src.data_processor.generator import DataGenerator
+    from src.data_processor.loader import DataLoader
+
+    if project_root is None:
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if generate_sample is None:
+        generate_sample = _env_flag("MLND_GENERATE_SAMPLE", True)
+    if date_filter is None:
+        date_filter = config.MEITUAN_DEMAND_DATES[0]
+
+    period_id = f"h{config.MEITUAN_DEMAND_HOUR:02d}"
+    meituan_instance_dir = os.path.join(project_root, "data", "instances", "Meituan")
+    meituan_results_dir = os.path.join(project_root, "results", "Meituan_Benders")
+    meituan_raw_file = os.path.join(project_root, "Meituan-TSL", "all_waybill_info_meituan_0322.csv")
+    if save_outputs:
+        os.makedirs(meituan_results_dir, exist_ok=True)
+
+    print(
+        f"Regime II Benders run: generate={generate_sample}, period={period_id}, "
+        f"max_iter={getattr(config, 'BENDERS_MAX_ITER', 100)}, tol={getattr(config, 'BENDERS_TOL', 1e-4)}"
     )
-    solver.solve()
+
+    if generate_sample:
+        DataGenerator(seed=42).generate_meituan_hourly(
+            raw_data_path=meituan_raw_file,
+            save_dir=meituan_instance_dir,
+            num_hubs=config.MEITUAN_NUM_HUBS,
+            num_bases=config.MEITUAN_NUM_BASES,
+            num_swapping=config.MEITUAN_NUM_SWAPPING,
+            date_filter=date_filter,
+            map_half_size_km=config.MEITUAN_MAP_HALF_SIZE_KM,
+            candidate_date_filter=config.MEITUAN_CANDIDATE_DATES,
+            demand_date_filter=config.MEITUAN_DEMAND_DATES,
+            candidate_hour_start=config.MEITUAN_CANDIDATE_HOUR_START,
+            candidate_hour_end=config.MEITUAN_CANDIDATE_HOUR_END,
+            demand_hour_start=config.MEITUAN_DEMAND_HOUR,
+            colocate_base_swaps=config.MEITUAN_COLOCATE_BASE_SWAPS,
+        )
+
+    period_path = os.path.join(meituan_instance_dir, "orders", f"{period_id}.csv")
+    load_period_id = period_id if os.path.exists(period_path) else None
+    inst = DataLoader().load_instance_dir(meituan_instance_dir, period_id=load_period_id)
+    print(
+        f"Loaded: H={len(inst.H)}, L={len(inst.L)}, S={len(inst.S)}, E={len(inst.E)}, "
+        f"OD={len(inst.h)}, A={len(inst.A)}, A_F={len(inst.A_F)}"
+    )
+
+    solver = BendersRegimeIISolver(
+        inst,
+        use_pareto_cuts=bool(getattr(config, "BENDERS_USE_PARETO", True)),
+        pareto_lambda=float(getattr(config, "BENDERS_PARETO_LAMBDA", 0.5)),
+        core_update_weight=float(getattr(config, "BENDERS_CORE_UPDATE_WEIGHT", 0.7)),
+    )
+    success = solver.solve()
+
+    if save_outputs:
+        solver.write_master(os.path.join(meituan_results_dir, "benders_master_final.lp"))
+        solver.save_history_csv(os.path.join(meituan_results_dir, "benders_history.csv"))
+        print(f"Saved Benders outputs to {meituan_results_dir}")
+
+    if success:
+        print(f"Best Benders objective: {solver.best_total_obj:.4f}")
+    else:
+        print("No feasible Benders incumbent found.")
     return solver
+
+
+if __name__ == "__main__":
+    run_meituan_regime_ii_benders()

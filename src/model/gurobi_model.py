@@ -38,11 +38,18 @@ class MLNDModel:
         self.A_SL = sorted(self.inst.A_SL)
         self.A_SS = sorted(self.inst.A_SS)
         self.A_F = sorted(self.inst.A_F)
+        self.A_virtual = sorted(set(self.A_HS) | set(self.A_SH))
+        self.A_hat = sorted(set(self.A) - set(self.A_virtual))
 
         self.route_options = {}
         self.t = {}
         self.flight_cost = {}
+        self.route_big_m = {}
         self._build_route_options()
+
+        self.AY = []
+        self.arc_cost = {}
+        self._build_y_arcs()
 
         # Filled in build() for convenient downstream access.
         self.vars = {}
@@ -71,6 +78,35 @@ class MLNDModel:
             self.route_options[u, v] = ordered_options
             for k in ordered_options:
                 self.flight_cost[u, v, k] = flight_cost_rate * self.t[u, v, k]
+                self.route_big_m[u, v, k] = self._route_flow_big_m(u, v, k)
+
+    def _build_y_arcs(self):
+        y_arcs = set(self.A_hat)
+        for u, v in self.A_hat:
+            for k in self.inst.E_uv.get((u, v), []):
+                y_arcs.add((u, k))
+                y_arcs.add((k, v))
+
+        self.AY = sorted(y_arcs)
+        for u, v in self.AY:
+            self.arc_cost[u, v] = self._arc_activation_cost(u, v)
+
+    def _route_flow_big_m(self, u, v, k):
+        del u, v, k
+        total_demand = sum(float(value) for value in self.inst.h.values())
+        configured = float(getattr(config, "MAX_FLOW_E", 0.0))
+        return max(1.0, configured, total_demand)
+
+    def _arc_activation_cost(self, u, v):
+        cost = getattr(config, "COST_ARC", 0.0)
+        if isinstance(cost, dict):
+            return float(cost.get((u, v), cost.get(f"{u},{v}", cost.get(f"{u}->{v}", 0.0))))
+        return float(cost)
+
+    def _node_activation(self, x, node):
+        if node in self.S:
+            return x[self.inst.s_to_h[node]]
+        return x[node]
 
     def _hub_pool(self, h):
         return self.inst.h_to_s[h]
@@ -92,17 +128,18 @@ class MLNDModel:
         omega = float(config.ENERGY_RATE_OMEGA)
         Omega = float(config.BATTERY_CAPACITY_OMEGA_UPPER)
         energy_epsilon = float(getattr(config, "ENERGY_EPSILON", getattr(config, "EPS", 0.0)))
-        max_flow = float(config.MAX_FLOW_E)
 
+        # Variables: x opens physical facilities, y opens non-virtual actual arcs,
+        # z selects hub capacity levels, and Gamma is the integer fleet proxy.
         x = self.model.addVars(self.N_x, vtype=GRB.BINARY, name="x")
+        y = self.model.addVars(self.AY, vtype=GRB.BINARY, name="y")
         z = self.model.addVars(self.H, C, vtype=GRB.BINARY, name="z")
+        Gamma = self.model.addVar(lb=0.0, vtype=GRB.INTEGER, name="Gamma")
 
-        y_keys = [(i, l) for (l, i) in self.A_LH]
-        y = self.model.addVars(y_keys, vtype=GRB.BINARY, name="y")
-
+        # Variables: continuous flow, utilization, queue-length, and auxiliary
+        # service-rate variables.  H-S and S-H virtual arcs have psi only.
         rho_l = self.model.addVars(self.L, lb=0.0, name="rho_l")
         rho_s = self.model.addVars(self.S, lb=0.0, name="rho_s")
-
         alpha_keys = [
             (l, i, j)
             for (l, i) in self.A_LH
@@ -121,12 +158,12 @@ class MLNDModel:
             for k in self.route_options.get((u, v), [])
         ]
         varphi = self.model.addVars(varphi_keys, lb=0.0, name="varphi")
-
         lambd = self.model.addVars(self.H, lb=0.0, name="lambda")
         mu = self.model.addVars(self.H, lb=0.0, name="mu")
         xi = self.model.addVars(self.HLS, lb=0.0, name="xi")
-        Gamma = self.model.addVar(lb=0.0, vtype=GRB.INTEGER, name="Gamma")
 
+        # Objective: revenue minus station, capacity, actual-arc activation,
+        # route operating, and fleet costs.  Virtual H-S/S-H arcs are not in AY.
         served_benefit = gp.quicksum(
             float(getattr(config, "ORDER_REVENUE_COEF", 0.0))
             * psi[i, j]
@@ -144,6 +181,9 @@ class MLNDModel:
         fixed_cost += gp.quicksum(
             float(config.COST_HUB[c]) * z[i, c] for i in self.H for c in C
         )
+        arc_activation_cost = gp.quicksum(
+            self.arc_cost[u, v] * y[u, v] for (u, v) in self.AY
+        )
         operating_cost = gp.quicksum(
             self.flight_cost[u, v, k] * varphi[u, v, k] for (u, v, k) in varphi_keys
         )
@@ -151,53 +191,76 @@ class MLNDModel:
         self.model.setObjective(
             served_benefit
             - fixed_cost
+            - arc_activation_cost
             - operating_cost
             - float(config.COST_DRONE) * Gamma,
             GRB.MAXIMIZE,
         )
 
-        # Assignment and capacity activation.
+        # (1) Base-to-hub assignment: sum_l y_li = x_i for every hub i.
         for i in self.H:
             assigned_bases = [l for (l, h) in self.A_LH if h == i]
             self.model.addConstr(
-                gp.quicksum(y[i, l] for l in assigned_bases if (i, l) in y) == x[i],
+                gp.quicksum(y[l, i] for l in assigned_bases if (l, i) in y) == x[i],
                 name=f"assign_{i}",
             )
+
+        # (2) A base-to-hub assignment arc can open only if its base is open.
+        for l, i in self.A_LH:
+            self.model.addConstr(y[l, i] <= x[l], name=f"assign_active_{l}_{i}")
+
+        # (3) Exactly one capacity level is selected when hub i is open.
+        for i in self.H:
             self.model.addConstr(
                 gp.quicksum(z[i, c] for c in C) == x[i],
                 name=f"capacity_{i}",
             )
 
-        for i, l in y_keys:
-            self.model.addConstr(y[i, l] <= x[l], name=f"assign_active_{i}_{l}")
+        # (4)-(5) Every non-LH actual arc in AY can open only when both endpoints
+        # are active.  Holding-pool endpoints use the owner hub's x variable.
+        for u, v in self.AY:
+            if (u, v) in self.A_LH:
+                continue
+            self.model.addConstr(
+                y[u, v] <= self._node_activation(x, u),
+                name=f"arc_tail_active_{u}_{v}",
+            )
+            self.model.addConstr(
+                y[u, v] <= self._node_activation(x, v),
+                name=f"arc_head_active_{u}_{v}",
+            )
 
+        # (6) Base utilization can be positive only if the base is open.
         for l in self.L:
             self.model.addConstr(rho_l[l] <= x[l], name=f"rho_L_{l}")
+
+        # (7) Holding-pool utilization can be positive only if its hub is open.
         for i, s in self.A_HS:
             self.model.addConstr(rho_s[s] <= x[i], name=f"rho_S_{s}")
 
-        # alpha[l,i,j] = rho_l[l] * y[i,l] * x[j].
+        # (8)-(11) alpha_lij linearizes rho_l * y_li * y_ij.
         for l, i, j in alpha_keys:
             self.model.addConstr(alpha[l, i, j] <= rho_l[l], name=f"alpha_1_{l}_{i}_{j}")
-            self.model.addConstr(alpha[l, i, j] <= y[i, l], name=f"alpha_2_{l}_{i}_{j}")
-            self.model.addConstr(alpha[l, i, j] <= x[j], name=f"alpha_3_{l}_{i}_{j}")
+            self.model.addConstr(alpha[l, i, j] <= y[l, i], name=f"alpha_2_{l}_{i}_{j}")
+            self.model.addConstr(alpha[l, i, j] <= y[i, j], name=f"alpha_3_{l}_{i}_{j}")
             self.model.addConstr(
-                alpha[l, i, j] >= rho_l[l] + y[i, l] + x[j] - 2,
+                alpha[l, i, j] >= rho_l[l] + y[l, i] + y[i, j] - 2,
                 name=f"alpha_4_{l}_{i}_{j}",
             )
 
-        # beta[i,j] = rho_s * x[j] for the holding pool s linked to i.
+        # (12)-(14) beta_ij linearizes rho_s * y_ij for the pool s feeding i.
         for s, i in self.A_SH:
             for h, j in self.A_HH:
                 if h != i:
                     continue
                 self.model.addConstr(beta[i, j] <= rho_s[s], name=f"beta_1_{i}_{j}")
-                self.model.addConstr(beta[i, j] <= x[j], name=f"beta_2_{i}_{j}")
+                self.model.addConstr(beta[i, j] <= y[i, j], name=f"beta_2_{i}_{j}")
                 self.model.addConstr(
-                    beta[i, j] >= rho_s[s] + x[j] - 1,
+                    beta[i, j] >= rho_s[s] + y[i, j] - 1,
                     name=f"beta_3_{i}_{j}",
                 )
 
+        # (15) Loaded hub-to-hub flow generated by base and holding-pool chains.
         for i, j in self.A_HH:
             p_i = self._p_chain(i)
             demand = float(self.inst.h.get((i, j), 0.0))
@@ -216,6 +279,7 @@ class MLNDModel:
                 name=f"psi_HH_{i}_{j}",
             )
 
+        # (16) Empty base-to-hub repositioning flow feeding first-leg chains.
         for l, i in self.A_LH:
             self.model.addConstr(
                 psi[l, i]
@@ -229,6 +293,7 @@ class MLNDModel:
                 name=f"psi_LH_{l}_{i}",
             )
 
+        # (17) Empty holding-pool-to-hub repositioning flow feeding chain legs.
         for s, i in self.A_SH:
             self.model.addConstr(
                 psi[s, i]
@@ -242,6 +307,7 @@ class MLNDModel:
                 name=f"psi_SH_{s}_{i}",
             )
 
+        # (18) Flow conservation for bases, hubs, and holding pools.
         for q in self.HLS:
             self.model.addConstr(
                 gp.quicksum(psi[u, q] for (u, v) in self.A if v == q)
@@ -249,14 +315,8 @@ class MLNDModel:
                 name=f"flow_balance_{q}",
             )
 
-        for i, s in self.A_HS:
-            self.model.addConstr(
-                gp.quicksum(psi[s, u] for (v, u) in self.A if v == s) <= max_flow * x[i],
-                name=f"pool_flow_active_{s}",
-            )
-
-        # Route-option decomposition for physical flights.
-        for u, v in self.A_F:
+        # (19) Route-option decomposition for every non-virtual aggregate arc.
+        for u, v in self.A_hat:
             self.model.addConstr(
                 gp.quicksum(
                     varphi[u, v, k]
@@ -267,12 +327,30 @@ class MLNDModel:
                 name=f"route_{u}_{v}",
             )
 
-        for k in self.E:
-            swap_capacity = float(self.inst.mu.get(k, getattr(config, "SWAP_CAPACITY", config.MU_SWAPPING)))
+        # (20) A route flow can use aggregate arc (u,v) only if y_uv is open.
+        # Direct option k=0 only needs this aggregate actual-arc activation.
+        for u, v, k in varphi_keys:
+            big_m = self.route_big_m[u, v, k]
             self.model.addConstr(
-                gp.quicksum(varphi[u, v, k] for (u, v, kk) in varphi_keys if kk == k)
-                <= swap_capacity * x[k],
-                name=f"swap_capacity_{k}",
+                varphi[u, v, k] <= big_m * y[u, v],
+                name=f"route_arc_active_{u}_{v}_{k}",
+            )
+
+        # (21)-(22) A detour route through swapping station k can be used only
+        # if both actual legs (u,k) and (k,v) are open.  These y-leg constraints
+        # also imply the swapping station's x_k activation, so no extra phi-x
+        # activation constraint is needed.
+        for u, v, k in varphi_keys:
+            if k not in self.E:
+                continue
+            big_m = self.route_big_m[u, v, k]
+            self.model.addConstr(
+                varphi[u, v, k] <= big_m * y[u, k],
+                name=f"route_swap_in_active_{u}_{v}_{k}",
+            )
+            self.model.addConstr(
+                varphi[u, v, k] <= big_m * y[k, v],
+                name=f"route_swap_out_active_{u}_{v}_{k}",
             )
 
         total_queue_length = gp.quicksum(xi[u] for u in self.HLS)
@@ -281,38 +359,28 @@ class MLNDModel:
         )
         usable_battery = (1.0 - energy_epsilon) * Omega
 
+        # (23) Base-side battery endurance: average energy of routes dispatched
+        # from base l must be covered by routes that include a swap.
         for l in self.L:
             self.model.addConstr(
                 omega
                 * gp.quicksum(
                     self.t[l, i, k] * varphi[l, i, k]
                     for (u, i, k) in varphi_keys
-                    if u == l and (l, i) in self.A_LH
+                    if u == l and (l, i) in self.A_hat
                 )
                 <= usable_battery
                 * gp.quicksum(
                     varphi[l, i, k]
                     for (u, i, k) in varphi_keys
-                    if u == l and (l, i) in self.A_LH and k in self.E
+                    if u == l and (l, i) in self.A_hat and k in self.E
                 ),
                 name=f"energy_L_{l}",
             )
 
+        # (24) Hub/holding-pool battery endurance for the chain leaving i and s.
         for i in self.H:
             s = self._hub_pool(i)
-            self.model.addConstr(
-                lambd[i]
-                == gp.quicksum(psi[u, i] for (u, v) in self.A if v == i),
-                name=f"lambda_{i}",
-            )
-            self.model.addConstr(
-                mu[i] == gp.quicksum(float(mu_c[c]) * z[i, c] for c in C),
-                name=f"mu_{i}",
-            )
-            self.model.addConstr(
-                mu[i] - lambd[i] >= x[i] / tau_H,
-                name=f"hub_wait_{i}",
-            )
             self.model.addConstr(
                 omega
                 * (
@@ -347,6 +415,36 @@ class MLNDModel:
                 name=f"energy_HS_{i}",
             )
 
+        # (25) lambda_i equals total incoming aggregate flow to hub i.
+        for i in self.H:
+            self.model.addConstr(
+                lambd[i]
+                == gp.quicksum(psi[u, i] for (u, v) in self.A if v == i),
+                name=f"lambda_{i}",
+            )
+
+        # Auxiliary definition for (26) and (29): mu_i = sum_c mu_c z_ic.
+        for i in self.H:
+            self.model.addConstr(
+                mu[i] == gp.quicksum(float(mu_c[c]) * z[i, c] for c in C),
+                name=f"mu_{i}",
+            )
+
+        # (26) Hub service stability lower bound.
+        for i in self.H:
+            self.model.addConstr(
+                mu[i] - lambd[i] >= x[i] / tau_H,
+                name=f"hub_wait_{i}",
+            )
+
+        # (27) Holding-pool mean dwell bound.
+        for s in self.S:
+            self.model.addConstr(
+                xi[s] <= tau_S * gp.quicksum(psi[s, v] for (u, v) in self.A if u == s),
+                name=f"mean_S_{s}",
+            )
+
+        # (28) SOC form of xi_u >= rho_u / (1 - rho_u) for bases and pools.
         q_nodes = self.L + self.S
         q_v1 = self.model.addVars(q_nodes, lb=-GRB.INFINITY, name="q_v1")
         q_v2 = self.model.addVars(q_nodes, lb=-GRB.INFINITY, name="q_v2")
@@ -362,6 +460,7 @@ class MLNDModel:
                 name=q_name,
             )
 
+        # (29) SOC form of xi_i >= lambda_i / (mu_i - lambda_i) for hubs.
         h_v1 = self.model.addVars(self.H, lb=-GRB.INFINITY, name="h_v1")
         h_v2 = self.model.addVars(self.H, lb=-GRB.INFINITY, name="h_v2")
         h_t = self.model.addVars(self.H, lb=0.0, name="h_t")
@@ -375,12 +474,7 @@ class MLNDModel:
                 name=f"queue_H_{i}",
             )
 
-        for s in self.S:
-            self.model.addConstr(
-                xi[s] <= tau_S * gp.quicksum(psi[s, v] for (u, v) in self.A if u == s),
-                name=f"mean_S_{s}",
-            )
-
+        # (30) Fleet-size epigraph: queue length plus total physical flight time.
         self.model.addConstr(
             total_queue_length + total_flight_time <= Gamma,
             name="fleet",

@@ -21,7 +21,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, PROJECT_ROOT)
 
 from src import config
-from src.model.benders import RegimeIIData
+from src.model.backup.benders import RegimeIIData
 from src.multi_period.gurobi_model import (
     MultiPeriodInstance,
     _as_period_ids,

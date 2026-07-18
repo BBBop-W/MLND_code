@@ -21,7 +21,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, PROJECT_ROOT)
 
 from src import config
-from src.model.benders import RegimeIIDualObjective, RegimeIIPrimalSubproblem
+from src.model.backup.benders import RegimeIIDualObjective, RegimeIIPrimalSubproblem
 from src.multi_period.benders import MultiPeriodMasterSolution, MultiPeriodRegimeIIBenders
 from src.multi_period.gurobi_model import (
     MultiPeriodInstance,

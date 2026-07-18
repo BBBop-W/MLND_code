@@ -16,7 +16,7 @@ if __package__ in (None, ""):
 
 from src import config
 from src.data_processor.instance import Instance
-from src.model.benders import (
+from src.model.backup.benders import (
     RegimeIIData,
     RegimeIIDualObjective,
     RegimeIIDualSubproblem,

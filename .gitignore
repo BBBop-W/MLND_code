@@ -11,3 +11,6 @@ Meituan-TSL/
 *.lp
 results/
 *.ilp
+analysis/
+outputs/
+scripts/
