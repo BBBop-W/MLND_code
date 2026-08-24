@@ -1,75 +1,245 @@
-# Instance Generation Parameters (Hyperparameters)
-NUM_BASES = 1
-NUM_HUBS = 5
-NUM_SWAPPING = 1
-AREA_SIZE = 10.0
-DEMAND_PROBABILITY = 0.4
-DEMAND_MIN = 2.0
-DEMAND_MAX = 8.0
+"""Configuration for the OD-aware mixed-delivery network model.
 
-# Meituan Semi-synthetic Parameters
-MEITUAN_NUM_BASES = 5
-MEITUAN_NUM_HUBS = 20
-MEITUAN_NUM_SWAPPING = 5
-MEITUAN_MAP_HALF_SIZE_KM = 8  # Side length = 2 * half size. 3.0-4.0km usually yields stable top-10/top-10 candidates.
-MEITUAN_WORK_HOUR_START = 8
-MEITUAN_WORK_HOUR_END = 23
-MEITUAN_TIMEZONE = "Asia/Shanghai"
+All operational rates use hours, distances use kilometres, and costs use CNY
+per hour (fixed items) or CNY per order/flight (flow-dependent items).
+"""
 
-# Candidate locations and demand can be generated from different periods.
-# MEITUAN_DEMAND_HOUR denotes a one-hour demand period by default.
-MEITUAN_CANDIDATE_DATES = [20221017]
-MEITUAN_CANDIDATE_HOUR_START = 8
-MEITUAN_CANDIDATE_HOUR_END = 24
-MEITUAN_DEMAND_DATES = [20221017]
-MEITUAN_DEMAND_HOUR = 12
-MEITUAN_COLOCATE_BASE_SWAPS = True
-MEITUAN_HIERARCHY_ACTIVITY_WEIGHT = 0.35
-MEITUAN_HIERARCHY_BALANCE_WEIGHT = 0.75
-MEITUAN_HIERARCHY_OVERLOAD_TOLERANCE = 1.35
+from __future__ import annotations
 
-# Coverage and Distance Limits
-MAX_DIRECT_DISTANCE = 3.0     # Maximum distance a drone can fly directly without swapping
-MAX_DETOUR_DISTANCE = 5.0    # Maximum total distance allowed if routed through a swapping station
+import math
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
 
-# Model Parameters
-P_CHAIN = 1  # Chain probability (p)
-RHO_MAX = 0.99  # Max utilization limit
-ENERGY_RATE_OMEGA = 10
-BATTERY_CAPACITY_OMEGA_UPPER = 100.0
-TAU_S = 2/60  # 2 min
-TAU_H = 5/60 # 5 min
-# Five hub capacity levels. These approximate 1..5 parallel M/M/c service
-# stations by a single M/M/1 rate that matches E[L] at rho=0.9 with a 60/h
-# per-station base service rate.
-# MU_HUB = [60.0, 119.4, 178.1, 236.2, 293.8]
-MU_HUB = [60.0, 119.4, 178.1]
-MU_SWAPPING = 500.0 # Service rate at swapping stations
-MAX_FLOW_E = 1000.0  # Large constant for flow constraints
 
-# Solver
-MODEL_TIME_LIMIT = 900
-MODEL_MIP_GAP = 0.001
+@dataclass(frozen=True)
+class DataConfig:
+    """Raw-data preprocessing options shared by the TSL and Nanshan adapters."""
 
-# Costs
-TRANSITION_PARA = 3.71
-TRANSITION_PARA = 5.75 # 5年期
+    source: str
+    raw_path: str
+    output_dir: str
+    candidate_count: int = 35
+    num_bases: int = 5
+    num_swaps: int = 8
+    candidate_hour_start: int = 8
+    candidate_hour_end: int = 24
+    demand_hour_start: int = 12
+    demand_hour_end: int = 13
+    map_half_size_km: float = 8.0
+    od_grid_km: float = 0.5
+    site_grid_km: float = 0.25
+    seed: int = 42
+    dates: tuple[str, ...] = ()
 
-ORDER_REVENUE_COEF = 2.5 * TRANSITION_PARA
-COST_FLIGHT_TIME = 0.8 * TRANSITION_PARA
+    def validate(self) -> None:
+        if self.source not in {"tsl", "nanshan"}:
+            raise ValueError("source must be 'tsl' or 'nanshan'")
+        if not 1 <= self.candidate_count:
+            raise ValueError("candidate_count must be positive")
+        if self.num_bases < 1 or self.num_swaps < 0:
+            raise ValueError("num_bases must be positive and num_swaps nonnegative")
+        if not 0 <= self.seed <= 2**32 - 3:
+            raise ValueError("data seed must be in [0, 4294967293]")
+        spatial_values = (self.map_half_size_km, self.od_grid_km, self.site_grid_km)
+        if any(not math.isfinite(value) or value <= 0 for value in spatial_values):
+            raise ValueError("map and grid sizes must be positive")
+        _window_hours(self.candidate_hour_start, self.candidate_hour_end)
+        _window_hours(self.demand_hour_start, self.demand_hour_end)
 
-# COST_HUB = [50.0, 100.0, 150.0, 200.0, 250.0]
-COST_HUB = [50.0, 100.0, 150.0]
-COST_SWAPPING = 60.0
-COST_BASE = 100.0
-COST_DRONE = 30.0
 
-COST_ARC = 8.0
+@dataclass(frozen=True)
+class ChoiceConfig:
+    """Scenario parameters for the uncalibrated two-alternative MNL layer.
 
-# Units and speed (strictly used by loader/preprocessing)
-DISTANCE_UNIT = "km"
-TIME_UNIT = "hour"
-DRONE_SPEED_KMPH = 30.0
+    With the defaults, the utility difference is
 
-# Misc
-EPS = 1e-6
+        U_locker - U_home
+        = -1 + 0.06 * (30 - 20) + 0.35 * 1 - 1.2 * walk_km.
+
+    This gives a locker share of about 34% at 0.5 km. These values are a
+    transparent baseline scenario, not empirical estimates.
+    """
+
+    locker_asc: float = -1.0
+    delivery_time_coefficient: float = 0.06
+    price_coefficient: float = 0.35
+    walk_distance_coefficient: float = 1.2
+    home_eta_minutes: float = 30.0
+    locker_eta_minutes: float = 20.0
+    locker_discount_cny: float = 1.0
+    max_walk_km: float | None = 1.5
+
+    def validate(self) -> None:
+        values = {
+            "locker_asc": self.locker_asc,
+            "delivery_time_coefficient": self.delivery_time_coefficient,
+            "price_coefficient": self.price_coefficient,
+            "walk_distance_coefficient": self.walk_distance_coefficient,
+            "home_eta_minutes": self.home_eta_minutes,
+            "locker_eta_minutes": self.locker_eta_minutes,
+            "locker_discount_cny": self.locker_discount_cny,
+        }
+        if any(not math.isfinite(value) for value in values.values()):
+            raise ValueError("choice parameters must be finite")
+        if self.delivery_time_coefficient < 0 or self.price_coefficient < 0:
+            raise ValueError("time and price coefficients must be nonnegative")
+        if self.walk_distance_coefficient < 0:
+            raise ValueError("walk_distance_coefficient must be nonnegative")
+        if self.home_eta_minutes <= 0 or self.locker_eta_minutes <= 0:
+            raise ValueError("delivery-time attributes must be positive")
+        if self.locker_discount_cny < 0:
+            raise ValueError("locker_discount_cny must be nonnegative")
+        if self.max_walk_km is not None and (
+            not math.isfinite(self.max_walk_km) or self.max_walk_km <= 0
+        ):
+            raise ValueError("max_walk_km must be positive or None")
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """Physical, queueing, cost, and sparsification parameters."""
+
+    choice: ChoiceConfig = field(default_factory=ChoiceConfig)
+    availability_levels: tuple[float, ...] = (0.50, 0.65, 0.80, 0.90, 0.95)
+    locker_service_rates: tuple[float, ...] = (120.0, 240.0, 360.0)
+    locker_capacity_costs: tuple[float, ...] = (1.5, 3.0, 5.0)
+    max_direct_range_km: float = 6.0
+    max_swap_leg_km: float = 6.0
+    drone_speed_kmph: float = 30.0
+    swap_service_time_hours: float = 3.0 / 60.0
+    max_locker_time_hours: float = 5.0 / 60.0
+    max_virtual_wait_hours: float = 5.0 / 60.0
+    base_cost_per_hour: float = 14.0
+    locker_fixed_cost_per_hour: float = 1.0
+    swap_cost_per_hour: float = 3.0
+    corridor_cost_per_km_hour: float = 0.02
+    connection_cost_per_km_hour: float = 0.05
+    flight_cost_per_km: float = 0.20
+    drone_cost_per_hour: float = 4.0
+    rider_base_cost: float = 3.0
+    rider_cost_per_km: float = 1.80
+    road_distance_factor: float = 1.25
+    locker_service_cost: float = 0.30
+    origin_locker_choices: int | None = 3
+    home_corridor_choices: int | None = 4
+
+    def validate(self) -> None:
+        self.choice.validate()
+        if not self.availability_levels:
+            raise ValueError("availability_levels cannot be empty")
+        if tuple(sorted(self.availability_levels)) != self.availability_levels:
+            raise ValueError("availability_levels must be strictly increasing")
+        if any(not math.isfinite(rho) or rho <= 0 or rho >= 1 for rho in self.availability_levels):
+            raise ValueError("every availability level must be in (0, 1)")
+        if len(set(self.availability_levels)) != len(self.availability_levels):
+            raise ValueError("availability_levels must be distinct")
+        if len(self.locker_service_rates) != len(self.locker_capacity_costs):
+            raise ValueError("locker service-rate and cost levels must have equal length")
+        if not self.locker_service_rates:
+            raise ValueError("at least one locker service-rate level is required")
+        if any(not math.isfinite(mu) or mu <= 0 for mu in self.locker_service_rates):
+            raise ValueError("locker service rates must be positive")
+        positive_parameters = {
+            "max_direct_range_km": self.max_direct_range_km,
+            "max_swap_leg_km": self.max_swap_leg_km,
+            "drone_speed_kmph": self.drone_speed_kmph,
+            "swap_service_time_hours": self.swap_service_time_hours,
+            "max_locker_time_hours": self.max_locker_time_hours,
+            "max_virtual_wait_hours": self.max_virtual_wait_hours,
+            "road_distance_factor": self.road_distance_factor,
+        }
+        if any(not math.isfinite(value) or value <= 0 for value in positive_parameters.values()):
+            raise ValueError("ranges, speeds, service times, and road factor must be positive")
+        minimum_stable_rate = 1.0 / self.max_locker_time_hours
+        if any(mu + 1e-9 < minimum_stable_rate for mu in self.locker_service_rates):
+            raise ValueError(
+                "every locker service-rate level must satisfy "
+                "mu >= 1 / max_locker_time_hours"
+            )
+        nonnegative_costs = (
+            *self.locker_capacity_costs,
+            self.base_cost_per_hour,
+            self.locker_fixed_cost_per_hour,
+            self.swap_cost_per_hour,
+            self.corridor_cost_per_km_hour,
+            self.connection_cost_per_km_hour,
+            self.flight_cost_per_km,
+            self.drone_cost_per_hour,
+            self.rider_base_cost,
+            self.rider_cost_per_km,
+            self.locker_service_cost,
+        )
+        if any(not math.isfinite(value) or value < 0 for value in nonnegative_costs):
+            raise ValueError("all cost parameters must be finite and nonnegative")
+        if self.origin_locker_choices is not None and self.origin_locker_choices < 1:
+            raise ValueError("origin_locker_choices must be positive or None")
+        if self.home_corridor_choices is not None and self.home_corridor_choices < 1:
+            raise ValueError("home_corridor_choices must be positive or None")
+
+
+@dataclass(frozen=True)
+class SolverConfig:
+    time_limit: float = 300.0
+    mip_gap: float = 0.01
+    threads: int = 0
+    output_flag: int = 1
+    seed: int = 42
+    network_start_seconds: float = 20.0
+    use_valid_inequalities: bool = False
+    use_user_cuts: bool = True
+    max_root_cut_rounds: int = 3
+    max_cuts_per_round: int = 250
+    cut_violation_tolerance: float = 1e-6
+    use_local_branching: bool = True
+    local_branching_radius: int = 12
+    root_relaxation_method: int = 2
+
+    def validate(self) -> None:
+        if not math.isfinite(self.time_limit) or self.time_limit <= 0:
+            raise ValueError("time_limit must be positive and finite")
+        if not math.isfinite(self.mip_gap) or not 0 <= self.mip_gap <= 1:
+            raise ValueError("mip_gap must be in [0, 1]")
+        if self.threads < 0:
+            raise ValueError("threads must be nonnegative")
+        if self.output_flag not in {0, 1}:
+            raise ValueError("output_flag must be 0 or 1")
+        if not 0 <= self.seed <= 2_000_000_000:
+            raise ValueError("seed must be in [0, 2000000000]")
+        if not math.isfinite(self.network_start_seconds) or self.network_start_seconds < 0:
+            raise ValueError("network_start_seconds must be finite and nonnegative")
+        if self.max_root_cut_rounds < 0:
+            raise ValueError("max_root_cut_rounds must be nonnegative")
+        if self.max_cuts_per_round < 0:
+            raise ValueError("max_cuts_per_round must be nonnegative")
+        if (
+            not math.isfinite(self.cut_violation_tolerance)
+            or self.cut_violation_tolerance <= 0
+        ):
+            raise ValueError("cut_violation_tolerance must be positive and finite")
+        if self.local_branching_radius < 1:
+            raise ValueError("local_branching_radius must be positive")
+        if self.root_relaxation_method not in {-1, 0, 1, 2, 3, 4, 5}:
+            raise ValueError("root_relaxation_method must be a valid Gurobi Method value")
+
+
+def _window_hours(start: int, end: int) -> int:
+    if not 0 <= start <= 23 or not 1 <= end <= 24:
+        raise ValueError("hour windows use integer hours with start in [0,23], end in [1,24]")
+    if start == end:
+        raise ValueError("start and end must differ; use 0 24 for a full day")
+    duration = end - start if end > start else 24 - start + end
+    if duration <= 0:
+        raise ValueError("hour window must have positive duration")
+    return duration
+
+
+def to_dict(value: Any) -> dict[str, Any]:
+    """Convert a configuration dataclass to a JSON-ready dictionary."""
+
+    return asdict(value)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_TSL_PATH = str(REPO_ROOT / "Meituan-TSL" / "all_waybill_info_meituan_0322.csv")
+DEFAULT_NANSHAN_PATH = str(REPO_ROOT / "Meituan-Shenzhen" / "深圳市南山区运单抽样_已脱敏.csv")

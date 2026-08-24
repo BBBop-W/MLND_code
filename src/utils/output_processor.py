@@ -1,708 +1,1224 @@
-import os
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-import matplotlib.pyplot as plt
-import networkx as nx
-import numpy as np
+"""Solution reporting for the OD-aware mixed-delivery model."""
+
+from __future__ import annotations
+
 import csv
-import pickle
-from src import config
-from src.data_processor.instance import Instance
+import json
+import math
+import os
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
+import matplotlib
+
+matplotlib.use("Agg", force=True)
+import matplotlib.pyplot as plt
+from matplotlib import cm, colors
+from matplotlib.collections import LineCollection
+
+from src.data_processor.instance import DIRECT_ROUTE, Instance
+
+if TYPE_CHECKING:
+    from src.model.gurobi_model import MLNDModel
+
+
+_STATUS_NAMES = {
+    1: "LOADED",
+    2: "OPTIMAL",
+    3: "INFEASIBLE",
+    4: "INF_OR_UNBD",
+    5: "UNBOUNDED",
+    6: "CUTOFF",
+    7: "ITERATION_LIMIT",
+    8: "NODE_LIMIT",
+    9: "TIME_LIMIT",
+    10: "SOLUTION_LIMIT",
+    11: "INTERRUPTED",
+    12: "NUMERIC",
+    13: "SUBOPTIMAL",
+    14: "INPROGRESS",
+    15: "USER_OBJ_LIMIT",
+    16: "WORK_LIMIT",
+    17: "MEM_LIMIT",
+}
+
 
 class ResultProcessor:
-    def __init__(self, model, instance: Instance):
+    """Extract, print, and persist one incumbent from :class:`MLNDModel`."""
+
+    TOL = 1e-7
+
+    def __init__(self, model: "MLNDModel", instance: Instance):
         self.wrapper = model
         self.model = model.model
         self.inst = instance
-        
-        if self.model.SolCount == 0:
-            raise ValueError("No solution found in the model.")
-            
-        # Try to get objVal and MIPGap safely
-        try:
-            self.obj_val = self.model.objVal
-        except:
-            self.obj_val = None
-            
-        try:
-            self.gap = self.model.MIPGap
-        except:
-            self.gap = None
-            
-        self.run_time = self.model.Runtime
-            
-        try:
-            self.gamma = self.model.getVarByName("Gamma").X
-        except:
-            self.gamma = None
-        
-        self.x = {}
-        self.y = {}
-        self.xi = {}
-        self.psi = {}
-        self.empty_psi = {}
-        self.varphi = {}
-        self.z = {}
-        self.rho = {}
-        self.lambd = {}
+        self.mode = model.mode
+        source = str(instance.metadata.get("source", "data"))
+        exposure = instance.metadata.get("demand_exposure_hours")
+        self.data_granularity = (
+            f"{source}; hourly OD rates averaged over {exposure:g} exposure-hours"
+            if isinstance(exposure, (int, float))
+            else f"{source}; hourly OD rates"
+        )
 
-        Vars = self.model.getVars()
-        
-        for v in Vars:
-            if v.VarName.startswith("x["):
-                key = v.VarName[2:-1]
-                self.x[key] = v.X
-            elif v.VarName.startswith("y["):
-                parts = v.VarName[2:-1].split(',')
-                if len(parts) == 2:
-                    self.y[(parts[0], parts[1])] = v.X
-            elif v.VarName.startswith("xi["):
-                key = v.VarName[3:-1]
-                self.xi[key] = v.X
-            elif v.VarName.startswith("psi["):
-                parts = v.VarName[4:-1].split(',')
-                if len(parts) == 2:
-                    self.psi[(parts[0], parts[1])] = v.X
-            elif v.VarName.startswith("varphi["):
-                parts = v.VarName[7:-1].split(',')
-                if len(parts) == 3:
-                    self.varphi[(parts[0], parts[1], parts[2])] = v.X
-            elif v.VarName.startswith("z["):
-                parts = v.VarName[2:-1].split(',')
-                if len(parts) == 2:
-                    self.z[(parts[0], int(parts[1]))] = v.X
-            elif v.VarName.startswith("rho_l["):
-                key = v.VarName[6:-1]
-                self.rho[key] = v.X
-            elif v.VarName.startswith("rho_s["):
-                key = v.VarName[6:-1]
-                self.rho[key] = v.X
-            elif v.VarName.startswith("lambda["):
-                key = v.VarName[7:-1]
-                self.lambd[key] = v.X
+        self.sol_count = int(self.model.SolCount)
+        if self.sol_count == 0:
+            raise ValueError("ResultProcessor requires a model with an incumbent solution")
 
-        if not self.empty_psi:
-            self.empty_psi = {
-                arc: flow
-                for arc, flow in self.psi.items()
-                if arc not in self.inst.A_HH
+        self.status = int(self.model.Status)
+        self.status_name = _STATUS_NAMES.get(self.status, f"STATUS_{self.status}")
+        self.objective = float(self.model.ObjVal)
+        self.bound = self._finite_or_none(self.model.ObjBound)
+        self.gap = self._finite_or_none(self.model.MIPGap)
+        self.main_runtime = float(getattr(model, "main_solve_runtime", self.model.Runtime))
+        self.network_start_runtime = float(getattr(model, "network_start_runtime", 0.0))
+        self.runtime = float(getattr(model, "total_runtime", self.model.Runtime))
+        self.requested_mip_gap = float(self.model.Params.MIPGap)
+
+        self.x = self._tupledict_values("x")
+        self.z = self._tupledict_values("z")
+        self.y = self._tupledict_values("y")
+        self.delta = self._tupledict_values("delta")
+        self.alpha = self._tupledict_values("alpha")
+        self.h = self._tupledict_values("h")
+        self.w = self._tupledict_values("w")
+        self.psi = self._tupledict_values("psi")
+        self.varphi = self._tupledict_values("varphi")
+        self.lambd = self._tupledict_values("lambda")
+        self.xi = self._tupledict_values("xi")
+        self.a_lk = self._tupledict_values("a_lk")
+        self.a_hm = self._tupledict_values("a_hm")
+        self.q_lk = self._tupledict_values("q_lk")
+        self.q_hm = self._tupledict_values("q_hm")
+        self.gamma = self._clean(float(self.wrapper.vars["gamma"].X))
+
+        self.costs = {
+            name: self._clean(float(expression.getValue()))
+            for name, expression in self.wrapper.cost_expressions.items()
+        }
+        self.cost_total = self._clean(sum(self.costs.values()))
+
+        self.rho_by_idle, self.rho_level_by_idle = self._extract_rho_levels()
+        self.capacity_by_locker = self._extract_capacities()
+        self.od_rows = self._build_od_rows()
+        self.corridor_rows = self._build_corridor_rows()
+        self.locker_rows = self._build_locker_rows()
+        self.facility_rows = self._build_facility_rows()
+        self.summary = self._build_summary()
+
+    @staticmethod
+    def _finite_or_none(value: Any) -> float | None:
+        number = float(value)
+        return number if math.isfinite(number) else None
+
+    @classmethod
+    def _clean(cls, value: float) -> float:
+        return 0.0 if abs(value) <= cls.TOL else float(value)
+
+    @staticmethod
+    def _ratio(numerator: float, denominator: float) -> float | None:
+        return float(numerator / denominator) if denominator > ResultProcessor.TOL else None
+
+    def _tupledict_values(self, name: str) -> dict[Any, float]:
+        return {key: self._clean(float(var.X)) for key, var in self.wrapper.vars[name].items()}
+
+    def _extract_rho_levels(self) -> tuple[dict[str, float], dict[str, int]]:
+        levels = self.inst.config.availability_levels
+        rho_by_idle: dict[str, float] = {}
+        level_by_idle: dict[str, int] = {}
+        for idle in self.inst.idle_states:
+            selected = [(r, self.delta.get((idle, r), 0.0)) for r in range(len(levels))]
+            r, value = max(selected, key=lambda item: item[1])
+            if value > 0.5:
+                rho_by_idle[idle] = float(levels[r])
+                level_by_idle[idle] = r + 1
+        return rho_by_idle, level_by_idle
+
+    def _extract_capacities(self) -> dict[str, dict[str, float | int | None]]:
+        rates = self.inst.config.locker_service_rates
+        result: dict[str, dict[str, float | int | None]] = {}
+        for locker in self.inst.H:
+            selected = [(c, self.z.get((locker, c), 0.0)) for c in range(len(rates))]
+            c, value = max(selected, key=lambda item: item[1])
+            result[locker] = {
+                "level": c + 1 if value > 0.5 else None,
+                "service_rate": float(rates[c]) if value > 0.5 else 0.0,
             }
+        return result
 
-        self.open_L = sum(1 for node in self.inst.L if self.x.get(node, 0) > 0.5)
-        self.open_H = sum(1 for node in self.inst.H if self.x.get(node, 0) > 0.5)
-        self.open_E = sum(1 for node in self.inst.E if self.x.get(node, 0) > 0.5)
+    @staticmethod
+    def _market_totals(values: dict[tuple[str, str, str, str], float]) -> dict[tuple[str, str], float]:
+        totals: dict[tuple[str, str], float] = defaultdict(float)
+        for (origin, _i, _j, destination), value in values.items():
+            totals[origin, destination] += value
+        return totals
 
-        self.hub_capacity_level = {}
-        self.hub_mu = {}
-        for h_node in self.inst.H:
-            chosen_c = None
-            for c in range(len(config.MU_HUB)):
-                if self.z.get((h_node, c), 0.0) > 0.5:
-                    chosen_c = c
-                    break
-            self.hub_capacity_level[h_node] = chosen_c
-            self.hub_mu[h_node] = config.MU_HUB[chosen_c] if chosen_c is not None else None
+    def _build_od_rows(self) -> list[dict[str, Any]]:
+        lk_offered = self._market_totals(self.a_lk)
+        hm_offered = self._market_totals(self.a_hm)
+        lk_served = self._market_totals(self.q_lk)
+        hm_served = self._market_totals(self.q_hm)
+        displayed: dict[str, list[str]] = defaultdict(list)
+        for (destination, locker), value in self.alpha.items():
+            if value > 0.5:
+                displayed[destination].append(locker)
 
-        self.summary_nodes = list(self.inst.L) + list(self.inst.S) + list(self.inst.H) + list(self.inst.E)
-
-        # Node-level flow accounting for printed/exported summaries.
-        #
-        # H/S accounting follows the Regime II conservation equations instead
-        # of raw route legs. Swapping stations are still counted from varphi
-        # because they only appear as route options.
-        self.node_inflow = {node: 0.0 for node in self.summary_nodes}
-        self.node_outflow = {node: 0.0 for node in self.summary_nodes}
-
-        flow_tol = 1e-5
-
-        loaded_out = {
-            h_node: sum(
-                flow
-                for (i_node, j_node), flow in self.psi.items()
-                if i_node == h_node and (i_node, j_node) in self.inst.A_HH
+        rows: list[dict[str, Any]] = []
+        for origin, destination in self.inst.markets:
+            market = (origin, destination)
+            demand = self.inst.h_od[market]
+            locker_offer = lk_offered.get(market, 0.0)
+            home_offer = hm_offered.get(market, 0.0)
+            locker_service = lk_served.get(market, 0.0)
+            home_service = hm_served.get(market, 0.0)
+            served = locker_service + home_service
+            fallback = max(0.0, demand - served)
+            direct_unit_cost = self.inst.rider_cost(origin, destination)
+            rows.append(
+                {
+                    "origin": origin,
+                    "destination": destination,
+                    "demand_per_hour": demand,
+                    "order_count": self.inst.order_count.get(market, ""),
+                    "displayed_locker": ";".join(sorted(displayed.get(destination, ()))),
+                    "locker_offered_per_hour": locker_offer,
+                    "home_offered_per_hour": home_offer,
+                    "total_offered_per_hour": locker_offer + home_offer,
+                    "locker_served_per_hour": locker_service,
+                    "home_served_per_hour": home_service,
+                    "drone_served_per_hour": served,
+                    "offered_not_realized_per_hour": max(0.0, locker_offer + home_offer - served),
+                    "rider_fallback_per_hour": fallback,
+                    "drone_service_rate": self._ratio(served, demand) or 0.0,
+                    "locker_realization_rate": self._ratio(locker_service, locker_offer),
+                    "home_realization_rate": self._ratio(home_service, home_offer),
+                    "direct_rider_unit_cost": direct_unit_cost,
+                    "all_rider_baseline_cost_per_hour": direct_unit_cost * demand,
+                    "fallback_rider_cost_per_hour": direct_unit_cost * fallback,
+                    "avoided_direct_rider_cost_per_hour": direct_unit_cost * served,
+                }
             )
-            for h_node in self.inst.H
-        }
-        loaded_in = {
-            h_node: sum(
-                flow
-                for (i_node, j_node), flow in self.psi.items()
-                if j_node == h_node and (i_node, j_node) in self.inst.A_HH
-            )
-            for h_node in self.inst.H
-        }
+        return rows
 
-        holding_nodes = list(self.inst.S)
-        h_to_s = self.inst.h_to_s
-        s_to_h = self.inst.s_to_h
+    @staticmethod
+    def _corridor_totals(
+        values: dict[tuple[str, str, str, str], float],
+    ) -> dict[tuple[str, str], float]:
+        totals: dict[tuple[str, str], float] = defaultdict(float)
+        for (_o, i, j, _d), value in values.items():
+            totals[i, j] += value
+        return totals
 
-        for l_node in self.inst.L:
-            self.node_inflow[l_node] = sum(
-                self.empty_psi.get((s_node, l_node), 0.0) for s_node in holding_nodes
-            )
-            self.node_outflow[l_node] = sum(
-                self.empty_psi.get((l_node, h_node), 0.0) for h_node in self.inst.H
-            )
-
-        for h_node in self.inst.H:
-            s_node = h_to_s.get(h_node)
-            empty_from_pool = self.empty_psi.get((s_node, h_node), 0.0) if s_node else 0.0
-            empty_from_base = sum(
-                self.empty_psi.get((l_node, h_node), 0.0) for l_node in self.inst.L
-            )
-            empty_to_pool = self.empty_psi.get((h_node, s_node), 0.0) if s_node else 0.0
-
-            self.node_inflow[h_node] = loaded_in[h_node] + empty_from_pool + empty_from_base
-            self.node_outflow[h_node] = loaded_out[h_node] + empty_to_pool
-
-        for s_node in holding_nodes:
-            h_node = s_to_h.get(s_node)
-            completed_to_owner = loaded_in.get(h_node, 0.0)
-            incoming_from_pools = sum(
-                self.empty_psi.get((r_node, s_node), 0.0)
-                for r_node in holding_nodes
-                if r_node != s_node
-            )
-            outbound_to_owner_hub = self.empty_psi.get((s_node, h_node), 0.0) if h_node else 0.0
-            outbound_to_pools = sum(
-                self.empty_psi.get((s_node, r_node), 0.0)
-                for r_node in holding_nodes
-                if r_node != s_node
-            )
-            outbound_to_bases = sum(
-                self.empty_psi.get((s_node, l_node), 0.0) for l_node in self.inst.L
-            )
-
-            self.node_inflow[s_node] = completed_to_owner + incoming_from_pools
-            self.node_outflow[s_node] = (
-                outbound_to_owner_hub + outbound_to_pools + outbound_to_bases
-            )
-
-        for (_, _, k_node), flow in self.varphi.items():
-            if flow <= flow_tol or k_node == '0' or k_node not in self.inst.E:
+    def _build_corridor_rows(self) -> list[dict[str, Any]]:
+        lk_offered = self._corridor_totals(self.a_lk)
+        hm_offered = self._corridor_totals(self.a_hm)
+        lk_served = self._corridor_totals(self.q_lk)
+        hm_served = self._corridor_totals(self.q_hm)
+        direct: dict[tuple[str, str], float] = defaultdict(float)
+        swap: dict[tuple[str, str], float] = defaultdict(float)
+        flight_km: dict[tuple[str, str], float] = defaultdict(float)
+        for (u, v, option), flow in self.varphi.items():
+            if (u, v) not in self.inst.A_HH:
                 continue
-            self.node_inflow[k_node] += flow
-            self.node_outflow[k_node] += flow
+            bucket = direct if option == DIRECT_ROUTE else swap
+            bucket[u, v] += flow
+            flight_km[u, v] += self.inst.route_distance[u, v, option] * flow
 
-        # Validate consistency: if assignment implies non-zero base throughput,
-        # physical base flow must not be zero.
-        hub_outgoing = {h_node: 0.0 for h_node in self.inst.H}
-        for (i_node, j_node), flow in self.psi.items():
-            if i_node in hub_outgoing and (i_node, j_node) in self.inst.A_HH and flow > flow_tol:
-                hub_outgoing[i_node] += flow
-
-        self.base_assigned_flow = {l_node: 0.0 for l_node in self.inst.L}
-        for (l_node, i_node), y_val in self.y.items():
-            if y_val <= flow_tol:
-                continue
-            if l_node in self.base_assigned_flow and i_node in hub_outgoing:
-                self.base_assigned_flow[l_node] += y_val * hub_outgoing[i_node]
-
-        self.node_mu_or_load = {node: None for node in self.summary_nodes}
-        for h_node in self.inst.H:
-            self.node_mu_or_load[h_node] = self.hub_mu.get(h_node)
-        for l_node in self.inst.L:
-            self.node_mu_or_load[l_node] = sum(
-                (1 - self._p_chain(i_node))
-                * self.inst.h.get((i_node, j_node), 0.0)
-                * self.x.get(i_node, 0.0)
-                * self.x.get(j_node, 0.0)
-                * self.x.get(l_node, 0.0)
-                * self.y.get((l_node, i_node), 0.0)
-                for (i_node, j_node) in self.inst.A_HH
+        rows: list[dict[str, Any]] = []
+        for i, j in self.wrapper.corridors:
+            offered = lk_offered[i, j] + hm_offered[i, j]
+            served = lk_served[i, j] + hm_served[i, j]
+            rows.append(
+                {
+                    "origin_locker": i,
+                    "destination_locker": j,
+                    "connection_open": int(self.y.get((i, j), 0.0) > 0.5),
+                    "model_offered_h_per_hour": self.h.get((i, j), 0.0),
+                    "locker_offered_per_hour": lk_offered[i, j],
+                    "home_offered_per_hour": hm_offered[i, j],
+                    "total_offered_per_hour": offered,
+                    "locker_served_per_hour": lk_served[i, j],
+                    "home_served_per_hour": hm_served[i, j],
+                    "total_served_per_hour": served,
+                    "loaded_psi_per_hour": self.psi.get((i, j), 0.0),
+                    "direct_flow_per_hour": direct[i, j],
+                    "swap_flow_per_hour": swap[i, j],
+                    "swap_share": self._ratio(swap[i, j], direct[i, j] + swap[i, j]),
+                    "flight_km_per_hour": flight_km[i, j],
+                }
             )
-        for s_node in holding_nodes:
-            h_node = s_to_h.get(s_node)
-            if h_node is None:
-                self.node_mu_or_load[s_node] = 0.0
-            else:
-                self.node_mu_or_load[s_node] = (
-                    self._p_chain(h_node)
-                    * self.x.get(h_node, 0.0)
-                    * sum(
-                        self.inst.h.get((h_node, j_node), 0.0) * self.x.get(j_node, 0.0)
-                        for (i_node, j_node) in self.inst.A_HH
-                        if i_node == h_node
-                    )
-                )
-        for e_node in self.inst.E:
-            self.node_mu_or_load[e_node] = sum(
-                flow for (_, _, k_node), flow in self.varphi.items() if k_node == e_node
+        return rows
+
+    def _build_locker_rows(self) -> list[dict[str, Any]]:
+        displayed_count = Counter()
+        for (_destination, locker), value in self.alpha.items():
+            if value > 0.5:
+                displayed_count[locker] += 1
+
+        rows: list[dict[str, Any]] = []
+        for locker in self.inst.H:
+            capacity = self.capacity_by_locker[locker]
+            mu = float(capacity["service_rate"])
+            workload = self.lambd.get(locker, 0.0)
+            population = self.xi.get(locker, 0.0)
+            headroom = mu - workload
+            queue_population = workload / headroom if headroom > self.TOL else None
+            state = self.inst.h_to_s[locker]
+            chain_flow = self.psi.get((state, locker), 0.0)
+            state_population = self.xi.get(state, 0.0)
+            rows.append(
+                {
+                    "locker": locker,
+                    "open": int(self.x.get(locker, 0.0) > 0.5),
+                    "x_km": self.inst.coords[locker][0],
+                    "y_km": self.inst.coords[locker][1],
+                    "capacity_level": capacity["level"],
+                    "service_rate_per_hour": mu,
+                    "workload_lambda_per_hour": workload,
+                    "service_headroom_per_hour": headroom,
+                    "utilization": self._ratio(workload, mu),
+                    "queue_population_formula": queue_population,
+                    "mean_handling_time_formula_minutes": (
+                        60.0 * queue_population / workload
+                        if workload > self.TOL and queue_population is not None
+                        else 0.0
+                    ),
+                    "conic_epigraph_xi": population,
+                    "displayed_destination_count": displayed_count[locker],
+                    "virtual_state": state,
+                    "virtual_state_rho": self.rho_by_idle.get(state),
+                    "virtual_state_rho_level": self.rho_level_by_idle.get(state),
+                    "chained_source_flow_per_hour": chain_flow,
+                    "virtual_state_expected_drones": state_population,
+                    "virtual_state_wait_minutes": 60.0 * state_population / chain_flow if chain_flow > self.TOL else 0.0,
+                }
             )
+        return rows
 
-        self.node_total_flow = {
-            node: self.node_inflow[node] + self.node_outflow[node]
-            for node in self.summary_nodes
-        }
-        # Use a flow-based served-demand metric so summaries remain stable even if
-        # objective reporting changes (e.g., multi-objective/tie-break settings).
-        self.served_demand = sum(
-            self.psi.get((i, j), 0.0) for (i, j) in self.inst.A_HH
-        )
+    def _build_facility_rows(self) -> list[dict[str, Any]]:
+        swap_throughput = Counter()
+        for (_u, _v, option), flow in self.varphi.items():
+            if option != DIRECT_ROUTE:
+                swap_throughput[option] += flow
 
-        # Profit/cost accounting used by summary output.
-        self.served_revenue = config.ORDER_REVENUE_COEF * self.served_demand
-        self.fixed_cost = sum(
-            self.inst.f.get(node, 0.0) * self.x.get(node, 0.0) for node in self.inst.L + self.inst.E
-        )
-        self.fixed_cost += sum(
-            getattr(config, "COST_HUB_FIXED", 0.0) * self.x.get(node, 0.0) for node in self.inst.H
-        )
-        f_hub = config.COST_HUB
-        self.fixed_cost += sum(f_hub[c] * self.z.get((i, c), 0.0) for i in self.inst.H for c in range(len(config.MU_HUB)))
-        arc_cost = getattr(config, "COST_ARC", 0.0)
-        if isinstance(arc_cost, dict):
-            self.arc_activation_cost = sum(
-                float(arc_cost.get((u_node, v_node), arc_cost.get(f"{u_node},{v_node}", arc_cost.get(f"{u_node}->{v_node}", 0.0))))
-                * y_val
-                for (u_node, v_node), y_val in self.y.items()
-            )
-        else:
-            self.arc_activation_cost = float(arc_cost) * sum(self.y.values())
-        flight_coef = getattr(config, "COST_FLIGHT_TIME", 0.1)
-        t_lookup = getattr(self.wrapper, "t", {})
-        self.flight_cost = 0.0
-        for (u_node, v_node, k_node), flow in self.varphi.items():
-            if (u_node, v_node, k_node) in t_lookup:
-                travel_time = t_lookup[u_node, v_node, k_node]
-            elif k_node == '0':
-                travel_time = self.inst.get_time(u_node, v_node)
-            else:
-                travel_time = self.inst.get_time(u_node, k_node) + self.inst.get_time(k_node, v_node)
-            self.flight_cost += flight_coef * travel_time * flow
-        gamma_val = self.gamma if self.gamma is not None else 0.0
-        self.drone_cost = config.COST_DRONE * gamma_val
-        self.total_cost = self.fixed_cost + self.arc_activation_cost + self.flight_cost + self.drone_cost
-        self.net_profit = self.served_revenue - self.total_cost
-        self.rho_avg = float(np.mean(list(self.rho.values()))) if self.rho else 0.0
-
-
-    def _rho_to_l_metric(self, rho_val):
-        if rho_val is None:
-            return None
-        tol = 1e-5
-        if rho_val >= 1.0 - tol:
-            return None
-        return rho_val / (1.0 - rho_val)
-
-    def _p_chain(self, hub):
-        p_by_hub = getattr(config, "P_CHAIN_BY_HUB", None)
-        if isinstance(p_by_hub, dict):
-            return float(p_by_hub.get(hub, config.P_CHAIN))
-        return float(config.P_CHAIN)
-
-    def _node_open_display(self, node):
-        if node in self.inst.H:
-            chosen_c = self.hub_capacity_level.get(node)
-            if chosen_c is not None:
-                return str(chosen_c + 1)
-            return "0" if self.x.get(node, 0.0) <= 0.5 else "-"
-        if node in self.inst.S:
-            owner = self.inst.s_to_h.get(node)
-            open_raw = self.x.get(owner, None)
-        else:
-            open_raw = self.x.get(node, None)
-        return str(int(open_raw > 0.5)) if open_raw is not None else "-"
-
-    def _node_open_raw(self, node):
-        if node in self.inst.S:
-            owner = self.inst.s_to_h.get(node)
-            return self.x.get(owner, None)
-        return self.x.get(node, None)
-
-    def _node_rho(self, node):
-        if node in self.inst.H:
-            mu = self.hub_mu.get(node)
-            if mu is None or mu <= 1e-8:
-                return None
-            return self.lambd.get(node, 0.0) / mu
-        return self.rho.get(node, None)
-
-
-    def _is_all_zero_row(self, open_raw, in_flow, out_flow, rho_val, l_val):
-        tol = 1e-5
-        rho_num = 0.0 if rho_val is None else float(rho_val)
-        l_num = 0.0 if l_val is None else float(l_val)
-        open_is_zero = (open_raw is not None) and (abs(float(open_raw)) <= tol)
-        return (
-            abs(in_flow) <= tol
-            and abs(out_flow) <= tol
-            and abs(rho_num) <= tol
-            and abs(l_num) <= tol
-            and open_is_zero
-        )
-
-    def print_summary(self):
-        print("\n" + "="*50)
-        if self.obj_val is not None:
-            print(f"OPTIMIZATION RESULT SUMMARY: {self.obj_val:.4f}")
-        else:
-            print("OPTIMIZATION RESULT SUMMARY")
-        print("="*50)
-        print(f"Net Profit                   : {self.net_profit:.4f}")
-        print(f"Completed Volume             : {self.served_demand:.4f}")
-        print(f"Completed Volume Revenue     : {self.served_revenue:.4f}")
-        print(f"Total Cost                   : {self.total_cost:.4f}")
-        print(f"  - Fixed Station Cost       : {self.fixed_cost:.4f}")
-        print(f"  - Arc Activation Cost      : {self.arc_activation_cost:.4f}")
-        print(f"  - Flight Time Cost         : {self.flight_cost:.4f}")
-        print(f"  - Drone Cost               : {self.drone_cost:.4f}")
-        print(
-            f"Model Objective              : {self.obj_val:.4f}"
-            if self.obj_val is not None
-            else "Model Objective              : None"
-        )
-        if self.gamma is not None:
-            print(f"Total Aircraft (gamma)        : {self.gamma:.4f}")
-        else:
-            print("Total Aircraft (gamma)        : N/A")
-        print(f"Average Service Level (rho)  : {self.rho_avg:.4f}" if self.rho else "Average Service Level (rho)  : N/A")
-        print(f"Runtime                      : {self.run_time:.2f}s")
-        print(f"Gap                          : {self.gap*100:.2f}%" if self.gap is not None else "Gap: N/A")
-        
-        print(f"\nOpen Stations:")
-        print(f"  Bases (L)       : {self.open_L} / {len(self.inst.L)}")
-        print(f"  Hubs (H)        : {self.open_H} / {len(self.inst.H)}")
-        print(f"  Swapping (E)    : {self.open_E} / {len(self.inst.E)}")
-        
-        print(f"\nActive Assignments (y_li > 0.01):")
-        y_active = [
-            (l, i, val)
-            for (l, i), val in self.y.items()
-            if (l, i) in self.inst.A_LH and val > 0.01
-        ]
-
-        for l, i, val in y_active[:10]:
-            rho_l = self.rho.get(l, 0.0)
-            print(f"  Base {l} assigned to Hub {i} with y={val:.4f}, rho_l={rho_l:.4f}")
-        if len(y_active) > 10:
-            print(f"  ... and {len(y_active) - 10} more.")
-
-        flow_tol = 1e-5
-        active_psi_edges = sum(1 for v in self.psi.values() if v > flow_tol)
-        active_varphi_edges = sum(1 for v in self.varphi.values() if v > flow_tol)
-        print(f"\nActive edge counts (tol={flow_tol:g}):")
-        print(f"  psi edges       : {active_psi_edges}")
-        print(f"  varphi routes   : {active_varphi_edges}")
-
-        # Dangling open stations: open physical nodes with no significant incident flow.
-        dangling = []
-        for node in self.inst.N:
-            if self.x.get(node, 0) <= 0.5:
-                continue
-            incident = self.node_inflow.get(node, 0.0) + self.node_outflow.get(node, 0.0)
-            if incident <= flow_tol:
-                dangling.append(node)
-        if dangling:
-            print(f"Warning: {len(dangling)} open stations have no incident flow above tolerance.")
-            preview = ", ".join(dangling[:10])
-            print(f"  Examples: {preview}{' ...' if len(dangling) > 10 else ''}")
-
-        print("\nPer-node flow summary:")
-        print("  NodeID | Open | InFlow | OutFlow | Lambda |      mu |   rho |     L |    Xi|  W (min)")
-        for node in self.summary_nodes:
-            open_raw = self._node_open_raw(node)
-            open_display = self._node_open_display(node)
-            in_flow = self.node_inflow.get(node, 0.0)
-            out_flow = self.node_outflow.get(node, 0.0)
-            lambda_val = self.lambd.get(node, None)
-            mu_val = self.node_mu_or_load.get(node, None)
-            rho_val = self._node_rho(node)
-            l_val = self._rho_to_l_metric(rho_val)
-            if self._is_all_zero_row(open_raw, in_flow, out_flow, rho_val, l_val):
-                continue
-            lambda_display = f"{lambda_val:6.3f}" if lambda_val is not None else "  -   "
-            mu_display = f"{mu_val:7.3f}" if mu_val is not None else "   -   "
-            rho_display = f"{rho_val:5.3f}" if rho_val is not None else "  -  "
-            l_display = f"{l_val:5.3f}" if l_val is not None else "  -  "
-            xi_val = self.xi.get(node, None)
-            xi_display = f"{xi_val:5.3f}" if xi_val is not None else "  -  "
-            W = xi_val / in_flow * 60 if in_flow > flow_tol and xi_val is not None else '  -  '
-            W_display = f"{W:5.3f}" if isinstance(W, float) else "  -  "
-            print(f"  {node:>6} | {open_display:>4} | {in_flow:7.3f} | {out_flow:8.3f} | {lambda_display:>6} | {mu_display:>7} | {rho_display:>5} | {l_display:>5} | {xi_display:>5} | {W_display:>5}")
-
-                
-        print("="*50 + "\n")
-
-    def save_node_flow_summary(self, save_path):
-        """Export CSV of node-level flow summary with rho and L columns."""
-        with open(save_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['NodeID', 'Open', 'InFlow', 'OutFlow', 'Lambda', 'mu', 'rho', 'L', 'Xi', 'W_min'])
-            for node in self.summary_nodes:
-                rho_val = self._node_rho(node)
-                l_val = self._rho_to_l_metric(rho_val)
-                in_flow = self.node_inflow.get(node, 0.0)
-                out_flow = self.node_outflow.get(node, 0.0)
-                lambda_val = self.lambd.get(node, None)
-                mu_val = self.node_mu_or_load.get(node, None)
-                xi_val = self.xi.get(node, None)
-                open_raw = self._node_open_raw(node)
-                if self._is_all_zero_row(open_raw, in_flow, out_flow, rho_val, l_val):
-                    continue
-                writer.writerow([
-                    node,
-                    self._node_open_display(node),
-                    in_flow,
-                    out_flow,
-                    lambda_val,
-                    mu_val,
-                    rho_val,
-                    l_val,
-                    xi_val,
-                    (xi_val / in_flow * 60) if in_flow > 1e-5 and xi_val is not None else ''
-                ])
-
-    def save_selected_stations(self, save_path):
-        """Export CSV of selected (open) stations."""
-        with open(save_path, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['NodeID', 'Type', 'x', 'y'])
-            for node in self.inst.N:
-                if self.x.get(node, 0) > 0.5:
-                    x, y = self.inst.coords[node]
-                    node_type = node[0]
-                    writer.writerow([node, node_type, x, y])
-
-    def save_python_object(self, save_path):
-        """Save instance and parsed results natively as a pickle file."""
-        data = {
-            'instance': self.inst,
-            'variables': {
-                'x': self.x,
-                'y': self.y,
-                'z': self.z,
-                'psi': self.psi,
-                'varphi': self.varphi,
-                'rho': self.rho,
-                'lambda': self.lambd,
-                'gamma': self.gamma
-            },
-            'metrics': {
-                'obj_val': self.obj_val,
-                'run_time': self.run_time,
-                'gap': self.gap
-            }
-        }
-        with open(save_path, 'wb') as f:
-            pickle.dump(data, f)
-
-    def save_open_facilities_config(self, save_path):
-        """Export CSV of open facilities and their selected parameters."""
-        import pandas as pd
-
-        rows = []
+        rows: list[dict[str, Any]] = []
         for node in self.inst.L + self.inst.H + self.inst.E:
-            if self.x.get(node, 0) > 0.5:
-                x, y = self.inst.coords[node]
-                node_type = node[0]
-                mu = self.inst.mu.get(node, 0.0)
-                rho_val = 0.0
-                if node_type == 'L':
-                    rho_val = self.rho.get(node, 0.0)
-                elif node_type == 'H':
-                    chosen_c = None
-                    for c in range(len(config.MU_HUB)):
-                        if self.z.get((node, c), 0.0) > 0.5:
-                            chosen_c = c
-                            break
-                    if chosen_c is not None:
-                        mu = config.MU_HUB[chosen_c]
-                    else:
-                        mu = 0.0
-                    rho_val = (self.lambd.get(node, 0.0) / mu) if mu > 1e-8 else 0.0
-                
-                rows.append({
-                    'index': node,
-                    'type': node_type,
-                    'x': x,
-                    'y': y,
-                    'mu': mu,
-                    'rho': rho_val
-                })
-        df = pd.DataFrame(rows, columns=['index', 'type', 'x', 'y', 'mu', 'rho'])
-        df.to_csv(save_path, index=False)
-
-    def plot_network(self, save_path=None):
-        G = nx.DiGraph()
-        flow_tol = 1e-5
-
-        def is_corresponding_base_swap(a_node, b_node):
-            if not ((a_node.startswith('L') and b_node.startswith('E')) or (a_node.startswith('E') and b_node.startswith('L'))):
-                return False
-            try:
-                return int(a_node[1:]) == int(b_node[1:])
-            except ValueError:
-                return False
-        
-        def display_node(node):
-            return self.inst.s_to_h.get(node, node)
-
-        # Add all physical nodes and hub-side holding pools.
-        for node in self.inst.N:
-            if node in self.inst.S:
-                status = 'open' if self.x.get(self.inst.s_to_h.get(node), 0) > 0.5 else 'closed'
+            if self.x.get(node, 0.0) <= 0.5:
+                continue
+            if node in self.inst.L:
+                kind = "base"
+                idle_state = node
+            elif node in self.inst.H:
+                kind = "locker"
+                idle_state = self.inst.h_to_s[node]
             else:
-                status = 'open' if self.x.get(node, 0) > 0.5 else 'closed'
-            node_type = node[0] 
-            G.add_node(node, pos=self.inst.coords[node], status=status, type=node_type)
-            
-        plt.figure(figsize=(16, 14))
-        pos = nx.get_node_attributes(G, 'pos')
-        
-        # Calculate max flow for scaling
-        all_flows = [f for f in self.varphi.values() if f > flow_tol]
-        max_varphi_flow = max(all_flows) if all_flows else 1.0
-        
-        # 1. Plot direct route flows (varphi^0) - Gray lines
-        direct_edges = []
-        direct_widths = []
-        for (u, v, k), flow in self.varphi.items():
-            if k == '0' and flow > flow_tol:
-                u_plot = display_node(u)
-                v_plot = display_node(v)
-                if u_plot != v_plot:
-                    direct_edges.append((u_plot, v_plot))
-                    # Visibly thicker lines
-                    direct_widths.append(1.0 + 4.0 * (flow / max_varphi_flow))
-
-        if direct_edges:
-            nx.draw_networkx_edges(G, pos, edgelist=direct_edges, width=direct_widths, 
-                                edge_color='gray', alpha=0.4, arrows=True,
-                                arrowsize=15, connectionstyle='arc3,rad=0.1',
-                                label='Direct Flow (varphi^0)')
-
-        # 2. Plot flows via swapping stations (varphi^k) - Orange lines
-        swap_edges = []
-        swap_widths = []
-        for (u, v, k), flow in self.varphi.items():
-            if k != '0' and flow > flow_tol:
-                u_plot = display_node(u)
-                v_plot = display_node(v)
-
-                # Leg 1: origin to swap
-                if u_plot != k and not is_corresponding_base_swap(u_plot, k):
-                    swap_edges.append((u_plot, k))
-                # Leg 2: swap to dest
-                if k != v_plot and not is_corresponding_base_swap(k, v_plot):
-                    swap_edges.append((k, v_plot))
-
-                width = 1.0 + 4.0 * (flow / max_varphi_flow)
-                if u_plot != k and not is_corresponding_base_swap(u_plot, k):
-                    swap_widths.append(width)
-                if k != v_plot and not is_corresponding_base_swap(k, v_plot):
-                    swap_widths.append(width)
-
-        if swap_edges:
-            nx.draw_networkx_edges(G, pos, edgelist=swap_edges, width=swap_widths, 
-                                edge_color='darkorange', alpha=0.7, arrows=True,
-                                arrowsize=15, connectionstyle='arc3,rad=0.1',
-                                label='Swapped Flow (varphi^k)')
-
-        # If route edges are unavailable (e.g., master-only model), fall back to psi.
-        if not direct_edges and not swap_edges:
-            psi_edges = []
-            psi_widths = []
-            max_psi_flow = max([f for f in self.psi.values() if f > flow_tol], default=1.0)
-            for (u, v), flow in self.psi.items():
-                if flow <= flow_tol:
-                    continue
-                u_plot = display_node(u)
-                v_plot = display_node(v)
-                if u_plot != v_plot:
-                    psi_edges.append((u_plot, v_plot))
-                    psi_widths.append(1.0 + 4.0 * (flow / max_psi_flow))
-            if psi_edges:
-                nx.draw_networkx_edges(
-                    G,
-                    pos,
-                    edgelist=psi_edges,
-                    width=psi_widths,
-                    edge_color='steelblue',
-                    alpha=0.6,
-                    arrows=True,
-                    arrowsize=15,
-                    connectionstyle='arc3,rad=0.1',
-                    label='Aggregated Flow (psi)',
-                )
-            else:
-                print("Warning: no flow edges above tolerance to plot.")
-
-        # 3. Nodes - distinguish open and closed
-        shapes = {'L': 's', 'S': 'o', 'H': '^', 'E': 'D'}
-        colors_open = {'L': 'red', 'S': 'steelblue', 'H': 'green', 'E': 'orange'}
-        
-        for n_type in ['L', 'S', 'H', 'E']:
-            open_nodes = [n for n, attr in G.nodes(data=True) if attr['status'] == 'open' and attr['type'] == n_type]
-            if open_nodes:
-                nx.draw_networkx_nodes(G, pos, nodelist=open_nodes, 
-                                       node_color=colors_open[n_type], 
-                                       node_shape=shapes[n_type], 
-                                       node_size=300, 
-                                       label=f'Open {n_type}')
-                                       
-            closed_nodes = [n for n, attr in G.nodes(data=True) if attr['status'] == 'closed' and attr['type'] == n_type]
-            if closed_nodes:
-                # Hollow shapes for closed nodes
-                nx.draw_networkx_nodes(G, pos, nodelist=closed_nodes, 
-                                       node_color='white', 
-                                       edgecolors=colors_open[n_type],
-                                       node_shape=shapes[n_type], 
-                                       node_size=100, alpha=0.3,
-                                       linewidths=1.5,
-                                       label=f'Closed {n_type}')
-
-        # Label every node ID next to its marker for easier auditing.
-        for node, (x_coord, y_coord) in pos.items():
-            plt.text(
-                x_coord + 0.03,
-                y_coord + 0.03,
-                node,
-                fontsize=8,
-                color='black',
-                alpha=0.85,
+                kind = "swap"
+                idle_state = None
+            capacity = self.capacity_by_locker.get(node, {})
+            incident_flow = sum(
+                flow for (u, v), flow in self.psi.items() if (u == node or v == node) and (u, v) in self.inst.A_F
             )
-
-        x_vals = [coord[0] for coord in pos.values()]
-        y_vals = [coord[1] for coord in pos.values()]
-        if x_vals and y_vals:
-            x_min, x_max = min(x_vals), max(x_vals)
-            y_min, y_max = min(y_vals), max(y_vals)
-            x_span = x_max - x_min
-            y_span = y_max - y_min
-            y_arrow = y_min - 0.08 * (y_span if y_span > 0 else 1.0)
-            plt.annotate(
-                "",
-                xy=(x_max, y_arrow),
-                xytext=(x_min, y_arrow),
-                arrowprops=dict(arrowstyle='<->', color='black', lw=1.2),
+            rows.append(
+                {
+                    "facility": node,
+                    "type": kind,
+                    "x_km": self.inst.coords[node][0],
+                    "y_km": self.inst.coords[node][1],
+                    "fixed_cost_per_hour": self.inst.facility_cost(node),
+                    "idle_state": idle_state or "",
+                    "rho_level": self.rho_level_by_idle.get(idle_state) if idle_state else None,
+                    "rho": self.rho_by_idle.get(idle_state) if idle_state else None,
+                    "capacity_level": capacity.get("level"),
+                    "locker_service_rate_per_hour": capacity.get("service_rate"),
+                    "locker_workload_per_hour": self.lambd.get(node) if node in self.inst.H else None,
+                    "incident_physical_flow_per_hour": incident_flow,
+                    "swap_throughput_per_hour": swap_throughput[node] if node in self.inst.E else None,
+                    "active_incident_connections": sum(
+                        1 for (u, v), value in self.y.items() if value > 0.5 and (u == node or v == node)
+                    ),
+                }
             )
-            plt.text(
-                (x_min + x_max) / 2.0,
-                y_arrow - 0.03 * (y_span if y_span > 0 else 1.0),
-                f"Left-right span: {x_span:.2f} km",
-                ha='center',
-                va='top',
-                fontsize=10,
-                color='black',
-            )
+        return rows
 
-        plt.title('Optimized Drone Delivery Network (Direct vs Swapped)', fontsize=16)
-        plt.xlabel('X Coordinate (km)', fontsize=12)
-        plt.ylabel('Y Coordinate (km)', fontsize=12)
-        
-        # Cleanup legend - avoid duplicates
-        handles, labels = plt.gca().get_legend_handles_labels()
-        by_label = {}
-        for h, l in zip(handles, labels):
-            if l not in by_label:
-                by_label[l] = h
-        plt.legend(by_label.values(), by_label.keys(), loc='center left', bbox_to_anchor=(1, 0.5), fontsize='medium', ncol=1)
-        
-        plt.grid(True, linestyle='--', alpha=0.3)
-        plt.tight_layout()
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            plt.close()
+    def _route_metrics(self) -> dict[str, Any]:
+        metrics = defaultdict(float)
+        swap_by_station = Counter()
+        for (u, v, option), flow in self.varphi.items():
+            load = "loaded" if (u, v) in self.inst.A_HH else "empty"
+            route = "direct" if option == DIRECT_ROUTE else "swap"
+            distance = self.inst.route_distance[u, v, option]
+            travel_time = self.inst.route_time[u, v, option]
+            metrics[f"{load}_{route}_flow"] += flow
+            metrics[f"{load}_{route}_km"] += flow * distance
+            metrics[f"{load}_{route}_transit_drones"] += flow * travel_time
+            if option != DIRECT_ROUTE and flow > self.TOL:
+                swap_by_station[option] += flow
+
+        loaded = metrics["loaded_direct_flow"] + metrics["loaded_swap_flow"]
+        empty = metrics["empty_direct_flow"] + metrics["empty_swap_flow"]
+        direct = metrics["loaded_direct_flow"] + metrics["empty_direct_flow"]
+        swap = metrics["loaded_swap_flow"] + metrics["empty_swap_flow"]
+        total_km = sum(value for key, value in metrics.items() if key.endswith("_km"))
+        transit = sum(value for key, value in metrics.items() if key.endswith("_transit_drones"))
+        return {
+            "loaded_flow_per_hour": loaded,
+            "empty_flow_per_hour": empty,
+            "empty_dispatch_per_hour": sum(self.psi.get(arc, 0.0) for arc in self.inst.A_LH),
+            "empty_recovery_per_hour": sum(self.psi.get(arc, 0.0) for arc in self.inst.A_HL),
+            "loaded_direct_flow_per_hour": metrics["loaded_direct_flow"],
+            "loaded_swap_flow_per_hour": metrics["loaded_swap_flow"],
+            "loaded_swap_share": self._ratio(metrics["loaded_swap_flow"], loaded),
+            "all_direct_flow_per_hour": direct,
+            "all_swap_flow_per_hour": swap,
+            "all_swap_share": self._ratio(swap, direct + swap),
+            "loaded_flight_km_per_hour": metrics["loaded_direct_km"] + metrics["loaded_swap_km"],
+            "empty_flight_km_per_hour": metrics["empty_direct_km"] + metrics["empty_swap_km"],
+            "total_flight_km_per_hour": total_km,
+            "transit_drones": transit,
+            "swap_flow_by_station_per_hour": dict(sorted(swap_by_station.items())),
+        }
+
+    def _build_summary(self) -> dict[str, Any]:
+        demand = sum(row["demand_per_hour"] for row in self.od_rows)
+        locker_offered = sum(row["locker_offered_per_hour"] for row in self.od_rows)
+        home_offered = sum(row["home_offered_per_hour"] for row in self.od_rows)
+        locker_served = sum(row["locker_served_per_hour"] for row in self.od_rows)
+        home_served = sum(row["home_served_per_hour"] for row in self.od_rows)
+        offered = locker_offered + home_offered
+        served = locker_served + home_served
+        fallback = max(0.0, demand - served)
+
+        rider_baseline = sum(row["all_rider_baseline_cost_per_hour"] for row in self.od_rows)
+        savings = self._clean(rider_baseline - self.cost_total)
+        source_from_bases = sum(self.psi.get(arc, 0.0) for arc in self.inst.A_LH)
+        source_from_virtual = sum(self.psi.get(arc, 0.0) for arc in self.inst.A_SH)
+        state_entries = sum(self.psi.get(arc, 0.0) for arc in self.inst.A_HS)
+        route = self._route_metrics()
+
+        base_idle_population = sum(self.xi.get(base, 0.0) for base in self.inst.L)
+        virtual_idle_population = sum(self.xi.get(state, 0.0) for state in self.inst.S)
+        locker_population = sum(self.xi.get(locker, 0.0) for locker in self.inst.H)
+        fleet_accounted = base_idle_population + virtual_idle_population + locker_population + route["transit_drones"]
+        rho_counts = Counter(f"{rho:.2f}" for rho in self.rho_by_idle.values())
+        base_rho_counts = Counter(f"{self.rho_by_idle[b]:.2f}" for b in self.inst.L if b in self.rho_by_idle)
+        virtual_rho_counts = Counter(f"{self.rho_by_idle[s]:.2f}" for s in self.inst.S if s in self.rho_by_idle)
+
+        open_counts = {
+            "bases": sum(self.x.get(node, 0.0) > 0.5 for node in self.inst.L),
+            "lockers": sum(self.x.get(node, 0.0) > 0.5 for node in self.inst.H),
+            "swap_stations": sum(self.x.get(node, 0.0) > 0.5 for node in self.inst.E),
+        }
+        capacity_counts = Counter(
+            str(row["capacity_level"])
+            for row in self.locker_rows
+            if row["open"] and row["capacity_level"] is not None
+        )
+        total_lambda = sum(row["workload_lambda_per_hour"] for row in self.locker_rows)
+        total_locker_xi = sum(row["conic_epigraph_xi"] for row in self.locker_rows)
+        total_queue_population = sum(
+            row["queue_population_formula"] or 0.0 for row in self.locker_rows
+        )
+        max_util = max((row["utilization"] or 0.0 for row in self.locker_rows), default=0.0)
+        max_wait = max(
+            (row["mean_handling_time_formula_minutes"] for row in self.locker_rows),
+            default=0.0,
+        )
+        cfg = self.inst.config
+        screening_is_exact = (
+            cfg.choice.max_walk_km is None
+            and cfg.origin_locker_choices is None
+            and cfg.home_corridor_choices is None
+        )
+        active_virtual_state_count = sum(
+            state in self.rho_by_idle for state in self.inst.S
+        )
+        selected_base_rho = {
+            base: self.rho_by_idle[base]
+            for base in self.inst.L
+            if base in self.rho_by_idle
+        }
+        selected_virtual_rho_by_locker = {
+            self.inst.s_to_h[state]: self.rho_by_idle[state]
+            for state in self.inst.S
+            if state in self.rho_by_idle
+        }
+        network_is_nontrivial = served > self.TOL
+        solver_config = getattr(self.wrapper, "solver_config", None)
+
+        return {
+            "schema_version": 1,
+            "mode": self.mode,
+            "status": self.status,
+            "status_name": self.status_name,
+            "objective": self.objective,
+            "objective_bound": self.bound,
+            "runtime_seconds": self.runtime,
+            "mip_gap": self.gap,
+            "requested_mip_gap": self.requested_mip_gap,
+            "courier_only_baseline": rider_baseline,
+            "cost_saving": savings,
+            "cost_saving_percent": (
+                100.0 * savings / rider_baseline if rider_baseline > self.TOL else None
+            ),
+            "drone_served_rate": self._ratio(served, demand),
+            "fleet_size": self.gamma,
+            "screening_is_exact": screening_is_exact,
+            "active_virtual_state_count": active_virtual_state_count,
+            "network_is_nontrivial": network_is_nontrivial,
+            "courier_only_incumbent": not network_is_nontrivial,
+            "open_bases": open_counts["bases"],
+            "open_lockers": open_counts["lockers"],
+            "open_swap_stations": open_counts["swap_stations"],
+            "selected_rho_state_count": len(self.rho_by_idle),
+            "selected_rho_by_idle_state": dict(sorted(self.rho_by_idle.items())),
+            "solver": {
+                "status": self.status,
+                "status_name": self.status_name,
+                "solution_count": self.sol_count,
+                "objective_cost_per_hour": self.objective,
+                "objective_bound": self.bound,
+                "mip_gap": self.gap,
+                "requested_mip_gap": self.requested_mip_gap,
+                "runtime_seconds": self.runtime,
+                "main_solve_runtime_seconds": self.main_runtime,
+                "network_start_runtime_seconds": self.network_start_runtime,
+                "network_start_found": bool(getattr(self.wrapper, "network_start_found", False)),
+                "network_start_used": bool(getattr(self.wrapper, "network_start_used", False)),
+                "network_start_key": list(self.wrapper.network_start_key)
+                if getattr(self.wrapper, "network_start_key", None)
+                else None,
+                "network_start_objective": getattr(
+                    self.wrapper, "network_start_objective", None
+                ),
+                "algorithm": {
+                    "name": "demand_aware_perspective_branch_and_cut",
+                    "root_relaxation_method": getattr(
+                        solver_config, "root_relaxation_method", None
+                    ),
+                    "static_pool_enabled": bool(
+                        getattr(solver_config, "use_valid_inequalities", False)
+                    ),
+                    "user_cuts_enabled": bool(
+                        getattr(solver_config, "use_user_cuts", False)
+                    ),
+                    "maximum_root_cut_rounds": getattr(
+                        solver_config, "max_root_cut_rounds", None
+                    ),
+                    "maximum_cuts_per_round": getattr(
+                        solver_config, "max_cuts_per_round", None
+                    ),
+                    "local_branching_enabled": bool(
+                        getattr(solver_config, "use_local_branching", False)
+                    ),
+                    "local_branching_radius": getattr(
+                        solver_config, "local_branching_radius", None
+                    ),
+                    "static_valid_inequality_counts": dict(
+                        getattr(self.wrapper, "static_cut_counts", {})
+                    ),
+                    "root_user_cut_counts": dict(
+                        getattr(self.wrapper, "user_cut_counts", {})
+                    ),
+                    "root_cut_rounds": int(
+                        getattr(self.wrapper, "root_cut_rounds", 0)
+                    ),
+                    "local_branching_runtime_seconds": float(
+                        getattr(self.wrapper, "local_branching_runtime", 0.0)
+                    ),
+                    "local_branching_improved": bool(
+                        getattr(self.wrapper, "local_branching_improved", False)
+                    ),
+                    "local_branching_objective": getattr(
+                        self.wrapper, "local_branching_objective", None
+                    ),
+                    "local_branching_status": getattr(
+                        self.wrapper, "local_branching_status", None
+                    ),
+                    "local_branching_solution_count": int(
+                        getattr(self.wrapper, "local_branching_solution_count", 0)
+                    ),
+                    "local_branching_hamming_distance": getattr(
+                        self.wrapper, "local_branching_hamming_distance", None
+                    ),
+                    "installed_mip_start_count": 2
+                    if getattr(self.wrapper, "network_start_used", False)
+                    else 1,
+                    "all_courier_start_installed": True,
+                },
+            },
+            "instance": {
+                "data_source": self.inst.metadata.get("source"),
+                "data_granularity": self.data_granularity,
+                "markets": len(self.inst.markets),
+                "od_nodes": len(self.inst.N),
+                "endogenous_corridors": len(self.wrapper.corridors),
+                "locker_assignment_keys": len(self.wrapper.locker_keys),
+                "home_assignment_keys": len(self.wrapper.home_keys),
+                "candidate_bases": len(self.inst.L),
+                "candidate_lockers": len(self.inst.H),
+                "candidate_swap_stations": len(self.inst.E),
+                "candidate_physical_arcs": len(self.inst.A_F),
+                "candidate_activation_arcs": len(self.inst.A_Y),
+                "route_options": len(self.wrapper.varphi_keys),
+                "direct_route_options": sum(
+                    option == DIRECT_ROUTE
+                    for _u, _v, option in self.wrapper.varphi_keys
+                ),
+                "swap_route_options": sum(
+                    option != DIRECT_ROUTE
+                    for _u, _v, option in self.wrapper.varphi_keys
+                ),
+                "maximum_physical_arc_flow_bound": max(
+                    self.inst.M_psi.values(), default=0.0
+                ),
+                "maximum_offered_corridor_bound": max(
+                    self.wrapper.M_w.values(), default=0.0
+                ),
+                "screening_is_exact": screening_is_exact,
+            },
+            "model_size": {
+                "variables": int(self.model.NumVars),
+                "binary_variables": int(self.model.NumBinVars),
+                "integer_variables_including_binary": int(self.model.NumIntVars),
+                "general_integer_variables": max(
+                    int(self.model.NumIntVars) - int(self.model.NumBinVars), 0
+                ),
+                "linear_constraints": int(self.model.NumConstrs),
+                "quadratic_constraints": int(self.model.NumQConstrs),
+            },
+            "costs_cny_per_hour": {
+                **self.costs,
+                "optimized_total": self.cost_total,
+                "objective_reconciliation_error": self._clean(self.objective - self.cost_total),
+            },
+            "all_rider_baseline": {
+                "cost_per_hour": rider_baseline,
+                "optimized_cost_per_hour": self.cost_total,
+                "savings_per_hour": savings,
+                "savings_fraction": self._ratio(savings, rider_baseline),
+                "avoided_direct_rider_cost_per_hour": self._clean(
+                    rider_baseline - self.costs["fallback_home"]
+                ),
+            },
+            "demand_funnel_orders_per_hour": {
+                "total_demand": demand,
+                "locker_offered": locker_offered,
+                "home_offered": home_offered,
+                "total_drone_offered": offered,
+                "not_offered": max(0.0, demand - offered),
+                "locker_served": locker_served,
+                "home_served": home_served,
+                "total_drone_served": served,
+                "offered_not_realized": max(0.0, offered - served),
+                "direct_rider_fallback": fallback,
+                "drone_service_fraction_of_demand": self._ratio(served, demand),
+                "realization_fraction_of_offered": self._ratio(served, offered),
+            },
+            "facilities": {
+                "open": open_counts,
+                "candidates": {
+                    "bases": len(self.inst.L),
+                    "lockers": len(self.inst.H),
+                    "swap_stations": len(self.inst.E),
+                },
+                "locker_capacity_level_counts": dict(sorted(capacity_counts.items())),
+                "active_connections": sum(value > 0.5 for value in self.y.values()),
+            },
+            "discrete_availability": {
+                "allowed_rho_levels": list(self.inst.config.availability_levels),
+                "selected_state_count_by_rho": dict(sorted(rho_counts.items())),
+                "selected_base_count_by_rho": dict(sorted(base_rho_counts.items())),
+                "selected_virtual_count_by_rho": dict(sorted(virtual_rho_counts.items())),
+                "selected_rho_by_idle_state": dict(sorted(self.rho_by_idle.items())),
+                "selected_base_rho": selected_base_rho,
+                "selected_virtual_rho_by_locker": selected_virtual_rho_by_locker,
+                "active_virtual_state_count": active_virtual_state_count,
+                "offered_flow_weighted_rho": self._ratio(served, sum(self.w.values())),
+            },
+            "fleet": {
+                "gamma_drones": self.gamma,
+                "base_idle_drones": base_idle_population,
+                "virtual_idle_drones": virtual_idle_population,
+                "locker_conic_epigraph_xi": locker_population,
+                "transit_drones": route["transit_drones"],
+                "accounted_drones": fleet_accounted,
+                "fleet_slack": self._clean(self.gamma - fleet_accounted),
+                "flying_fraction_of_fleet": self._ratio(route["transit_drones"], self.gamma),
+            },
+            "flight_operations": route,
+            "chaining": {
+                "base_origin_orders_per_hour": source_from_bases,
+                "virtual_state_origin_orders_per_hour": source_from_virtual,
+                "virtual_state_entry_flow_per_hour": state_entries,
+                "chaining_order_fraction": self._ratio(source_from_virtual, served),
+                "source_flow_reconciliation_error": self._clean(
+                    source_from_bases + source_from_virtual - served
+                ),
+                "virtual_flow_reconciliation_error": self._clean(
+                    state_entries - source_from_virtual
+                ),
+                "mean_response_minutes_from_base": 60.0 * base_idle_population / source_from_bases if source_from_bases > self.TOL else None,
+                "mean_response_minutes_from_virtual_state": 60.0 * virtual_idle_population / source_from_virtual if source_from_virtual > self.TOL else None,
+            },
+            "locker_queue": {
+                "total_workload_per_hour": total_lambda,
+                "queue_population_formula_total": total_queue_population,
+                "conic_epigraph_xi_total": total_locker_xi,
+                "workload_weighted_mean_handling_formula_minutes": (
+                    60.0 * total_queue_population / total_lambda
+                    if total_lambda > self.TOL
+                    else None
+                ),
+                "maximum_utilization": max_util,
+                "maximum_mean_handling_formula_minutes": max_wait,
+                "handling_time_limit_minutes": 60.0 * self.inst.config.max_locker_time_hours,
+            },
+            "artifacts": {
+                "summary": "summary.json",
+                "open_facilities": "open_facilities.csv",
+                "corridor_flows": "corridor_flows.csv",
+                "od_service": "od_service.csv",
+                "locker_metrics": "locker_metrics.csv",
+                "figures": [
+                    "network_map",
+                    "od_service_map",
+                    "cost_breakdown",
+                    "demand_funnel",
+                    "locker_utilization",
+                ],
+            },
+        }
+
+    @staticmethod
+    def _fmt(value: float | None, digits: int = 2) -> str:
+        return "N/A" if value is None else f"{value:,.{digits}f}"
+
+    @staticmethod
+    def _pct(value: float | None) -> str:
+        return "N/A" if value is None else f"{100.0 * value:.2f}%"
+
+    def print_summary(self) -> None:
+        """Print the decision and operating metrics needed to audit a run."""
+
+        solver = self.summary["solver"]
+        baseline = self.summary["all_rider_baseline"]
+        funnel = self.summary["demand_funnel_orders_per_hour"]
+        facilities = self.summary["facilities"]
+        availability = self.summary["discrete_availability"]
+        fleet = self.summary["fleet"]
+        flight = self.summary["flight_operations"]
+        chaining = self.summary["chaining"]
+        queue = self.summary["locker_queue"]
+        instance = self.summary["instance"]
+        model_size = self.summary["model_size"]
+
+        print("\n" + "=" * 72)
+        status_text = solver["status_name"]
+        if solver["status_name"] == "OPTIMAL":
+            status_text += (
+                f" within requested {100.0 * solver['requested_mip_gap']:.2f}% MIP tolerance"
+            )
+        print(f"MLND {self.mode} SOLUTION  |  {status_text}  |  {solver['runtime_seconds']:.2f}s")
+        print("=" * 72)
+        print(
+            f"Input: {instance['data_source']}  |  OD={instance['markets']:,}, "
+            f"OD nodes={instance['od_nodes']:,}, endogenous H-H={instance['endogenous_corridors']:,}  |  "
+            f"candidates L/H/E={instance['candidate_bases']}/{instance['candidate_lockers']}/"
+            f"{instance['candidate_swap_stations']}"
+        )
+        print(
+            f"Model size: {model_size['variables']:,} vars "
+            f"({model_size['binary_variables']:,} binary, "
+            f"{model_size['general_integer_variables']:,} general integer), "
+            f"{model_size['linear_constraints']:,} linear + "
+            f"{model_size['quadratic_constraints']:,} quadratic constraints"
+        )
+        algorithm = solver["algorithm"]
+        print(
+            "Algorithm: demand-aware perspective branch-and-cut  |  "
+            f"static rows={sum(algorithm['static_valid_inequality_counts'].values()):,}, "
+            f"root user cuts={sum(algorithm['root_user_cut_counts'].values()):,} "
+            f"in {algorithm['root_cut_rounds']} rounds, "
+            f"local branching={algorithm['local_branching_runtime_seconds']:.2f}s"
+        )
+        print(
+            f"Objective: {self._fmt(solver['objective_cost_per_hour'])} CNY/h  "
+            f"bound={self._fmt(solver['objective_bound'])}  gap={self._pct(solver['mip_gap'])}"
+        )
+        print(
+            f"All-rider baseline: {self._fmt(baseline['cost_per_hour'])} CNY/h  |  "
+            f"saving: {self._fmt(baseline['savings_per_hour'])} CNY/h "
+            f"({self._pct(baseline['savings_fraction'])})"
+        )
+        print("Cost breakdown (CNY/h):")
+        for name, value in self.costs.items():
+            print(f"  {name:<20} {value:>12,.2f}")
+
+        print("Demand funnel (orders/h):")
+        print(
+            f"  demand={funnel['total_demand']:,.2f}  offered={funnel['total_drone_offered']:,.2f}  "
+            f"served={funnel['total_drone_served']:,.2f}  fallback={funnel['direct_rider_fallback']:,.2f}"
+        )
+        print(
+            f"  served locker/home={funnel['locker_served']:,.2f}/{funnel['home_served']:,.2f}  "
+            f"demand service={self._pct(funnel['drone_service_fraction_of_demand'])}  "
+            f"offered realization={self._pct(funnel['realization_fraction_of_offered'])}"
+        )
+
+        opened = facilities["open"]
+        candidates = facilities["candidates"]
+        print(
+            "Open facilities: "
+            f"L {opened['bases']}/{candidates['bases']}, "
+            f"H {opened['lockers']}/{candidates['lockers']}, "
+            f"E {opened['swap_stations']}/{candidates['swap_stations']}  |  "
+            f"active connections={facilities['active_connections']}"
+        )
+        print(
+            f"Locker capacity levels: {facilities['locker_capacity_level_counts'] or '{}'}  |  "
+            f"selected discrete rho: {availability['selected_state_count_by_rho'] or '{}'}"
+        )
+        if self.facility_rows:
+            print("Opened-site decisions (rho applies to base idle or locker virtual state):")
+            for row in self.facility_rows:
+                rho = row["rho"]
+                rho_text = "N/A" if rho is None else f"{rho:.2f} (level {row['rho_level']})"
+                detail = f"rho={rho_text}"
+                if row["type"] == "locker":
+                    detail += f", capacity={row['capacity_level']}"
+                print(f"  {row['facility']} [{row['type']}]  {detail}")
         else:
-            plt.show()
+            print("Opened-site decisions: none; selected rho: none")
+        if self.summary["courier_only_incumbent"]:
+            print(
+                "WARNING: incumbent uses no realized drone service; cost equals the all-rider "
+                "counterfactual when no positive-cost facilities are opened."
+            )
+        print(
+            f"Exact candidate screening: {self.summary['instance']['screening_is_exact']}  |  "
+            f"active virtual states={availability['active_virtual_state_count']}"
+        )
+        print(
+            f"Fleet gamma={fleet['gamma_drones']:.0f}: idle L={fleet['base_idle_drones']:.2f}, "
+            f"idle S={fleet['virtual_idle_drones']:.2f}, "
+            f"locker conic-xi={fleet['locker_conic_epigraph_xi']:.2f}, "
+            f"flying={fleet['transit_drones']:.2f} ({self._pct(fleet['flying_fraction_of_fleet'])})"
+        )
+        print(
+            f"Physical flow: loaded={flight['loaded_flow_per_hour']:.2f}, "
+            f"empty={flight['empty_flow_per_hour']:.2f} orders/h-equivalent; "
+            f"loaded direct/swap={flight['loaded_direct_flow_per_hour']:.2f}/"
+            f"{flight['loaded_swap_flow_per_hour']:.2f} "
+            f"(swap {self._pct(flight['loaded_swap_share'])})"
+        )
+        print(
+            f"Chaining: base-origin={chaining['base_origin_orders_per_hour']:.2f}, "
+            f"virtual-origin={chaining['virtual_state_origin_orders_per_hour']:.2f} orders/h "
+            f"({self._pct(chaining['chaining_order_fraction'])})"
+        )
+        print(
+            f"Locker queue: workload={queue['total_workload_per_hour']:.2f}/h, "
+            f"weighted handling={self._fmt(queue['workload_weighted_mean_handling_formula_minutes'])} min, "
+            f"max handling={queue['maximum_mean_handling_formula_minutes']:.2f} min, "
+            f"max utilization={self._pct(queue['maximum_utilization'])}"
+        )
+        print(
+            f"  M/M/1 queue population={queue['queue_population_formula_total']:.3f}; "
+            f"conic epigraph xi={queue['conic_epigraph_xi_total']:.3f} (not treated as exact queue length)"
+        )
+        print("=" * 72 + "\n")
+
+    @staticmethod
+    def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: Iterable[str]) -> None:
+        fields = list(fieldnames)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    @staticmethod
+    def _save_figure(fig: plt.Figure, stem: Path) -> None:
+        fig.savefig(stem.with_suffix(".png"), dpi=220, bbox_inches="tight")
+        fig.savefig(stem.with_suffix(".svg"), bbox_inches="tight")
+        plt.close(fig)
+
+    def _plot_network_map(self, output_dir: Path) -> None:
+        fig, ax = plt.subplots(figsize=(11, 9))
+
+        endpoint_demand: dict[str, float] = defaultdict(float)
+        for (origin, destination), rate in self.inst.h_od.items():
+            endpoint_demand[origin] += rate
+            endpoint_demand[destination] += rate
+        demand_nodes = [node for node in sorted(endpoint_demand) if endpoint_demand[node] > self.TOL]
+        max_endpoint_demand = max(
+            (endpoint_demand[node] for node in demand_nodes),
+            default=1.0,
+        )
+        if demand_nodes:
+            ax.scatter(
+                [self.inst.coords[node][0] for node in demand_nodes],
+                [self.inst.coords[node][1] for node in demand_nodes],
+                s=[
+                    8.0 + 62.0 * math.sqrt(endpoint_demand[node] / max_endpoint_demand)
+                    for node in demand_nodes
+                ],
+                color="#9ca3af",
+                alpha=0.20,
+                linewidths=0,
+                label="OD endpoint demand (orders/h)",
+                zorder=0,
+            )
+
+        station_styles = {
+            "L": (self.inst.L, "s", "#d62728", "base"),
+            "H": (self.inst.H, "o", "#1f77b4", "locker"),
+            "E": (self.inst.E, "D", "#2ca02c", "swap"),
+        }
+        for code, (nodes, marker, _color, label) in station_styles.items():
+            if not nodes:
+                continue
+            ax.scatter(
+                [self.inst.coords[node][0] for node in nodes],
+                [self.inst.coords[node][1] for node in nodes],
+                marker=marker,
+                s=42,
+                facecolors="none",
+                edgecolors="#8b8f94",
+                linewidths=0.9,
+                alpha=0.62,
+                label=f"Candidate {label} {code}",
+                zorder=1,
+            )
+
+        max_flow = max(self.varphi.values(), default=0.0)
+        flow_labeled = False
+        for (u, v, option), flow in self.varphi.items():
+            if flow <= self.TOL:
+                continue
+            points = [self.inst.coords[u], self.inst.coords[v]]
+            if option != DIRECT_ROUTE:
+                points.insert(1, self.inst.coords[option])
+            width = 0.7 + 4.3 * math.sqrt(flow / max_flow) if max_flow > self.TOL else 0.8
+            ax.plot(
+                [point[0] for point in points],
+                [point[1] for point in points],
+                color="#374151",
+                linestyle="-",
+                linewidth=width,
+                alpha=0.64,
+                solid_capstyle="round",
+                label="Physical service flow (orders/h)" if not flow_labeled else None,
+                zorder=2,
+            )
+            flow_labeled = True
+        if not flow_labeled:
+            ax.plot(
+                [],
+                [],
+                color="#374151",
+                linewidth=1.3,
+                label="Physical service flow (none)",
+            )
+
+        label_offsets = ((3, 3), (3, -3), (-3, 3), (-3, -3))
+        label_index = 0
+        for code, (nodes, marker, color, label) in station_styles.items():
+            opened = [node for node in nodes if self.x.get(node, 0.0) > 0.5]
+            if opened:
+                ax.scatter(
+                    [self.inst.coords[node][0] for node in opened],
+                    [self.inst.coords[node][1] for node in opened],
+                    marker=marker,
+                    s=100,
+                    color=color,
+                    edgecolors="white",
+                    linewidths=0.8,
+                    label=f"Open {label} {code}",
+                    zorder=4,
+                )
+                for node in opened:
+                    x_coord, y_coord = self.inst.coords[node]
+                    if code == "L":
+                        rho = self.rho_by_idle.get(node)
+                    elif code == "H":
+                        rho = self.rho_by_idle.get(self.inst.h_to_s[node])
+                    else:
+                        continue
+                    if rho is None:
+                        continue
+                    rho_value = f"{rho:.2f}"[1:]
+                    text = f"{node}  ρ={rho_value}" if code == "L" else f"{node}  ρv={rho_value}"
+                    offset_x, offset_y = label_offsets[label_index % len(label_offsets)]
+                    label_index += 1
+                    ax.annotate(
+                        text,
+                        (x_coord, y_coord),
+                        xytext=(offset_x, offset_y),
+                        textcoords="offset points",
+                        ha="left" if offset_x > 0 else "right",
+                        va="bottom" if offset_y > 0 else "top",
+                        fontsize=6.5,
+                        color="#202124",
+                        bbox={
+                            "boxstyle": "round,pad=0.10",
+                            "facecolor": "white",
+                            "edgecolor": "none",
+                            "alpha": 0.82,
+                        },
+                        zorder=5,
+                    )
+
+        funnel = self.summary["demand_funnel_orders_per_hour"]
+        opened_counts = self.summary["facilities"]["open"]
+        selected_rhos = sorted(set(self.rho_by_idle.values()))
+        rho_text = ", ".join(f"{rho:.2f}" for rho in selected_rhos) or "none"
+        gap_text = "N/A" if self.gap is None else f"{100.0 * self.gap:.2f}%"
+        fig.suptitle(
+            f"MLND {self.mode}: optimized station network",
+            y=0.975,
+            fontsize=15,
+            fontweight="semibold",
+            color="#202124",
+        )
+        fig.text(
+            0.5,
+            0.925,
+            f"Open L/H/E = {opened_counts['bases']}/{opened_counts['lockers']}/"
+            f"{opened_counts['swap_stations']}  •  served = "
+            f"{funnel['total_drone_served']:,.2f} orders/h  •  gap = {gap_text}  •  "
+            f"selected rho levels = {rho_text}",
+            ha="center",
+            fontsize=9.5,
+            color="#4b5563",
+        )
+        ax.set_xlabel("x (km)")
+        ax.set_ylabel("y (km)")
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.grid(color="#9ca3af", linestyle="--", linewidth=0.55, alpha=0.24)
+        ax.set_axisbelow(True)
+        ax.legend(
+            loc="upper left",
+            fontsize=7.5,
+            ncol=2,
+            frameon=True,
+            framealpha=0.92,
+            facecolor="white",
+            edgecolor="#d1d5db",
+        )
+        fig.text(
+            0.5,
+            0.018,
+            f"Line width scales with physical flow in orders/hour; demand bubbles are hourly OD endpoint rates.  "
+            f"{self.data_granularity}",
+            ha="center",
+            fontsize=8,
+            color="#6b7280",
+        )
+        fig.tight_layout(rect=(0.0, 0.055, 1.0, 0.885))
+        self._save_figure(fig, output_dir / "network_map")
+
+    def _plot_od_service_map(self, output_dir: Path) -> None:
+        fig, ax = plt.subplots(figsize=(11, 9))
+        rows = [row for row in self.od_rows if row["demand_per_hour"] > self.TOL]
+        segments = [
+            [self.inst.coords[row["origin"]], self.inst.coords[row["destination"]]] for row in rows
+        ]
+        max_demand = max((row["demand_per_hour"] for row in rows), default=1.0)
+        service = [row["drone_service_rate"] for row in rows]
+        widths = [0.15 + 2.2 * math.sqrt(row["demand_per_hour"] / max_demand) for row in rows]
+        norm = colors.Normalize(vmin=0.0, vmax=1.0)
+        if segments:
+            collection = LineCollection(
+                segments,
+                cmap="cividis",
+                norm=norm,
+                linewidths=widths,
+                alpha=0.42,
+                zorder=1,
+            )
+            collection.set_array(service)
+            ax.add_collection(collection)
+        od_nodes = sorted(set(self.inst.N))
+        ax.scatter(
+            [self.inst.coords[n][0] for n in od_nodes],
+            [self.inst.coords[n][1] for n in od_nodes],
+            s=8,
+            color="#4b5563",
+            alpha=0.45,
+            label="OD grid nodes",
+            zorder=2,
+        )
+        open_lockers = [node for node in self.inst.H if self.x.get(node, 0.0) > 0.5]
+        if open_lockers:
+            ax.scatter(
+                [self.inst.coords[n][0] for n in open_lockers],
+                [self.inst.coords[n][1] for n in open_lockers],
+                s=70,
+                marker="o",
+                color="#2563eb",
+                edgecolor="white",
+                linewidth=0.7,
+                label="Open lockers",
+                zorder=3,
+            )
+        scalar = cm.ScalarMappable(norm=norm, cmap="cividis")
+        scalar.set_array([])
+        fig.colorbar(scalar, ax=ax, label="Drone-served fraction of OD demand")
+        ax.set_title(
+            f"MLND {self.mode}: OD demand and realized drone service (orders/h)\n"
+            f"{self.data_granularity}"
+        )
+        ax.set_xlabel("x (km)")
+        ax.set_ylabel("y (km)")
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.grid(alpha=0.15)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        self._save_figure(fig, output_dir / "od_service_map")
+
+    def _plot_cost_breakdown(self, output_dir: Path) -> None:
+        fig, ax = plt.subplots(figsize=(11, 6))
+        labels = [name.replace("_", "\n") for name in self.costs]
+        values = list(self.costs.values())
+        palette = [
+            "#cbd5e1",
+            "#94a3b8",
+            "#64748b",
+            "#dbeafe",
+            "#bfdbfe",
+            "#93c5fd",
+            "#3b82f6",
+            "#1d4ed8",
+        ]
+        bars = ax.bar(labels, values, color=palette[: len(values)])
+        baseline = self.summary["all_rider_baseline"]["cost_per_hour"]
+        ax.axhline(baseline, color="#c2410c", linestyle="--", linewidth=1.5, label="All-rider baseline")
+        ax.bar_label(bars, labels=[f"{value:,.0f}" for value in values], padding=3, fontsize=8)
+        ax.set_ylabel("CNY per hour")
+        ax.set_title(
+            f"Cost breakdown — total {self.cost_total:,.2f} CNY/h\n"
+            f"{self.data_granularity}"
+        )
+        ax.grid(axis="y", alpha=0.2)
+        ax.legend()
+        fig.tight_layout()
+        self._save_figure(fig, output_dir / "cost_breakdown")
+
+    def _plot_demand_funnel(self, output_dir: Path) -> None:
+        funnel = self.summary["demand_funnel_orders_per_hour"]
+        total = funnel["total_demand"]
+        values = [total, funnel["total_drone_offered"], funnel["total_drone_served"]]
+        labels = ["All OD demand", "Offered to drone network", "Realized drone service"]
+        fig, ax = plt.subplots(figsize=(9, 5.5))
+        y_pos = list(range(len(labels)))
+        ax.barh(y_pos, [total] * len(labels), color="#e5e7eb", height=0.68)
+        bars = ax.barh(y_pos, values, color=["#64748b", "#60a5fa", "#1d4ed8"], height=0.68)
+        ax.set_yticks(y_pos, labels)
+        ax.invert_yaxis()
+        ax.bar_label(bars, labels=[f"{value:,.2f}/h" for value in values], padding=5)
+        ax.set_xlim(0.0, max(total * 1.18, 1.0))
+        ax.set_xlabel("Orders per hour")
+        ax.set_title(
+            f"Demand funnel (orders/h): locker/home served "
+            f"{funnel['locker_served']:,.2f} / {funnel['home_served']:,.2f}\n"
+            f"{self.data_granularity}"
+        )
+        ax.grid(axis="x", alpha=0.2)
+        fig.tight_layout()
+        self._save_figure(fig, output_dir / "demand_funnel")
+
+    def _plot_locker_utilization(self, output_dir: Path) -> None:
+        rows = [row for row in self.locker_rows if row["open"]]
+        fig, ax = plt.subplots(figsize=(max(9, 0.42 * len(rows) + 4), 6))
+        fig.suptitle(
+            "Open smart-locker utilization and M/M/1 handling time",
+            y=0.97,
+            fontweight="semibold",
+        )
+        fig.text(
+            0.5,
+            0.915,
+            f"Rates in orders/hour; {self.data_granularity}",
+            ha="center",
+            color="#475569",
+            fontsize=9,
+        )
+        if not rows:
+            ax.text(0.5, 0.5, "No open smart lockers", ha="center", va="center", fontsize=15)
+            ax.set_axis_off()
+        else:
+            names = [row["locker"] for row in rows]
+            utilization = [row["utilization"] or 0.0 for row in rows]
+            waiting = [row["mean_handling_time_formula_minutes"] for row in rows]
+            x_pos = list(range(len(rows)))
+            blue_scale = plt.get_cmap("Blues")
+            bars = ax.bar(
+                x_pos,
+                utilization,
+                color=[blue_scale(0.42 + 0.48 * min(value, 1.0)) for value in utilization],
+            )
+            ax.set_xticks(x_pos, names, rotation=55, ha="right")
+            ax.set_ylabel("Locker workload / service rate")
+            ax.set_ylim(0.0, max(1.02, max(utilization, default=0.0) * 1.15))
+            ax.grid(axis="y", alpha=0.2)
+            wait_ax = ax.twinx()
+            wait_ax.plot(x_pos, waiting, color="#111827", marker="o", linewidth=1.2, label="Mean handling time")
+            wait_ax.axhline(
+                60.0 * self.inst.config.max_locker_time_hours,
+                color="#c2410c",
+                linestyle="--",
+                label="Handling-time limit",
+            )
+            wait_ax.set_ylabel("Mean handling time (minutes)")
+            wait_ax.set_ylim(bottom=0.0)
+            wait_ax.legend(loc="upper right", fontsize=8)
+            ax.bar_label(bars, labels=[f"{100 * value:.0f}%" for value in utilization], padding=2, fontsize=7)
+        fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.88))
+        self._save_figure(fig, output_dir / "locker_utilization")
+
+    def write_all(self, output_dir: str) -> dict[str, Any]:
+        """Write the complete result package and return its summary dictionary."""
+
+        destination = Path(output_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        with (destination / "summary.json").open("w", encoding="utf-8") as handle:
+            json.dump(self.summary, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+
+        self._write_csv(
+            destination / "open_facilities.csv",
+            self.facility_rows,
+            (
+                "facility",
+                "type",
+                "x_km",
+                "y_km",
+                "fixed_cost_per_hour",
+                "idle_state",
+                "rho_level",
+                "rho",
+                "capacity_level",
+                "locker_service_rate_per_hour",
+                "locker_workload_per_hour",
+                "incident_physical_flow_per_hour",
+                "swap_throughput_per_hour",
+                "active_incident_connections",
+            ),
+        )
+        self._write_csv(destination / "corridor_flows.csv", self.corridor_rows, self.corridor_rows[0].keys() if self.corridor_rows else (
+            "origin_locker", "destination_locker", "connection_open", "model_offered_h_per_hour",
+            "locker_offered_per_hour", "home_offered_per_hour", "total_offered_per_hour",
+            "locker_served_per_hour", "home_served_per_hour", "total_served_per_hour",
+            "loaded_psi_per_hour", "direct_flow_per_hour", "swap_flow_per_hour", "swap_share", "flight_km_per_hour",
+        ))
+        self._write_csv(destination / "od_service.csv", self.od_rows, self.od_rows[0].keys() if self.od_rows else ())
+        self._write_csv(destination / "locker_metrics.csv", self.locker_rows, self.locker_rows[0].keys() if self.locker_rows else ())
+
+        self._plot_network_map(destination)
+        self._plot_od_service_map(destination)
+        self._plot_cost_breakdown(destination)
+        self._plot_demand_funnel(destination)
+        self._plot_locker_utilization(destination)
+        return self.summary

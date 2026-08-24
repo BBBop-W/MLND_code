@@ -1,95 +1,56 @@
+"""Loader for the canonical OD/site instance shared by both raw-data sources."""
+
+from __future__ import annotations
+
 import csv
-import numpy as np
-from .instance import Instance
-from .. import config
+import json
+import math
+import os
+
+from src.config import ModelConfig
+from src.data_processor.instance import Instance
+
 
 class DataLoader:
-    def __init__(self):
-        pass
+    def load_instance_dir(
+        self,
+        instance_dir: str,
+        model_config: ModelConfig | None = None,
+        demand_scale: float = 1.0,
+    ) -> Instance:
+        if not math.isfinite(demand_scale) or demand_scale <= 0:
+            raise ValueError("demand_scale must be positive and finite")
+        with open(os.path.join(instance_dir, "metadata.json"), encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        metadata["instance_dir"] = os.path.abspath(instance_dir)
+        metadata["demand_scale"] = demand_scale
 
-    def load_instance_dir(self, instance_dir: str, period_id: str = None) -> Instance:
-        """
-        Load an instance directory with shared locations and period-specific orders.
-
-        If period_id is omitted, this keeps backward compatibility by reading
-        <instance_dir>/orders.csv. If period_id is provided, orders are read
-        from <instance_dir>/orders/{period_id}.csv.
-        """
-        import os
-
-        locations_path = os.path.join(instance_dir, "locations.csv")
-        if period_id is None:
-            orders_path = os.path.join(instance_dir, "orders.csv")
-        else:
-            orders_path = os.path.join(instance_dir, "orders", f"{period_id}.csv")
-        return self.load_instance(locations_path, orders_path)
-
-    def load_instance(self, locations_path: str, orders_path: str) -> Instance:
-        """
-        Reads locations.csv and orders.csv to populate and return an Instance object.
-        """
-        inst = Instance()
-        
-        # 1. Read locations
-        with open(locations_path, mode='r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                node_id = row["index"]
+        instance = Instance(metadata=metadata, config=model_config or ModelConfig())
+        with open(os.path.join(instance_dir, "sites.csv"), newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                node = row["site_id"]
                 node_type = row["type"]
-                x = float(row["x"])
-                y = float(row["y"])
-
-                if not np.isfinite(x) or not np.isfinite(y):
-                    raise ValueError(f"Invalid coordinate for node {node_id}: ({x}, {y})")
-                
-                inst.coords[node_id] = (x, y)
-                
+                instance.coords[node] = (float(row["x_km"]), float(row["y_km"]))
+                instance.activity_rate[node] = float(row["activity_rate"])
                 if node_type == "L":
-                    inst.L.append(node_id)
-                    inst.f[node_id] = config.COST_BASE
-                elif node_type == "H" or node_type == "P" or node_type == "D":
-                    inst.H.append(node_id)
-                    # Hub cost/service level is selected by binary z[i,c] in the model,
-                    # so keep scalar placeholders here to avoid list-valued node attributes.
-                    inst.f[node_id] = 0.0
-                    inst.mu[node_id] = 0.0
-                
+                    instance.L.append(node)
+                elif node_type == "H":
+                    instance.H.append(node)
                 elif node_type == "E":
-                    inst.E.append(node_id)
-                    inst.f[node_id] = config.COST_SWAPPING
-                    inst.mu[node_id] = config.MU_SWAPPING
-                    
-        # 2. Hub-side holding pools (linked to hubs, co-located physically).
-        inst.build_holding_pools()
-            
-        # 3. Compute Distances and Times
-        if config.DRONE_SPEED_KMPH <= 0:
-            raise ValueError("DRONE_SPEED_KMPH must be positive for consistent time conversion.")
+                    instance.E.append(node)
+                else:
+                    raise ValueError(f"unknown site type {node_type!r}")
 
-        all_physical_nodes = inst.L + inst.H + inst.S + inst.E
-        for u in all_physical_nodes:
-            for v in all_physical_nodes:
-                dist = np.sqrt((inst.coords[u][0] - inst.coords[v][0])**2 + 
-                            (inst.coords[u][1] - inst.coords[v][1])**2)
-                inst.dist_matrix[(u, v)] = dist
-                # Distance in km, time in hour.
-                inst.time_matrix[(u, v)] = dist / config.DRONE_SPEED_KMPH
-                
-        # 4. Read orders
-        with open(orders_path, mode='r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                p = row["start_node"]
-                d = row["end_node"]
-                demand = float(row["demand"])
+        with open(os.path.join(instance_dir, "od_nodes.csv"), newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                node = row["node_id"]
+                instance.N.append(node)
+                instance.coords[node] = (float(row["x_km"]), float(row["y_km"]))
 
-                if demand < 0:
-                    raise ValueError(f"Negative demand found for ({p}, {d}): {demand}")
+        with open(os.path.join(instance_dir, "od_demand.csv"), newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                market = (row["origin_node"], row["destination_node"])
+                instance.h_od[market] = float(row["lambda_per_hour"]) * demand_scale
+                instance.order_count[market] = int(row["order_count"])
 
-                inst.h[(p, d)] = demand
-                inst.A_HH.add((p, d))
-                
-        # 5. Parse valid arcs and structures for Gurobi
-        inst.parse_for_gurobi()
-        
-        return inst
+        return instance.build()
