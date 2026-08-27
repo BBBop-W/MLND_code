@@ -7,6 +7,8 @@ dependencies = [
   "gurobipy>=13.0",
   "matplotlib>=3.8",
   "numpy>=1.26",
+  "Pillow>=10.0",
+  "requests>=2.31",
   "scikit-learn>=1.4",
 ]
 
