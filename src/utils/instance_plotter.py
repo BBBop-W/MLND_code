@@ -1,4 +1,4 @@
-"""Static study-window plots for canonical OD-aware MLND instances."""
+"""Static study-window plots for canonical unified-MLND instances."""
 
 from __future__ import annotations
 
@@ -18,6 +18,28 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
+
+from src.model_contract import FORMULATION_ID as RESULT_FORMULATION_ID
+from src.model_contract import RESULT_SCHEMA_VERSION
+
+
+def _require_current_summary_contract(summary: object) -> None:
+    """Reject foreign or numerically coerced result-schema declarations."""
+
+    if not isinstance(summary, dict):
+        raise ValueError("solution layout summary must contain a JSON object")
+    schema_version = summary.get("schema_version")
+    formulation_id = summary.get("formulation_id")
+    if (
+        type(schema_version) is not int
+        or schema_version != RESULT_SCHEMA_VERSION
+        or not isinstance(formulation_id, str)
+        or formulation_id != RESULT_FORMULATION_ID
+    ):
+        raise ValueError(
+            f"solution layout requires summary schema_version={RESULT_SCHEMA_VERSION} and "
+            f"formulation_id={RESULT_FORMULATION_ID}; legacy results cannot be mixed"
+        )
 
 
 @dataclass(frozen=True)
@@ -230,15 +252,22 @@ def plot_study_window(
     source_days = len(metadata.get("selected_days", ()))
     demand = float(metadata["total_demand_per_hour"])
     candidate_count = site_counts["H"]
+    source = str(metadata.get("source", "instance"))
+    source_label = {
+        "nanshan": "Meituan Shenzhen Nanshan",
+        "tsl": "TSL",
+    }.get(source.casefold(), source.replace("_", " ").title())
+    window_size = 2.0 * half
     fig.suptitle(
-        f"Meituan Shenzhen Nanshan candidate sites (H{candidate_count})",
+        f"{source_label} candidate sites (H{candidate_count})",
         y=0.975,
         fontsize=15,
         fontweight="normal",
         color="#111111",
     )
     ax.set_title(
-        f"16 × 16 km local window · {demand_start:02d}:00–{demand_end:02d}:00 · "
+        f"{window_size:g} × {window_size:g} km local window · "
+        f"{demand_start:02d}:00–{demand_end:02d}:00 · "
         f"averaged over {source_days} source days · total demand {demand:,.1f} orders/hour",
         fontsize=9.5,
         color="#555555",
@@ -292,6 +321,7 @@ def plot_solution_window(
 
     with (result_root / "summary.json").open(encoding="utf-8") as handle:
         summary = json.load(handle)
+    _require_current_summary_contract(summary)
     with (result_root / "open_facilities.csv").open(
         newline="", encoding="utf-8"
     ) as handle:
@@ -543,11 +573,20 @@ def plot_solution_window(
 
     mode = str(summary["mode"])
     funnel = summary["demand_funnel_orders_per_hour"]
-    served = float(funnel["total_drone_served"])
+    realized = float(funnel["total_drone_realized"])
     baseline = summary["all_rider_baseline"]
     saving = float(baseline["savings_per_hour"])
-    saving_percent = 100.0 * float(baseline["savings_fraction"])
-    gap = float(summary["mip_gap"])
+    saving_fraction = baseline["savings_fraction"]
+    saving_percent = (
+        100.0 * float(saving_fraction) if saving_fraction is not None else None
+    )
+    gap = summary["mip_gap"]
+    saving_text = (
+        f"{saving:,.1f} CNY/hour ({saving_percent:.2f}%)"
+        if saving_percent is not None
+        else f"{saving:,.1f} CNY/hour"
+    )
+    gap_text = f"{float(gap):.2%}" if gap is not None else "N/A"
     fig.suptitle(
         f"Meituan Shenzhen Nanshan opened-station layout — MLND {mode}",
         y=0.976,
@@ -557,9 +596,9 @@ def plot_solution_window(
     )
     ax.set_title(
         f"Open L/H/E = {open_counts['base']}/{open_counts['locker']}/{open_counts['swap']}"
-        f"  ·  served = {served:,.1f} orders/hour"
-        f"  ·  saving = {saving:,.1f} CNY/hour ({saving_percent:.2f}%)"
-        f"  ·  MIP gap = {gap:.2%}",
+        f"  ·  realized = {realized:,.1f} orders/hour"
+        f"  ·  saving = {saving_text}"
+        f"  ·  MIP gap = {gap_text}",
         fontsize=9.4,
         color="#555555",
         pad=9,
@@ -598,7 +637,9 @@ def plot_solution_window(
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Plot a canonical MLND OD study window")
+    parser = argparse.ArgumentParser(
+        description="Plot a canonical MLND OD study window"
+    )
     parser.add_argument("instance_dir")
     parser.add_argument("--output-stem", default=None)
     parser.add_argument(

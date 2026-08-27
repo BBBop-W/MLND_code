@@ -16,6 +16,7 @@ from typing import Iterator
 from zoneinfo import ZoneInfo
 
 import numpy as np
+
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
 import sklearn
 from sklearn.cluster import KMeans
@@ -90,7 +91,9 @@ class DataGenerator:
         adapter = ADAPTERS[config.source]()
         requested_days = tuple(sorted(set(config.dates)))
         available_days, center = self._scan_center(adapter, config, set(requested_days))
-        selected_days = requested_days if requested_days else tuple(sorted(available_days))
+        selected_days = (
+            requested_days if requested_days else tuple(sorted(available_days))
+        )
         selected_day_set = set(selected_days)
         projection = _Projection(*center)
 
@@ -113,19 +116,28 @@ class DataGenerator:
                 continue
             ox, oy = projection.project(order.pickup_lon, order.pickup_lat)
             dx, dy = projection.project(order.dropoff_lon, order.dropoff_lat)
-            if not _inside_square(ox, oy, config.map_half_size_km) or not _inside_square(
-                dx, dy, config.map_half_size_km
-            ):
+            if not _inside_square(
+                ox, oy, config.map_half_size_km
+            ) or not _inside_square(dx, dy, config.map_half_size_km):
                 continue
 
-            if _in_hour_window(order.hour, config.candidate_hour_start, config.candidate_hour_end):
+            if _in_hour_window(
+                order.hour, config.candidate_hour_start, config.candidate_hour_end
+            ):
                 candidate_orders += 1
                 _accumulate(site_activity, ox, oy, config.site_grid_km)
                 _accumulate(site_activity, dx, dy, config.site_grid_km)
                 _accumulate(pickup_activity, ox, oy, config.site_grid_km)
-                _accumulate(midpoint_activity, (ox + dx) / 2.0, (oy + dy) / 2.0, config.site_grid_km)
+                _accumulate(
+                    midpoint_activity,
+                    (ox + dx) / 2.0,
+                    (oy + dy) / 2.0,
+                    config.site_grid_km,
+                )
 
-            if _in_hour_window(order.hour, config.demand_hour_start, config.demand_hour_end):
+            if _in_hour_window(
+                order.hour, config.demand_hour_start, config.demand_hour_end
+            ):
                 demand_orders += 1
                 o_cell = _accumulate(origin_nodes, ox, oy, config.od_grid_km)
                 d_cell = _accumulate(destination_nodes, dx, dy, config.od_grid_km)
@@ -143,7 +155,9 @@ class DataGenerator:
 
         output_dir = Path(config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        self._write_sites(output_dir / "sites.csv", lockers, bases, swaps, candidate_exposure)
+        self._write_sites(
+            output_dir / "sites.csv", lockers, bases, swaps, candidate_exposure
+        )
         origin_ids, destination_ids = self._write_od_nodes(
             output_dir / "od_nodes.csv", origin_nodes, destination_nodes
         )
@@ -157,7 +171,12 @@ class DataGenerator:
             demand_exposure,
         )
         self._write_period(
-            output_dir / "periods.csv", config, selected_days, demand_exposure, demand_orders, total_rate
+            output_dir / "periods.csv",
+            config,
+            selected_days,
+            demand_exposure,
+            demand_orders,
+            total_rate,
         )
         normalized_data_config = to_dict(config)
         normalized_data_config["dates"] = list(selected_days)
@@ -167,15 +186,21 @@ class DataGenerator:
             "raw_path": os.path.abspath(config.raw_path),
             "raw_file_size_bytes": os.path.getsize(config.raw_path),
             "raw_file_sha256": _sha256_file(config.raw_path),
-            "date_basis": "source_partition_dt" if config.source == "tsl" else "dt_seq_id",
-            "hour_basis": "Asia/Shanghai event timestamp" if config.source == "tsl" else "customer_pay_time",
+            "date_basis": "source_partition_dt"
+            if config.source == "tsl"
+            else "dt_seq_id",
+            "hour_basis": "Asia/Shanghai event timestamp"
+            if config.source == "tsl"
+            else "customer_pay_time",
             "timestamp_date_mismatch_orders_all_days": timestamp_date_mismatch_orders,
             "coordinate_system": "local_km",
             "projection_center_lon": center[0],
             "projection_center_lat": center[1],
             "selected_days": list(selected_days),
             "source_orders_all_days": accepted_orders,
-            "accepted_waybills_all_days": accepted_orders if config.source == "tsl" else None,
+            "accepted_waybills_all_days": accepted_orders
+            if config.source == "tsl"
+            else None,
             "candidate_orders_in_area": candidate_orders,
             "demand_orders_in_area": demand_orders,
             "candidate_exposure_hours": candidate_exposure,
@@ -221,12 +246,18 @@ class DataGenerator:
                 days.add(order.day_id)
                 if requested_days and order.day_id not in requested_days:
                     continue
-                if _in_hour_window(order.hour, config.candidate_hour_start, config.candidate_hour_end):
+                if _in_hour_window(
+                    order.hour, config.candidate_hour_start, config.candidate_hour_end
+                ):
                     poi_count[order.poi_id] += 1
-                    poi_location.setdefault(order.poi_id, (order.pickup_lon, order.pickup_lat))
+                    poi_location.setdefault(
+                        order.poi_id, (order.pickup_lon, order.pickup_lat)
+                    )
             _validate_requested_days(requested_days, days)
             if not poi_count:
-                raise ValueError("no TSL candidate-period orders for the selected dates")
+                raise ValueError(
+                    "no TSL candidate-period orders for the selected dates"
+                )
             center_poi = max(poi_count, key=lambda poi: (poi_count[poi], poi))
             return days, poi_location[center_poi]
 
@@ -236,7 +267,9 @@ class DataGenerator:
             days.add(order.day_id)
             if requested_days and order.day_id not in requested_days:
                 continue
-            if not _in_hour_window(order.hour, config.candidate_hour_start, config.candidate_hour_end):
+            if not _in_hour_window(
+                order.hour, config.candidate_hour_start, config.candidate_hour_end
+            ):
                 continue
             min_lon = min(min_lon, order.pickup_lon, order.dropoff_lon)
             max_lon = max(max_lon, order.pickup_lon, order.dropoff_lon)
@@ -244,7 +277,9 @@ class DataGenerator:
             max_lat = max(max_lat, order.pickup_lat, order.dropoff_lat)
         _validate_requested_days(requested_days, days)
         if not math.isfinite(min_lon):
-            raise ValueError("no Nanshan candidate-period orders for the selected dates")
+            raise ValueError(
+                "no Nanshan candidate-period orders for the selected dates"
+            )
         return days, ((min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0)
 
     @staticmethod
@@ -260,7 +295,11 @@ class DataGenerator:
                 handle, fieldnames=["site_id", "type", "x_km", "y_km", "activity_rate"]
             )
             writer.writeheader()
-            for node_type, prefix, values in (("H", "H", lockers), ("L", "L", bases), ("E", "E", swaps)):
+            for node_type, prefix, values in (
+                ("H", "H", lockers),
+                ("L", "L", bases),
+                ("E", "E", swaps),
+            ):
                 for index, (x, y, weight) in enumerate(values, 1):
                     writer.writerow(
                         {
@@ -278,11 +317,16 @@ class DataGenerator:
         origins: dict[tuple[int, int], list[float]],
         destinations: dict[tuple[int, int], list[float]],
     ) -> tuple[dict[tuple[int, int], str], dict[tuple[int, int], str]]:
-        origin_ids = {cell: f"O{index:04d}" for index, cell in enumerate(sorted(origins), 1)}
-        destination_ids = {cell: f"D{index:04d}" for index, cell in enumerate(sorted(destinations), 1)}
+        origin_ids = {
+            cell: f"O{index:04d}" for index, cell in enumerate(sorted(origins), 1)
+        }
+        destination_ids = {
+            cell: f"D{index:04d}" for index, cell in enumerate(sorted(destinations), 1)
+        }
         with open(path, "w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(
-                handle, fieldnames=["node_id", "role", "x_km", "y_km", "raw_endpoint_count"]
+                handle,
+                fieldnames=["node_id", "role", "x_km", "y_km", "raw_endpoint_count"],
             )
             writer.writeheader()
             for role, values, identifiers in (
@@ -327,7 +371,9 @@ class DataGenerator:
                 ],
             )
             writer.writeheader()
-            for index, ((o_cell, d_cell), count) in enumerate(sorted(od_counts.items()), 1):
+            for index, ((o_cell, d_cell), count) in enumerate(
+                sorted(od_counts.items()), 1
+            ):
                 ox = origin_nodes[o_cell][1] / origin_nodes[o_cell][0]
                 oy = origin_nodes[o_cell][2] / origin_nodes[o_cell][0]
                 dx = destination_nodes[d_cell][1] / destination_nodes[d_cell][0]
@@ -421,12 +467,19 @@ def _weighted_medoids(
     if count == 0:
         return []
     points = np.asarray(
-        [(value[1] / value[0], value[2] / value[0]) for _, value in sorted(activity.items())],
+        [
+            (value[1] / value[0], value[2] / value[0])
+            for _, value in sorted(activity.items())
+        ],
         dtype=float,
     )
-    weights = np.asarray([value[0] for _, value in sorted(activity.items())], dtype=float)
+    weights = np.asarray(
+        [value[0] for _, value in sorted(activity.items())], dtype=float
+    )
     if len(points) < count:
-        raise ValueError(f"cannot select {count} sites from {len(points)} active grid cells")
+        raise ValueError(
+            f"cannot select {count} sites from {len(points)} active grid cells"
+        )
     clustering = KMeans(n_clusters=count, random_state=seed, n_init=20)
     labels = clustering.fit_predict(points, sample_weight=weights)
     medoids: list[tuple[float, float, float]] = []
@@ -442,7 +495,13 @@ def _weighted_medoids(
                 points[index, 1],
             ),
         )
-        medoids.append((float(points[best, 0]), float(points[best, 1]), float(weights[members].sum())))
+        medoids.append(
+            (
+                float(points[best, 0]),
+                float(points[best, 1]),
+                float(weights[members].sum()),
+            )
+        )
     medoids.sort(key=lambda item: (-item[2], item[0], item[1]))
     return medoids
 

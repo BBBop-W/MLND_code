@@ -1,8 +1,11 @@
-"""Collect and visualize OD-aware parameter-sweep results.
+"""Collect and visualize unified chi-epsilon-energy parameter-sweep results.
 
 Each scenario directory is expected to contain ``run_config.json`` and
-``MX/summary.json``.  The command-line entry point writes a consolidated CSV
-and a two-panel savings/service figure into the supplied results root.
+``MX/summary.json``. Only the current schema/formulation contract is accepted;
+every configured mode must have a summary bound to the same run signature, and
+any malformed or incomplete scenario aborts collection. The command-line entry
+point writes a consolidated CSV and a two-panel savings/service figure into the
+supplied results root.
 """
 
 from __future__ import annotations
@@ -12,9 +15,11 @@ import csv
 import json
 import math
 import os
-import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from src.model_contract import FORMULATION_ID as EXPECTED_FORMULATION_ID
+from src.model_contract import RESULT_SCHEMA_VERSION as EXPECTED_SCHEMA_VERSION
 
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -28,14 +33,29 @@ _COST_FIELDS = (
     "connection_cost_per_km_hour",
     "flight_cost_per_km",
     "drone_cost_per_hour",
-    "rider_base_cost",
-    "rider_cost_per_km",
+    "rider_initial_charge_cny",
+    "rider_included_distance_km",
+    "rider_incremental_cost_per_km",
     "road_distance_factor",
-    "locker_service_cost",
+    "feeder_rider_cost_factor",
+    "locker_pickup_cost_per_order",
+)
+
+_PHYSICAL_FIELDS = (
+    "battery_range_km",
+    "drone_speed_mps",
+    "drone_speed_kmph",
+    "usable_battery_time_hours",
+    "usable_battery_time_minutes",
+    "swap_service_time_hours",
 )
 
 _CSV_FIELDS = (
     "scenario",
+    "formulation_id",
+    "summary_schema_version",
+    "run_signature_sha256",
+    "implementation_sha256",
     "data_source",
     "instance_dir",
     "candidate_lockers",
@@ -43,6 +63,11 @@ _CSV_FIELDS = (
     "availability_levels",
     "locker_service_rates",
     "locker_capacity_costs",
+    "display_origin_choices",
+    "general_corridor_choices",
+    "max_walk_km",
+    "screening_is_exact",
+    *_PHYSICAL_FIELDS,
     *_COST_FIELDS,
     "solver_time_limit_seconds",
     "solver_target_mip_gap",
@@ -57,13 +82,15 @@ _CSV_FIELDS = (
     "courier_only_baseline_cny_per_hour",
     "cost_saving_cny_per_hour",
     "cost_saving_percent",
-    "drone_offered_per_hour",
-    "drone_served_per_hour",
-    "drone_served_rate",
-    "locker_offered_per_hour",
-    "locker_served_per_hour",
-    "home_offered_per_hour",
-    "home_served_per_hour",
+    "total_demand",
+    "total_drone_offered",
+    "total_drone_realized",
+    "locker_pickup",
+    "assisted_home",
+    "direct_courier_fallback",
+    "drone_realized_rate",
+    "service_accounting_error",
+    "maximum_energy_constraint_violation",
     "open_bases",
     "open_lockers",
     "open_swap_stations",
@@ -82,6 +109,8 @@ _JSON_FIELDS = {
     "selected_rho_by_facility",
     "selected_rho_by_idle_state",
 }
+
+_VALID_MODES = frozenset({"HD", "MX", "LO"})
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -119,6 +148,94 @@ def _load_json_object(path: Path) -> Mapping[str, Any]:
     return payload
 
 
+def _require_current_contract(payload: Mapping[str, Any], artifact: str) -> None:
+    """Reject legacy or foreign result contracts before reading their fields."""
+
+    schema_version = payload.get("schema_version")
+    formulation_id = payload.get("formulation_id")
+    if (
+        type(schema_version) is not int
+        or schema_version != EXPECTED_SCHEMA_VERSION
+        or not isinstance(formulation_id, str)
+        or formulation_id != EXPECTED_FORMULATION_ID
+    ):
+        raise ValueError(
+            f"legacy/incompatible {artifact}: expected "
+            f"schema_version={EXPECTED_SCHEMA_VERSION} and "
+            f"formulation_id={EXPECTED_FORMULATION_ID!r}; got "
+            f"schema_version={schema_version!r}, formulation_id={formulation_id!r}"
+        )
+
+
+def _require_current_summary(summary: Mapping[str, Any]) -> None:
+    _require_current_contract(summary, "summary")
+
+
+def _required_sha256(value: Any, field: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or value != value.lower():
+        raise ValueError(f"{field} must contain a 64-character lowercase sha256")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise ValueError(f"{field} must contain hexadecimal sha256 text") from exc
+    return value
+
+
+def _configured_modes(run_config: Mapping[str, Any]) -> tuple[str, ...]:
+    raw_modes = run_config.get("modes")
+    if not isinstance(raw_modes, list) or not raw_modes:
+        raise ValueError("run_config.modes must be a nonempty JSON array")
+    if any(not isinstance(mode, str) or not mode for mode in raw_modes):
+        raise ValueError("run_config.modes must contain nonempty mode names")
+    modes = tuple(raw_modes)
+    if len(set(modes)) != len(modes):
+        raise ValueError("run_config.modes must not contain duplicates")
+    invalid = sorted(set(modes) - _VALID_MODES)
+    if invalid:
+        raise ValueError(
+            "run_config.modes contains unsupported mode(s): " + ", ".join(invalid)
+        )
+    return modes
+
+
+def _require_result_binding(
+    run_config: Mapping[str, Any],
+    summary: Mapping[str, Any],
+    expected_mode: str,
+) -> str:
+    """Bind one summary to its directory and the declaring run configuration."""
+
+    _require_current_contract(run_config, "run_config")
+    _require_current_summary(summary)
+    configured_modes = _configured_modes(run_config)
+    if expected_mode not in configured_modes:
+        raise ValueError(
+            f"summary directory mode {expected_mode!r} is not declared in "
+            "run_config.modes"
+        )
+    summary_mode = summary.get("mode")
+    if not isinstance(summary_mode, str):
+        raise ValueError("summary is missing text field 'mode'")
+    if summary_mode != expected_mode:
+        raise ValueError(
+            f"summary.mode disagrees with directory: expected {expected_mode!r}, "
+            f"got {summary_mode!r}"
+        )
+    run_signature = _required_sha256(
+        run_config.get("run_signature_sha256"),
+        "run_config.run_signature_sha256",
+    )
+    summary_signature = _required_sha256(
+        summary.get("run_signature_sha256"),
+        "summary.run_signature_sha256",
+    )
+    if summary_signature != run_signature:
+        raise ValueError(
+            f"{expected_mode} summary run signature disagrees with run_config"
+        )
+    return run_signature
+
+
 def _scenario_directories(root: Path) -> list[Path]:
     candidates = {path.parent for path in root.rglob("run_config.json")}
     candidates.update(
@@ -132,6 +249,11 @@ def _scenario_directories(root: Path) -> list[Path]:
     )
 
 
+def _implementation_sha256(run_config: Mapping[str, Any]) -> str:
+    value = _mapping(run_config.get("implementation")).get("sha256")
+    return _required_sha256(value, "run_config.implementation.sha256")
+
+
 def _numeric_mapping(value: Any) -> dict[str, float]:
     result: dict[str, float] = {}
     for key, raw_value in _mapping(value).items():
@@ -141,7 +263,9 @@ def _numeric_mapping(value: Any) -> dict[str, float]:
     return dict(sorted(result.items()))
 
 
-def _rho_mappings(summary: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, float]]:
+def _rho_mappings(
+    summary: Mapping[str, Any],
+) -> tuple[dict[str, float], dict[str, float]]:
     discrete = _mapping(summary.get("discrete_availability"))
     idle = _numeric_mapping(
         summary.get("selected_rho_by_idle_state")
@@ -166,7 +290,10 @@ def _collect_scenario(
     run_config: Mapping[str, Any],
     summary: Mapping[str, Any],
 ) -> dict[str, object]:
+    run_signature = _require_result_binding(run_config, summary, "MX")
     model = _mapping(run_config.get("model"))
+    model_derived = _mapping(run_config.get("model_derived"))
+    choice = _mapping(model.get("choice"))
     solver_config = _mapping(run_config.get("solver"))
     solver_result = _mapping(summary.get("solver"))
     instance_config = _mapping(run_config.get("instance"))
@@ -176,8 +303,11 @@ def _collect_scenario(
     facilities = _mapping(summary.get("facilities"))
     open_facilities = _mapping(facilities.get("open"))
     funnel = _mapping(summary.get("demand_funnel_orders_per_hour"))
-    baseline_block = _mapping(summary.get("all_rider_baseline"))
+    baseline_block = _mapping(
+        summary.get("all_courier_baseline") or summary.get("all_rider_baseline")
+    )
     discrete = _mapping(summary.get("discrete_availability"))
+    energy = _mapping(summary.get("energy_balance"))
 
     objective = _first_number(
         summary.get("objective"),
@@ -187,14 +317,21 @@ def _collect_scenario(
     if objective is None:
         raise ValueError("summary has no finite objective")
 
-    bound = _first_number(summary.get("objective_bound"), solver_result.get("objective_bound"))
+    bound = _first_number(
+        summary.get("objective_bound"), solver_result.get("objective_bound")
+    )
     gap = _first_number(summary.get("mip_gap"), solver_result.get("mip_gap"))
-    runtime = _first_number(summary.get("runtime_seconds"), solver_result.get("runtime_seconds"))
+    runtime = _first_number(
+        summary.get("runtime_seconds"), solver_result.get("runtime_seconds")
+    )
     baseline = _first_number(
         summary.get("courier_only_baseline"),
+        summary.get("all_courier_baseline"),
         baseline_block.get("cost_per_hour"),
     )
-    saving = _first_number(summary.get("cost_saving"), baseline_block.get("savings_per_hour"))
+    saving = _first_number(
+        summary.get("cost_saving"), baseline_block.get("savings_per_hour")
+    )
     if saving is None and baseline is not None:
         saving = baseline - objective
     saving_percent = _first_number(summary.get("cost_saving_percent"))
@@ -202,14 +339,55 @@ def _collect_scenario(
         saving_percent = 100.0 * saving / baseline
 
     offered = _first_number(funnel.get("total_drone_offered"))
-    served = _first_number(funnel.get("total_drone_served"))
+    realized = _first_number(funnel.get("total_drone_realized"))
+    locker_pickup = _first_number(funnel.get("locker_pickup"))
+    assisted_home = _first_number(funnel.get("assisted_home"))
+    courier_fallback = _first_number(funnel.get("direct_courier_fallback"))
     total_demand = _first_number(funnel.get("total_demand"))
-    served_rate = _first_number(
-        summary.get("drone_served_rate"),
-        funnel.get("drone_service_fraction_of_demand"),
+    required_service = {
+        "total_demand": total_demand,
+        "total_drone_offered": offered,
+        "total_drone_realized": realized,
+        "locker_pickup": locker_pickup,
+        "assisted_home": assisted_home,
+        "direct_courier_fallback": courier_fallback,
+    }
+    missing_service = [
+        name for name, value in required_service.items() if value is None
+    ]
+    if missing_service:
+        raise ValueError(
+            "summary is missing finite unified service fields: "
+            + ", ".join(missing_service)
+        )
+    realized_rate = _first_number(
+        summary.get("drone_realized_rate"),
+        funnel.get("drone_realized_fraction_of_demand"),
     )
-    if served_rate is None and served is not None and total_demand not in (None, 0.0):
-        served_rate = served / total_demand
+    if (
+        realized_rate is None
+        and realized is not None
+        and total_demand not in (None, 0.0)
+    ):
+        realized_rate = realized / total_demand
+    service_error = None
+    if None not in (locker_pickup, assisted_home, courier_fallback, total_demand):
+        service_error = (
+            float(locker_pickup)
+            + float(assisted_home)
+            + float(courier_fallback)
+            - float(total_demand)
+        )
+    energy_violation = _first_number(energy.get("maximum_constraint_violation"))
+    if energy_violation is None:
+        raise ValueError(
+            "summary is missing finite maximum energy constraint violation"
+        )
+    if energy_violation > 2e-6:
+        raise ValueError(
+            "maximum energy constraint violation exceeds tolerance: "
+            f"{energy_violation:g}"
+        )
 
     rho_by_facility, rho_by_idle = _rho_mappings(summary)
     open_bases = _integer(summary.get("open_bases"))
@@ -224,15 +402,29 @@ def _collect_scenario(
 
     row: dict[str, object] = {
         "scenario": _scenario_name(root, scenario_dir),
+        "formulation_id": EXPECTED_FORMULATION_ID,
+        "summary_schema_version": EXPECTED_SCHEMA_VERSION,
+        "run_signature_sha256": run_signature,
+        "implementation_sha256": _implementation_sha256(run_config),
         "data_source": metadata.get("source", summary_instance.get("data_source", "")),
         "instance_dir": instance_config.get("directory", ""),
         "candidate_lockers": _integer(
-            summary_instance.get("candidate_lockers", data_config.get("candidate_count"))
+            summary_instance.get(
+                "candidate_lockers", data_config.get("candidate_count")
+            )
         ),
         "demand_scale": _first_number(run_config.get("demand_scale")),
         "availability_levels": model.get("availability_levels", []),
         "locker_service_rates": model.get("locker_service_rates", []),
         "locker_capacity_costs": model.get("locker_capacity_costs", []),
+        "display_origin_choices": model.get("display_origin_choices"),
+        "general_corridor_choices": model.get("general_corridor_choices"),
+        "max_walk_km": model.get("max_walk_km", choice.get("max_walk_km")),
+        "screening_is_exact": bool(
+            summary.get(
+                "screening_is_exact", run_config.get("screening_is_exact", False)
+            )
+        ),
         "solver_time_limit_seconds": _first_number(solver_config.get("time_limit")),
         "solver_target_mip_gap": _first_number(solver_config.get("mip_gap")),
         "solver_threads": _integer(solver_config.get("threads")),
@@ -246,38 +438,47 @@ def _collect_scenario(
         "courier_only_baseline_cny_per_hour": baseline,
         "cost_saving_cny_per_hour": saving,
         "cost_saving_percent": saving_percent,
-        "drone_offered_per_hour": offered,
-        "drone_served_per_hour": served,
-        "drone_served_rate": served_rate,
-        "locker_offered_per_hour": _first_number(funnel.get("locker_offered")),
-        "locker_served_per_hour": _first_number(funnel.get("locker_served")),
-        "home_offered_per_hour": _first_number(funnel.get("home_offered")),
-        "home_served_per_hour": _first_number(funnel.get("home_served")),
+        "total_demand": total_demand,
+        "total_drone_offered": offered,
+        "total_drone_realized": realized,
+        "locker_pickup": locker_pickup,
+        "assisted_home": assisted_home,
+        "direct_courier_fallback": courier_fallback,
+        "drone_realized_rate": realized_rate,
+        "service_accounting_error": service_error,
+        "maximum_energy_constraint_violation": energy_violation,
         "open_bases": open_bases,
         "open_lockers": open_lockers,
         "open_swap_stations": open_swaps,
         "active_virtual_states": _integer(
-            summary.get("active_virtual_state_count", discrete.get("active_virtual_state_count"))
+            summary.get(
+                "active_virtual_state_count", discrete.get("active_virtual_state_count")
+            )
         ),
         "selected_rho_by_facility": rho_by_facility,
         "selected_rho_by_idle_state": rho_by_idle,
         "network_is_nontrivial": bool(
-            summary.get("network_is_nontrivial", served is not None and served > 1e-7)
+            summary.get(
+                "network_is_nontrivial",
+                realized is not None and realized > 1e-7,
+            )
         ),
         "run_config_path": str(scenario_dir / "run_config.json"),
         "summary_path": str(scenario_dir / "MX" / "summary.json"),
     }
     for field in _COST_FIELDS:
         row[field] = _finite_number(model.get(field))
+    for field in _PHYSICAL_FIELDS:
+        row[field] = _finite_number(model.get(field, model_derived.get(field)))
     return row
 
 
 def collect_parameter_results(results_root: str | Path) -> list[dict[str, object]]:
     """Return valid parameter-sweep scenarios below ``results_root``.
 
-    Direct and nested scenario directories are supported.  A malformed or
-    incomplete scenario is reported on stderr and skipped without preventing
-    other scenarios from being collected.
+    Direct and nested scenario directories are supported. Every discovered
+    scenario is required to be complete and internally bound; collection fails
+    closed instead of silently omitting stale or malformed results.
     """
 
     root = Path(results_root).expanduser().resolve()
@@ -297,14 +498,54 @@ def collect_parameter_results(results_root: str | Path) -> list[dict[str, object
             if not path.is_file()
         ]
         if missing:
-            print(f"[skip] {scenario}: missing {', '.join(missing)}", file=sys.stderr)
-            continue
+            raise ValueError(f"{scenario}: missing {', '.join(missing)}")
         try:
             run_config = _load_json_object(run_config_path)
-            summary = _load_json_object(summary_path)
+            configured_modes = _configured_modes(run_config)
+            configured_summary_paths = {
+                mode: scenario_dir / mode / "summary.json" for mode in configured_modes
+            }
+            missing_summaries = [
+                path.relative_to(scenario_dir).as_posix()
+                for path in configured_summary_paths.values()
+                if not path.is_file()
+            ]
+            if missing_summaries:
+                raise ValueError(
+                    "missing configured summary artifact(s): "
+                    + ", ".join(missing_summaries)
+                )
+
+            summaries: dict[str, Mapping[str, Any]] = {}
+            for mode, path in configured_summary_paths.items():
+                mode_summary = _load_json_object(path)
+                _require_result_binding(run_config, mode_summary, mode)
+                summaries[mode] = mode_summary
+
+            undeclared_summary_paths = sorted(
+                path
+                for path in scenario_dir.glob("*/summary.json")
+                if path.parent.name not in configured_summary_paths
+            )
+            if undeclared_summary_paths:
+                undeclared = ", ".join(
+                    path.relative_to(scenario_dir).as_posix()
+                    for path in undeclared_summary_paths
+                )
+                raise ValueError(
+                    "summary artifact directory is not declared in "
+                    f"run_config.modes: {undeclared}"
+                )
+
+            summary = summaries["MX"]
             rows.append(_collect_scenario(root, scenario_dir, run_config, summary))
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-            print(f"[skip] {scenario}: {exc}", file=sys.stderr)
+            raise ValueError(f"{scenario}: {exc}") from exc
+    implementation_hashes = {row["implementation_sha256"] for row in rows}
+    if len(implementation_hashes) > 1:
+        raise ValueError(
+            "inconsistent parameter-sweep implementation hashes; runs cannot be pooled"
+        )
     return rows
 
 
@@ -335,14 +576,19 @@ def _rho_lines(row: Mapping[str, object], chunk_size: int = 4) -> list[str]:
     if not rho:
         return [counts, "rho: none"]
     entries = [f"{facility}={value:.2f}" for facility, value in rho.items()]
-    chunks = [entries[index : index + chunk_size] for index in range(0, len(entries), chunk_size)]
+    chunks = [
+        entries[index : index + chunk_size]
+        for index in range(0, len(entries), chunk_size)
+    ]
     return [counts] + [
         ("rho: " if index == 0 else "     ") + ", ".join(chunk)
         for index, chunk in enumerate(chunks)
     ]
 
 
-def _plot_results(root: Path, rows: Sequence[Mapping[str, object]]) -> tuple[Path, Path]:
+def _plot_results(
+    root: Path, rows: Sequence[Mapping[str, object]]
+) -> tuple[Path, Path]:
     import matplotlib
 
     matplotlib.use("Agg", force=True)
@@ -360,22 +606,26 @@ def _plot_results(root: Path, rows: Sequence[Mapping[str, object]]) -> tuple[Pat
     fig = plt.figure(figsize=(16.0, figure_height))
     grid = fig.add_gridspec(1, 3, width_ratios=(1.05, 1.0, 1.65), wspace=0.25)
     savings_ax = fig.add_subplot(grid[0, 0])
-    served_ax = fig.add_subplot(grid[0, 1])
+    realized_ax = fig.add_subplot(grid[0, 1])
     notes_ax = fig.add_subplot(grid[0, 2])
 
     savings_raw = [_finite_number(row.get("cost_saving_percent")) for row in rows]
     savings = [value if value is not None else 0.0 for value in savings_raw]
-    served_raw = [_finite_number(row.get("drone_served_rate")) for row in rows]
-    served_percent = [100.0 * value if value is not None else 0.0 for value in served_raw]
+    realized_raw = [_finite_number(row.get("drone_realized_rate")) for row in rows]
+    realized_percent = [
+        100.0 * value if value is not None else 0.0 for value in realized_raw
+    ]
 
     saving_colors = [
         "#2563eb" if value > 1e-9 else "#d97706" if value < -1e-9 else "#94a3b8"
         for value in savings
     ]
-    savings_ax.barh(positions, savings, height=0.62, color=saving_colors, edgecolor="#334155")
-    served_ax.barh(
+    savings_ax.barh(
+        positions, savings, height=0.62, color=saving_colors, edgecolor="#334155"
+    )
+    realized_ax.barh(
         positions,
-        served_percent,
+        realized_percent,
         height=0.62,
         color="#0f766e",
         edgecolor="#334155",
@@ -383,10 +633,10 @@ def _plot_results(root: Path, rows: Sequence[Mapping[str, object]]) -> tuple[Pat
 
     labels = [str(row["scenario"]) for row in rows]
     savings_ax.set_yticks(positions, labels=labels)
-    served_ax.set_yticks(positions, labels=[])
+    realized_ax.set_yticks(positions, labels=[])
     bounds = (cursor, 0.0)
     savings_ax.set_ylim(*bounds)
-    served_ax.set_ylim(*bounds)
+    realized_ax.set_ylim(*bounds)
     notes_ax.set_ylim(*bounds)
 
     minimum = min([0.0, *savings])
@@ -406,12 +656,12 @@ def _plot_results(root: Path, rows: Sequence[Mapping[str, object]]) -> tuple[Pat
             fontsize=8,
         )
 
-    served_limit = max(100.0, max(served_percent, default=0.0) * 1.15, 1.0)
-    served_ax.set_xlim(0.0, served_limit)
-    for position, raw_value, value in zip(positions, served_raw, served_percent):
+    realized_limit = max(100.0, max(realized_percent, default=0.0) * 1.15, 1.0)
+    realized_ax.set_xlim(0.0, realized_limit)
+    for position, raw_value, value in zip(positions, realized_raw, realized_percent):
         label = "N/A" if raw_value is None else f"{value:.2f}%"
-        served_ax.text(
-            value + 0.018 * served_limit,
+        realized_ax.text(
+            value + 0.018 * realized_limit,
             position,
             label,
             ha="left",
@@ -419,11 +669,13 @@ def _plot_results(root: Path, rows: Sequence[Mapping[str, object]]) -> tuple[Pat
             fontsize=8,
         )
 
-    savings_ax.set_xlabel("Cost saving vs. all-rider baseline (%)")
-    served_ax.set_xlabel("Demand served by drone network (%)")
+    savings_ax.set_xlabel("Cost saving vs. courier-only baseline (%)")
+    realized_ax.set_xlabel("Demand realized through drone network (%)")
     savings_ax.set_title("Modeled cost saving", loc="left", fontweight="semibold")
-    served_ax.set_title("Realized drone service", loc="left", fontweight="semibold")
-    notes_ax.set_title("Facility decisions and discrete rho", loc="left", fontweight="semibold")
+    realized_ax.set_title("Realized drone service", loc="left", fontweight="semibold")
+    notes_ax.set_title(
+        "Facility decisions and discrete rho", loc="left", fontweight="semibold"
+    )
     notes_ax.set_xlim(0.0, 1.0)
     notes_ax.axis("off")
     for position, lines in zip(positions, notes):
@@ -437,14 +689,14 @@ def _plot_results(root: Path, rows: Sequence[Mapping[str, object]]) -> tuple[Pat
             color="#334155",
         )
 
-    for axis in (savings_ax, served_ax):
+    for axis in (savings_ax, realized_ax):
         axis.grid(axis="x", color="#e2e8f0", linewidth=0.7)
         axis.set_axisbelow(True)
         axis.spines[["top", "right", "left"]].set_visible(False)
         axis.tick_params(axis="y", length=0)
 
     fig.suptitle(
-        "Parameter sweep: savings and drone-network service",
+        "Unified chi-epsilon parameter sweep: savings and realized service",
         x=0.06,
         y=0.975,
         ha="left",
@@ -453,7 +705,8 @@ def _plot_results(root: Path, rows: Sequence[Mapping[str, object]]) -> tuple[Pat
     fig.text(
         0.06,
         0.94,
-        f"{root} | MX summaries; savings are relative to each scenario's all-rider baseline",
+        f"{root} | schema {EXPECTED_SCHEMA_VERSION} {EXPECTED_FORMULATION_ID}; "
+        "savings use each scenario's courier-only baseline",
         ha="left",
         va="top",
         fontsize=8.5,
@@ -476,8 +729,9 @@ def write_parameter_report(results_root: str | Path) -> list[dict[str, object]]:
     rows = collect_parameter_results(root)
     if not rows:
         raise ValueError(
-            f"no valid MX parameter scenarios found under {root}; expected each scenario "
-            "to contain run_config.json and MX/summary.json"
+            f"no compatible MX parameter scenarios found under {root}; expected each "
+            f"scenario to contain run_config.json and a schema-{EXPECTED_SCHEMA_VERSION} "
+            f"{EXPECTED_FORMULATION_ID} MX/summary.json"
         )
     csv_path = _write_csv(root, rows)
     png_path, svg_path = _plot_results(root, rows)
@@ -490,7 +744,10 @@ def write_parameter_report(results_root: str | Path) -> list[dict[str, object]]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Summarize OD-aware MX parameter-sweep scenarios."
+        description=(
+            f"Summarize schema-{EXPECTED_SCHEMA_VERSION} unified chi-epsilon "
+            "MX parameter sweeps."
+        )
     )
     parser.add_argument(
         "results_root",

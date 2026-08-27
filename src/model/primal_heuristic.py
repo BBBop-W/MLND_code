@@ -62,7 +62,11 @@ class LocalBranchingConfig:
     output_flag: int | None = None
 
     def validate(self) -> None:
-        if isinstance(self.radius, bool) or not isinstance(self.radius, int) or self.radius < 0:
+        if (
+            isinstance(self.radius, bool)
+            or not isinstance(self.radius, int)
+            or self.radius < 0
+        ):
             raise ValueError("local-branching radius must be a nonnegative integer")
         if not math.isfinite(self.time_limit) or self.time_limit <= 0.0:
             raise ValueError("local-branching time_limit must be positive and finite")
@@ -140,7 +144,9 @@ def capture_incumbent(
 
     model.update()
     if model.SolCount <= 0:
-        raise ValueError("cannot capture a primal seed before a feasible incumbent exists")
+        raise ValueError(
+            "cannot capture a primal seed before a feasible incumbent exists"
+        )
     if not math.isfinite(integrality_tolerance) or integrality_tolerance < 0.0:
         raise ValueError("integrality_tolerance must be finite and nonnegative")
 
@@ -250,11 +256,15 @@ def temporary_local_branching_neighborhood(
         for name, value in overrides.items():
             setattr(model.Params, name, value)
         temporary_constraints.append(
-            model.addConstr(hamming_expression <= radius, name="__local_branching_hamming")
+            model.addConstr(
+                hamming_expression <= radius, name="__local_branching_hamming"
+            )
         )
         if objective_cutoff is not None:
             if model.ModelSense != GRB.MINIMIZE:
-                raise ValueError("objective improvement cutoff currently requires minimization")
+                raise ValueError(
+                    "objective improvement cutoff currently requires minimization"
+                )
             temporary_constraints.append(
                 model.addConstr(
                     model.getObjective() <= objective_cutoff,
@@ -273,7 +283,9 @@ def temporary_local_branching_neighborhood(
             setattr(model.Params, name, value)
 
 
-def _snapshot_mip_starts(model: gp.Model, model_variables: list[gp.Var]) -> _MIPStartSnapshot:
+def _snapshot_mip_starts(
+    model: gp.Model, model_variables: list[gp.Var]
+) -> _MIPStartSnapshot:
     model.update()
     num_start = int(model.NumStart)
     start_number = int(model.Params.StartNumber)
@@ -300,7 +312,9 @@ def _restore_mip_starts(
 def _install_complete_start(
     model: gp.Model, model_variables: list[gp.Var], values: Mapping[gp.Var, float]
 ) -> None:
-    if len(values) != len(model_variables) or any(variable not in values for variable in model_variables):
+    if len(values) != len(model_variables) or any(
+        variable not in values for variable in model_variables
+    ):
         raise ValueError("a primal seed must provide a value for every model variable")
     start_values = [float(values[variable]) for variable in model_variables]
     if any(not math.isfinite(value) for value in start_values):

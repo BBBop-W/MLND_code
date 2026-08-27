@@ -14,5 +14,7 @@ results/
 analysis/
 outputs/
 scripts/
-MLND/
+MLND/*
+!MLND/main.tex
+MLND/.overleaf/
 docs/paper

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import heapq
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -11,7 +10,7 @@ from src.config import ModelConfig
 
 Arc = tuple[str, str]
 Market = tuple[str, str]
-OrderCorridor = tuple[str, str, str, str]  # (o, i, j, d)
+DisplayKey = tuple[str, str, str]  # (o, d, j)
 DIRECT_ROUTE = "__direct__"
 
 
@@ -28,6 +27,7 @@ class Instance:
     activity_rate: dict[str, float] = field(default_factory=dict)
     h_od: dict[Market, float] = field(default_factory=dict)
     order_count: dict[Market, int] = field(default_factory=dict)
+    locker_pickup_cost_by_locker: dict[str, float] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     config: ModelConfig = field(default_factory=ModelConfig)
 
@@ -42,28 +42,49 @@ class Instance:
     A: set[Arc] = field(default_factory=set, init=False)
     A_Y: set[Arc] = field(default_factory=set, init=False)
     route_options: dict[Arc, tuple[str, ...]] = field(default_factory=dict, init=False)
-    route_distance: dict[tuple[str, str, str], float] = field(default_factory=dict, init=False)
-    route_time: dict[tuple[str, str, str], float] = field(default_factory=dict, init=False)
+    route_distance: dict[tuple[str, str, str], float] = field(
+        default_factory=dict, init=False
+    )
+    route_time: dict[tuple[str, str, str], float] = field(
+        default_factory=dict, init=False
+    )
     arc_activation_cost: dict[Arc, float] = field(default_factory=dict, init=False)
     eligible_idle: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
-    display_lockers: dict[str, tuple[str, ...]] = field(default_factory=dict, init=False)
-    closer_lockers: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict, init=False)
-    locker_origins: dict[tuple[str, str, str], tuple[str, ...]] = field(default_factory=dict, init=False)
-    home_corridors: dict[Market, tuple[Arc, ...]] = field(default_factory=dict, init=False)
-    choice_share: dict[tuple[str, str, str], float] = field(default_factory=dict, init=False)
-    locker_keys: list[OrderCorridor] = field(default_factory=list, init=False)
-    home_keys: list[OrderCorridor] = field(default_factory=list, init=False)
-    M_w: dict[Arc, float] = field(default_factory=dict, init=False)
+    display_lockers: dict[str, tuple[str, ...]] = field(
+        default_factory=dict, init=False
+    )
+    closer_lockers: dict[tuple[str, str], tuple[str, ...]] = field(
+        default_factory=dict, init=False
+    )
+    display_origins: dict[DisplayKey, tuple[str, ...]] = field(
+        default_factory=dict, init=False
+    )
+    general_corridors: dict[Market, tuple[Arc, ...]] = field(
+        default_factory=dict, init=False
+    )
+    choice_share: dict[tuple[str, str, str], float] = field(
+        default_factory=dict, init=False
+    )
     M_psi: dict[Arc, float] = field(default_factory=dict, init=False)
     M_xi: dict[str, float] = field(default_factory=dict, init=False)
 
     def build(self) -> "Instance":
         self.config.validate()
+        self._validate_inputs()
         self.L.sort()
         self.H.sort()
         self.E.sort()
         self.N.sort()
-        self.h_od = {market: float(rate) for market, rate in self.h_od.items() if rate > 0}
+        self.h_od = {
+            market: float(rate)
+            for market, rate in self.h_od.items()
+            if float(rate) > 0.0
+        }
+        self.order_count = {
+            market: count
+            for market, count in self.order_count.items()
+            if market in self.h_od
+        }
         self._build_virtual_states()
         self._build_physical_network()
         self._build_customer_interface()
@@ -88,25 +109,240 @@ class Instance:
         return math.hypot(ux - vx, uy - vy)
 
     def rider_cost(self, u: str, v: str) -> float:
+        """Return the direct-courier tariff for one origin-destination leg."""
+
         cfg = self.config
-        return cfg.rider_base_cost + cfg.rider_cost_per_km * cfg.road_distance_factor * self.distance(u, v)
+        road_distance = cfg.road_distance_factor * self.distance(u, v)
+        excess_distance = max(0.0, road_distance - cfg.rider_included_distance_km)
+        return (
+            cfg.rider_initial_charge_cny
+            + cfg.rider_incremental_cost_per_km * excess_distance
+        )
+
+    def direct_rider_cost(self, u: str, v: str) -> float:
+        """Return :math:`f_{od}^{rider}` for direct courier fulfillment."""
+
+        return self.rider_cost(u, v)
+
+    def feeder_rider_cost(self, u: str, v: str) -> float:
+        """Return :math:`f_{oi}^{rider}` or :math:`f_{jd}^{rider}`."""
+
+        return self.config.feeder_rider_cost_factor * self.rider_cost(u, v)
 
     def facility_cost(self, node: str) -> float:
         if node in self.L:
             return self.config.base_cost_per_hour
         if node in self.H:
             return self.config.locker_fixed_cost_per_hour
-        return self.config.swap_cost_per_hour
+        if node in self.E:
+            return self.config.swap_cost_per_hour
+        raise KeyError(f"unknown physical facility {node!r}")
+
+    def locker_pickup_cost(self, locker: str) -> float:
+        """Return the pickup-fulfillment cost for one destination locker."""
+
+        if locker not in self.H:
+            raise KeyError(f"unknown smart locker {locker!r}")
+        return self.locker_pickup_cost_by_locker.get(
+            locker,
+            self.config.locker_pickup_cost_per_order,
+        )
+
+    def corridors_for_mode(self, mode: str, market: Market) -> tuple[Arc, ...]:
+        """Return the retained loaded corridors available to one formulation."""
+
+        normalized_mode = mode.upper()
+        if normalized_mode not in {"MX", "HD", "LO"}:
+            raise ValueError("mode must be one of MX, HD, or LO")
+        if market not in self.h_od:
+            raise KeyError(f"unknown positive-demand market {market!r}")
+
+        general = self.general_corridors.get(market, ())
+        if normalized_mode == "HD":
+            return general
+
+        origin, destination = market
+        displayed = tuple(
+            (locker_origin, locker)
+            for locker in self.display_lockers.get(destination, ())
+            for locker_origin in self.display_origins.get(
+                (origin, destination, locker),
+                (),
+            )
+        )
+        displayed = tuple(dict.fromkeys(displayed))
+        if normalized_mode == "LO":
+            return displayed
+        return tuple(dict.fromkeys((*general, *displayed)))
+
+    def screening_is_exact(self, mode: str) -> bool:
+        """Report whether preprocessing retains the full formulation index set."""
+
+        normalized_mode = mode.upper()
+        if normalized_mode not in {"MX", "HD", "LO"}:
+            raise ValueError("mode must be one of MX, HD, or LO")
+        full_corridors = set(self.A_HH)
+        for market in self.markets:
+            if normalized_mode == "LO":
+                destination = market[1]
+                eligible_destinations = set(self.display_lockers.get(destination, ()))
+                expected = {(i, j) for i, j in self.A_HH if j in eligible_destinations}
+            else:
+                expected = full_corridors
+            if set(self.corridors_for_mode(normalized_mode, market)) != expected:
+                return False
+        return True
 
     def endpoint_facility(self, node: str) -> str:
         return self.s_to_h.get(node, node)
+
+    def _validate_inputs(self) -> None:
+        node_groups = {
+            "L": self.L,
+            "H": self.H,
+            "E": self.E,
+            "N": self.N,
+        }
+        for group_name, nodes in node_groups.items():
+            if len(nodes) != len(set(nodes)):
+                raise ValueError(f"duplicate node identifier in {group_name}")
+            if any(not isinstance(node, str) or not node for node in nodes):
+                raise ValueError(
+                    f"every node identifier in {group_name} must be a nonempty string"
+                )
+
+        physical_groups = (("L", set(self.L)), ("H", set(self.H)), ("E", set(self.E)))
+        for index, (left_name, left) in enumerate(physical_groups):
+            for right_name, right in physical_groups[index + 1 :]:
+                overlap = sorted(left & right)
+                if overlap:
+                    raise ValueError(
+                        f"facility sets {left_name} and {right_name} must be disjoint; "
+                        f"overlap={overlap}"
+                    )
+        physical_nodes = set(self.L) | set(self.H) | set(self.E)
+        demand_nodes = set(self.N)
+        overlap = sorted(physical_nodes & demand_nodes)
+        if overlap:
+            raise ValueError(
+                "physical-facility and demand-node identifiers must be distinct; "
+                f"overlap={overlap}"
+            )
+
+        expected_virtual = {f"S_{locker}" for locker in self.H}
+        known_coordinate_nodes = physical_nodes | demand_nodes | expected_virtual
+        unknown_coordinate_nodes = sorted(set(self.coords) - known_coordinate_nodes)
+        if unknown_coordinate_nodes:
+            raise ValueError(
+                f"coordinates supplied for unknown nodes: {unknown_coordinate_nodes}"
+            )
+        missing_coordinates = sorted((physical_nodes | demand_nodes) - set(self.coords))
+        if missing_coordinates:
+            raise ValueError(f"missing coordinates for nodes: {missing_coordinates}")
+        validated_coordinates: dict[str, tuple[float, float]] = {}
+        for node, coordinate in self.coords.items():
+            if not isinstance(coordinate, (tuple, list)) or len(coordinate) != 2:
+                raise ValueError(
+                    f"coordinate for {node!r} must contain exactly two values"
+                )
+            try:
+                normalized_coordinate = (float(coordinate[0]), float(coordinate[1]))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"coordinate for {node!r} must be numeric") from exc
+            if any(not math.isfinite(value) for value in normalized_coordinate):
+                raise ValueError(f"coordinate for {node!r} must be finite")
+            validated_coordinates[node] = normalized_coordinate
+        self.coords = validated_coordinates
+
+        unknown_activity_nodes = sorted(set(self.activity_rate) - physical_nodes)
+        if unknown_activity_nodes:
+            raise ValueError(
+                f"activity rates supplied for unknown sites: {unknown_activity_nodes}"
+            )
+        validated_activity: dict[str, float] = {}
+        for node, value in self.activity_rate.items():
+            try:
+                normalized_value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"activity rate for {node!r} must be numeric") from exc
+            if not math.isfinite(normalized_value) or normalized_value < 0.0:
+                raise ValueError(
+                    f"activity rate for {node!r} must be finite and nonnegative"
+                )
+            validated_activity[node] = normalized_value
+        self.activity_rate = validated_activity
+
+        validated_demand: dict[Market, float] = {}
+        for market, raw_rate in self.h_od.items():
+            if not isinstance(market, tuple) or len(market) != 2:
+                raise ValueError(
+                    f"market key must be (origin, destination), got {market!r}"
+                )
+            origin, destination = market
+            if origin not in demand_nodes or destination not in demand_nodes:
+                raise ValueError(f"market {market!r} references an unknown demand node")
+            try:
+                rate = float(raw_rate)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"demand for market {market!r} must be numeric"
+                ) from exc
+            if not math.isfinite(rate) or rate < 0.0:
+                raise ValueError(
+                    f"demand for market {market!r} must be finite and nonnegative"
+                )
+            if origin == destination and rate > 0.0:
+                raise ValueError(f"self-market {market!r} must have zero demand")
+            validated_demand[market] = rate
+        self.h_od = validated_demand
+
+        for market, raw_count in self.order_count.items():
+            if market not in self.h_od:
+                raise ValueError(f"order count supplied for unknown market {market!r}")
+            if (
+                isinstance(raw_count, bool)
+                or int(raw_count) != raw_count
+                or int(raw_count) < 0
+            ):
+                raise ValueError(
+                    f"order count for market {market!r} must be a nonnegative integer"
+                )
+        self.order_count = {
+            market: int(count) for market, count in self.order_count.items()
+        }
+
+        unknown_locker_costs = sorted(
+            set(self.locker_pickup_cost_by_locker) - set(self.H)
+        )
+        if unknown_locker_costs:
+            raise ValueError(
+                "locker pickup costs supplied for unknown lockers: "
+                f"{unknown_locker_costs}"
+            )
+        for locker, raw_cost in self.locker_pickup_cost_by_locker.items():
+            try:
+                cost = float(raw_cost)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"locker pickup cost for {locker!r} must be numeric"
+                ) from exc
+            if not math.isfinite(cost) or cost < 0.0:
+                raise ValueError(
+                    f"locker pickup cost for {locker!r} must be finite and nonnegative"
+                )
+            self.locker_pickup_cost_by_locker[locker] = cost
 
     def _build_virtual_states(self) -> None:
         self.S.clear()
         self.h_to_s.clear()
         self.s_to_h.clear()
+        reserved_nodes = set(self.L) | set(self.H) | set(self.E) | set(self.N)
         for locker in self.H:
             state = f"S_{locker}"
+            if state in reserved_nodes:
+                raise ValueError(
+                    f"generated virtual-state identifier {state!r} conflicts with an input node"
+                )
             self.S.append(state)
             self.h_to_s[locker] = state
             self.s_to_h[state] = locker
@@ -115,37 +351,34 @@ class Instance:
     def _route_option_data(self, u: str, v: str) -> list[tuple[str, float, float]]:
         cfg = self.config
         direct_distance = self.distance(u, v)
-        if direct_distance <= cfg.max_direct_range_km + 1e-9:
-            # Every one-swap route is weakly longer by the triangle inequality
-            # and has an additional positive swap-service time.  It also needs
-            # two extra activated legs.  Replacing its flow by the direct option
-            # therefore preserves feasibility and cannot increase any cost.
-            return [
+        options: list[tuple[str, float, float]] = []
+        if direct_distance <= cfg.battery_range_km + 1e-9:
+            options.append(
                 (
                     DIRECT_ROUTE,
                     direct_distance,
                     direct_distance / cfg.drone_speed_kmph,
                 )
-            ]
+            )
 
-        options: list[tuple[str, float, float]] = []
+        swap_options: list[tuple[str, float, float]] = []
         for station in self.E:
             first = self.distance(u, station)
             second = self.distance(station, v)
             total = first + second
             if (
-                first <= cfg.max_swap_leg_km + 1e-9
-                and second <= cfg.max_swap_leg_km + 1e-9
+                first <= cfg.battery_range_km + 1e-9
+                and second <= cfg.battery_range_km + 1e-9
             ):
-                options.append(
+                swap_options.append(
                     (
                         station,
                         total,
                         total / cfg.drone_speed_kmph + cfg.swap_service_time_hours,
                     )
                 )
-        options.sort(key=lambda item: (item[1], item[0]))
-        return options
+        swap_options.sort(key=lambda item: (item[1], item[0]))
+        return [*options, *swap_options]
 
     def _add_physical_arc(self, u: str, v: str, bucket: set[Arc]) -> None:
         options = self._route_option_data(u, v)
@@ -212,11 +445,9 @@ class Instance:
     def _build_customer_interface(self) -> None:
         self.display_lockers.clear()
         self.closer_lockers.clear()
-        self.locker_origins.clear()
-        self.home_corridors.clear()
+        self.display_origins.clear()
+        self.general_corridors.clear()
         self.choice_share.clear()
-        self.locker_keys.clear()
-        self.home_keys.clear()
 
         markets_by_destination: dict[str, list[Market]] = {}
         for market in self.markets:
@@ -234,25 +465,21 @@ class Instance:
                 if choice.max_walk_km is None
                 or self.distance(destination, locker) <= choice.max_walk_km + 1e-9
             ]
-            candidates.sort(key=lambda locker: (self.distance(destination, locker), locker))
-            valid_candidates: list[str] = []
+            candidates.sort(
+                key=lambda locker: (self.distance(destination, locker), locker)
+            )
+            self.display_lockers[destination] = tuple(candidates)
             for locker in candidates:
-                valid_for_all_markets = True
                 for origin, d_node in destination_markets:
-                    ranked = heapq.nsmallest(
-                        self.config.origin_locker_choices or len(incoming_by_locker[locker]),
+                    ranked = sorted(
                         incoming_by_locker[locker],
                         key=lambda i: (self.distance(origin, i), i),
                     )
-                    if not ranked:
-                        valid_for_all_markets = False
-                        break
-                    self.locker_origins[origin, d_node, locker] = tuple(ranked)
-                if valid_for_all_markets:
-                    valid_candidates.append(locker)
+                    limit = self.config.display_origin_choices
+                    if limit is not None:
+                        ranked = ranked[:limit]
+                    self.display_origins[origin, d_node, locker] = tuple(ranked)
 
-            self.display_lockers[destination] = tuple(valid_candidates)
-            for locker in valid_candidates:
                 locker_distance = self.distance(destination, locker)
                 self.closer_lockers[destination, locker] = tuple(
                     other
@@ -266,39 +493,26 @@ class Instance:
                     + choice.price_coefficient * choice.locker_discount_cny
                     - choice.walk_distance_coefficient * locker_distance
                 )
-                share = 1.0 / (1.0 + math.exp(-utility_gap))
+                share = _logistic(utility_gap)
                 for origin, d_node in destination_markets:
                     self.choice_share[origin, d_node, locker] = share
-                    for i in self.locker_origins[origin, d_node, locker]:
-                        self.locker_keys.append((origin, i, locker, d_node))
 
-        all_corridors = tuple(self.A_HH)
+        all_corridors = tuple(sorted(self.A_HH))
         for origin, destination in self.markets:
-            selected = heapq.nsmallest(
-                self.config.home_corridor_choices or len(all_corridors),
+            selected = sorted(
                 all_corridors,
                 key=lambda ij: (
-                    self.rider_cost(origin, ij[0]) + self.rider_cost(ij[1], destination),
+                    self.feeder_rider_cost(origin, ij[0])
+                    + self.feeder_rider_cost(ij[1], destination),
                     ij,
                 ),
             )
-            self.home_corridors[origin, destination] = tuple(selected)
-            self.home_keys.extend((origin, i, j, destination) for i, j in selected)
-
-        self.locker_keys.sort()
-        self.home_keys.sort()
+            limit = self.config.general_corridor_choices
+            if limit is not None:
+                selected = selected[:limit]
+            self.general_corridors[origin, destination] = tuple(selected)
 
     def _build_bounds(self) -> None:
-        corridor_demand: dict[Arc, float] = {arc: 0.0 for arc in self.A_HH}
-        market_corridors: dict[Market, set[Arc]] = {market: set() for market in self.markets}
-        for o, i, j, d in self.locker_keys:
-            market_corridors[o, d].add((i, j))
-        for o, i, j, d in self.home_keys:
-            market_corridors[o, d].add((i, j))
-        for market, corridors in market_corridors.items():
-            for corridor in corridors:
-                corridor_demand[corridor] += self.h_od[market]
-        self.M_w = {arc: max(corridor_demand[arc], 1e-6) for arc in self.A_HH}
         # The loaded and source-flow identities bound all forward flow by
         # rho_max times total OD demand.  Summed flow balance over H union S
         # gives the same bound for every H-to-L return arc.  Independently,
@@ -313,5 +527,17 @@ class Instance:
         # Clamping at zero avoids a negative big-M without weakening the model.
         flow_bound = max(0.0, min(demand_flow_bound, capacity_flow_bound))
         self.M_psi = {arc: flow_bound for arc in self.A_F}
-        population_bound = max(self.config.locker_service_rates) * self.config.max_locker_time_hours
+        population_bound = (
+            max(self.config.locker_service_rates) * self.config.max_locker_time_hours
+        )
         self.M_xi = {locker: population_bound for locker in self.H}
+
+
+def _logistic(value: float) -> float:
+    """Evaluate a logistic probability without overflowing at extreme utilities."""
+
+    if value >= 0.0:
+        exponential = math.exp(-value)
+        return 1.0 / (1.0 + exponential)
+    exponential = math.exp(value)
+    return exponential / (1.0 + exponential)

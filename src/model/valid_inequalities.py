@@ -11,10 +11,9 @@ The module contains three families.
     Supporting hyperplanes for the union of the discrete M/M/1 queue graphs.
 
 ``ChoiceCapacityCover``
-    Covers linking destination-locker display decisions to a locker's selected
-    service capacity.  Their validity uses the MLND relation
-    ``psi[i,j] >= rho_min * h[i,j]`` and the fact that every locker-choice offer
-    for locker ``j`` enters a corridor ending at ``j``.
+    Locker-only covers linking destination-locker display decisions to a
+    locker's selected service capacity.  They are not valid for mixed delivery,
+    where displaying a locker does not force any order into the drone network.
 
 ``DirectedReturnCut``
     Directed connectivity cuts.  Positive offered flow on corridor ``(i,j)``
@@ -129,7 +128,7 @@ def queue_perspective_intercept(
         return 0.0
     if slope >= upper_breakpoint:
         return kappa / (mu - kappa) - slope * kappa
-    return -(math.sqrt(mu * slope) - 1.0) ** 2
+    return -((math.sqrt(mu * slope) - 1.0) ** 2)
 
 
 def queue_support_minimizer(
@@ -208,7 +207,9 @@ def most_violated_queue_perspective_cut(
     """
 
     if len(z_values) != len(service_rates) or not service_rates:
-        raise ValueError("z_values and service_rates must have the same positive length")
+        raise ValueError(
+            "z_values and service_rates must have the same positive length"
+        )
     if feasibility_tolerance < 0.0 or bisection_tolerance <= 0.0:
         raise ValueError("tolerances must be positive (feasibility may be zero)")
     if max_bisection_iterations < 1:
@@ -219,7 +220,9 @@ def most_violated_queue_perspective_cut(
     tau = _finite(max_system_time, "max_system_time")
     if tau <= 0.0:
         raise ValueError("max_system_time must be positive")
-    mus = tuple(_finite(value, f"service_rates[{c}]") for c, value in enumerate(service_rates))
+    mus = tuple(
+        _finite(value, f"service_rates[{c}]") for c, value in enumerate(service_rates)
+    )
     if any(mu <= 0.0 for mu in mus):
         raise ValueError("service rates must be positive")
     zbar = tuple(
@@ -273,8 +276,7 @@ def most_violated_queue_perspective_cut(
         for mu, kappa in zip(mus, kappas)
     )
     arrivals = tuple(
-        queue_support_minimizer(mu, kappa, pi_star)
-        for mu, kappa in zip(mus, kappas)
+        queue_support_minimizer(mu, kappa, pi_star) for mu, kappa in zip(mus, kappas)
     )
     rhs = pi_star * lam + sum(coef * weight for coef, weight in zip(coefficients, zbar))
     return QueuePerspectiveCut(
@@ -319,7 +321,7 @@ def separate_queue_perspective_cut(
 
 @dataclass(frozen=True)
 class ChoiceCorridorCoverData:
-    """Deterministic offered demand induced by one ``alpha[d,j]`` decision."""
+    """Locker-only offered demand induced by one ``alpha[d,j]`` decision."""
 
     destination: Node
     locker: Node
@@ -338,17 +340,17 @@ class ChoiceCorridorCoverData:
 def build_choice_corridor_cover_data(
     h_od: Mapping[Market, float],
     choice_share: Mapping[ChoiceKey, float],
-    locker_origins: Mapping[ChoiceKey, Iterable[Node]],
+    display_origins: Mapping[ChoiceKey, Iterable[Node]],
     *,
     feasibility_tolerance: float = 1e-9,
 ) -> tuple[ChoiceCorridorCoverData, ...]:
     r"""Build :math:`B_{dj}=\sum_o h_{od}\eta_{odj}` and its corridors.
 
-    ``locker_origins[(o,d,j)]`` lists every candidate origin locker ``i`` to
+    ``display_origins[(o,d,j)]`` lists every candidate origin locker ``i`` to
     which the offer may be allocated.  Its union is retained as provenance for
     the structural condition that all corresponding corridors end at ``j``.
     The sum does *not* multiply by the number of candidate origins: allocation
-    among those origins is endogenous and the model's locker-offer equality
+    among those origins is endogenous and the locker-only allocation equality
     fixes their total to ``h_od[o,d] * choice_share[o,d,j] * alpha[d,j]``.
     """
 
@@ -372,9 +374,9 @@ def build_choice_corridor_cover_data(
         share = _unit_interval(
             choice_share[key], f"choice_share[{key}]", feasibility_tolerance
         )
-        if key not in locker_origins:
+        if key not in display_origins:
             raise ValueError(f"choice key {key} has no candidate origin locker")
-        origins = tuple(sorted(set(locker_origins[key])))
+        origins = tuple(sorted(set(display_origins[key])))
         if not origins:
             raise ValueError(f"choice key {key} has an empty origin-locker set")
         alpha_key = (destination, locker)
@@ -437,7 +439,7 @@ def separate_choice_capacity_covers(
     max_cuts_per_locker: int | None = 5,
     seen_signatures: AbstractSet[object] | None = None,
 ) -> tuple[ChoiceCapacityCover, ...]:
-    """Heuristically separate valid choice-capacity covers.
+    """Heuristically separate valid locker-only choice-capacity covers.
 
     For a destination subset ``P`` at locker ``j``, let
 
@@ -448,7 +450,9 @@ def separate_choice_capacity_covers(
     only when an adequate level is selected.  Candidate subsets are generated
     by several deficit/weight orderings and seeded greedy prefixes.  This is a
     separation heuristic, but every returned subset defines a globally valid
-    inequality.
+    inequality for the locker-only formulation.  Callers must not install these
+    cuts in the mixed-delivery formulation because ``alpha[d,j]`` does not force
+    positive offered flow there.
     """
 
     if violation_tolerance < 0.0 or feasibility_tolerance < 0.0:
@@ -476,7 +480,9 @@ def separate_choice_capacity_covers(
         if amount <= feasibility_tolerance:
             continue
         if any(corridor[1] != item.locker for corridor in item.incoming_corridors):
-            raise ValueError("choice-corridor data contains a corridor ending at another locker")
+            raise ValueError(
+                "choice-corridor data contains a corridor ending at another locker"
+            )
         if item.alpha_key not in alpha_values:
             raise ValueError(f"missing alpha value for {item.alpha_key}")
         alpha_bar[item.alpha_key] = _unit_interval(
@@ -493,11 +499,15 @@ def separate_choice_capacity_covers(
             key = (locker, c)
             if key not in z_values:
                 raise ValueError(f"missing z value for {key}")
-            value = _unit_interval(z_values[key], f"z_values[{key}]", feasibility_tolerance)
+            value = _unit_interval(
+                z_values[key], f"z_values[{key}]", feasibility_tolerance
+            )
             z_bar[key] = value
             total += value
         if total > 1.0 + feasibility_tolerance:
-            raise ValueError(f"capacity weights for locker {locker} sum to more than one")
+            raise ValueError(
+                f"capacity weights for locker {locker} sum to more than one"
+            )
 
     seen = set(seen_signatures or ())
     separated: list[ChoiceCapacityCover] = []
@@ -507,9 +517,7 @@ def separate_choice_capacity_covers(
         # unit capacity mass they might exclude, so retaining only positive
         # fractional displays is both safe and much cheaper.
         candidates = [
-            item
-            for item in items
-            if alpha_bar[item.alpha_key] > feasibility_tolerance
+            item for item in items if alpha_bar[item.alpha_key] > feasibility_tolerance
         ]
         if not candidates:
             continue
@@ -529,11 +537,19 @@ def separate_choice_capacity_covers(
             ),
             sorted(
                 candidates,
-                key=lambda item: (deficit(item), -item.offered_demand, item.destination),
+                key=lambda item: (
+                    deficit(item),
+                    -item.offered_demand,
+                    item.destination,
+                ),
             ),
             sorted(
                 candidates,
-                key=lambda item: (-item.offered_demand, deficit(item), item.destination),
+                key=lambda item: (
+                    -item.offered_demand,
+                    deficit(item),
+                    item.destination,
+                ),
             ),
         ]
 
@@ -559,7 +575,9 @@ def separate_choice_capacity_covers(
         item_by_destination = {item.destination: item for item in candidates}
         locker_cuts: list[ChoiceCapacityCover] = []
         for destinations in sorted(subset_keys, key=lambda value: (len(value), value)):
-            selected = [item_by_destination[destination] for destination in destinations]
+            selected = [
+                item_by_destination[destination] for destination in destinations
+            ]
             offered = sum(item.offered_demand for item in selected)
             effective = rho * offered
             # With no insufficient level the inequality is dominated by the
@@ -616,7 +634,7 @@ class DirectedReturnCut:
 
     The represented inequality is
 
-    ``h[corridor] <= big_m * sum(y[arc] for arc in crossing_arcs)``.
+    ``offered[corridor] <= big_m * sum(y[arc] for arc in crossing_arcs)``.
     """
 
     corridor: Arc
@@ -624,7 +642,7 @@ class DirectedReturnCut:
     source_side: tuple[Node, ...]
     crossing_arcs: tuple[Arc, ...]
     cut_capacity: float
-    h_value: float
+    offered_value: float
     violation: float
 
     def signature(self) -> tuple[str, Arc, tuple[Arc, ...]]:
@@ -689,7 +707,10 @@ def _minimum_directed_cut(
             while next_edge[u] < len(graph[u]):
                 edge_index = next_edge[u]
                 edge = graph[u][edge_index]
-                if edge.capacity > residual_tolerance and level[edge.destination] == level[u] + 1:
+                if (
+                    edge.capacity > residual_tolerance
+                    and level[edge.destination] == level[u] + 1
+                ):
                     amount = send(edge.destination, min(available, edge.capacity))
                     if amount > residual_tolerance:
                         edge.capacity -= amount
@@ -710,7 +731,10 @@ def _minimum_directed_cut(
     while queue:
         u = queue.popleft()
         for edge in graph[u]:
-            if edge.capacity > residual_tolerance and edge.destination not in reachable_indices:
+            if (
+                edge.capacity > residual_tolerance
+                and edge.destination not in reachable_indices
+            ):
                 reachable_indices.add(edge.destination)
                 queue.append(edge.destination)
     return max_flow, {node_order[position] for position in reachable_indices}
@@ -719,7 +743,9 @@ def _minimum_directed_cut(
 def _contract_representative(node: Node, contraction: Mapping[Node, Node]) -> Node:
     representative = node
     visited: set[Node] = set()
-    while representative in contraction and contraction[representative] != representative:
+    while (
+        representative in contraction and contraction[representative] != representative
+    ):
         if representative in visited:
             raise ValueError("contraction mapping contains a directed cycle")
         visited.add(representative)
@@ -730,7 +756,7 @@ def _contract_representative(node: Node, contraction: Mapping[Node, Node]) -> No
 def separate_directed_return_cuts(
     physical_arcs: Iterable[Arc],
     y_values: Mapping[Arc, float],
-    h_values: Mapping[Arc, float],
+    offered_values: Mapping[Arc, float],
     big_m: Mapping[Arc, float],
     *,
     contraction: Mapping[Node, Node] | None = None,
@@ -740,7 +766,7 @@ def separate_directed_return_cuts(
     max_cuts: int | None = None,
     seen_signatures: AbstractSet[object] | None = None,
 ) -> tuple[DirectedReturnCut, ...]:
-    """Separate ``h_ij`` return-connectivity cuts by directed minimum cuts.
+    """Separate offered-flow return-connectivity cuts by directed minimum cuts.
 
     ``physical_arcs`` should be the aggregate-flight arcs ``A_F`` with their
     main activation values ``y``.  The optional mapping contracts a virtual
@@ -748,10 +774,12 @@ def separate_directed_return_cuts(
     becoming self-loops after contraction never cross a cut.
 
     At a fractional point, a minimum ``j``-to-``i`` cut of capacity ``C``
-    violates the inequality exactly when ``hbar[i,j] > M[i,j] * C``.  The
-    implementation is pure Python and combines parallel arcs only for the
-    max-flow calculation; every original crossing arc is retained in the
-    returned linear expression.
+    violates the inequality exactly when
+    ``offered_bar[i,j] > M[i,j] * C``.  The offered value may be supplied as
+    ``sum(w[l,i,j,r])`` or the equivalent ``sum(chi[o,d,i,j,r])``; no auxiliary
+    corridor-demand variable is required.  The implementation is pure Python
+    and combines parallel arcs only for the max-flow calculation; every
+    original crossing arc is retained in the returned linear expression.
     """
 
     if violation_tolerance < 0.0 or feasibility_tolerance < 0.0:
@@ -781,16 +809,20 @@ def separate_directed_return_cuts(
             aggregate_capacity[origin, destination] += value
 
     candidates: list[tuple[float, Arc, float]] = []
-    for corridor, raw_h in h_values.items():
+    for corridor, raw_offered in offered_values.items():
         if corridor not in big_m:
             raise ValueError(f"missing big-M value for corridor {corridor}")
-        hbar = _nonnegative(raw_h, f"h_values[{corridor}]", feasibility_tolerance)
+        offered_bar = _nonnegative(
+            raw_offered,
+            f"offered_values[{corridor}]",
+            feasibility_tolerance,
+        )
         upper = _finite(big_m[corridor], f"big_m[{corridor}]")
         if upper <= 0.0:
             raise ValueError("every corridor big-M value must be positive")
-        if hbar <= violation_tolerance:
+        if offered_bar <= violation_tolerance:
             continue
-        candidates.append((hbar, corridor, upper))
+        candidates.append((offered_bar, corridor, upper))
     candidates.sort(key=lambda item: (-item[0], item[1]))
     if max_candidates is not None:
         candidates = candidates[:max_candidates]
@@ -798,7 +830,7 @@ def separate_directed_return_cuts(
     seen = set(seen_signatures or ())
     cuts: list[DirectedReturnCut] = []
     residual_tolerance = max(1e-14, feasibility_tolerance * 0.01)
-    for hbar, corridor, upper in candidates:
+    for offered_bar, corridor, upper in candidates:
         origin = _contract_representative(corridor[0], contraction_map)
         destination = _contract_representative(corridor[1], contraction_map)
         if origin == destination:
@@ -820,7 +852,7 @@ def separate_directed_return_cuts(
         # Recompute from original values so the reported violation and the
         # returned linear expression agree even after contraction/aggregation.
         cut_capacity = sum(ybar[arc] for arc in crossing)
-        violation = hbar - upper * cut_capacity
+        violation = offered_bar - upper * cut_capacity
         if violation <= violation_tolerance:
             continue
         cut = DirectedReturnCut(
@@ -829,7 +861,7 @@ def separate_directed_return_cuts(
             source_side=tuple(sorted(source_side)),
             crossing_arcs=crossing,
             cut_capacity=cut_capacity,
-            h_value=hbar,
+            offered_value=offered_bar,
             violation=violation,
         )
         if cut.signature() in seen:

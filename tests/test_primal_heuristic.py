@@ -67,7 +67,9 @@ def test_exact_conic_local_branching_improves_start_and_restores_model() -> None
         name: getattr(model.Params, name)
         for name in ("TimeLimit", "MIPGap", "MIPFocus", "Heuristics", "NoRelHeurTime")
     }
-    original_bounds = {variable: (variable.LB, variable.UB) for variable in model.getVars()}
+    original_bounds = {
+        variable: (variable.LB, variable.UB) for variable in model.getVars()
+    }
     original_linear_constraints = model.NumConstrs
     original_quadratic_constraints = model.NumQConstrs
 
@@ -104,7 +106,9 @@ def test_temporary_neighborhood_restores_after_exception() -> None:
     )
     model.Params.TimeLimit = 91.0
     original_constraint_count = model.NumConstrs
-    original_bounds = {variable: (variable.LB, variable.UB) for variable in model.getVars()}
+    original_bounds = {
+        variable: (variable.LB, variable.UB) for variable in model.getVars()
+    }
 
     with pytest.raises(RuntimeError, match="synthetic failure"):
         with temporary_local_branching_neighborhood(
@@ -123,4 +127,3 @@ def test_temporary_neighborhood_restores_after_exception() -> None:
     assert model.Params.TimeLimit == pytest.approx(91.0)
     for variable, bounds in original_bounds.items():
         assert (variable.LB, variable.UB) == pytest.approx(bounds)
-

@@ -35,8 +35,7 @@ def test_queue_intercept_matches_exact_piecewise_minimum() -> None:
             abs=1e-12,
         )
         brute = min(
-            _queue_value(mu, kappa * step / 20000.0)
-            - pi * kappa * step / 20000.0
+            _queue_value(mu, kappa * step / 20000.0) - pi * kappa * step / 20000.0
             for step in range(20001)
         )
         assert intercept == pytest.approx(brute, abs=2e-7)
@@ -83,20 +82,21 @@ def test_queue_separator_finds_global_one_dimensional_maximum() -> None:
     for step in range(50001):
         pi = max_breakpoint * step / 50000.0
         rhs = pi * lambda_bar + sum(
-            z * queue_perspective_intercept(
-                mu, stable_arrival_capacity(mu, tau), pi
-            )
+            z * queue_perspective_intercept(mu, stable_arrival_capacity(mu, tau), pi)
             for z, mu in zip(zbar, service_rates)
         )
         brute_rhs = max(brute_rhs, rhs)
     assert cut.rhs_at_point == pytest.approx(brute_rhs, abs=2e-6)
-    assert separate_queue_perspective_cut(
-        lambda_bar,
-        cut.rhs_at_point,
-        zbar,
-        service_rates,
-        tau,
-    ) is None
+    assert (
+        separate_queue_perspective_cut(
+            lambda_bar,
+            cut.rhs_at_point,
+            zbar,
+            service_rates,
+            tau,
+        )
+        is None
+    )
 
 
 def test_queue_separator_rejects_point_outside_fractional_qos_domain() -> None:
@@ -122,7 +122,7 @@ def test_choice_corridor_data_counts_each_market_once_not_each_origin() -> None:
             ("O2", "D1", "H2"): 0.5,
             ("O3", "D2", "H2"): 0.8,
         },
-        locker_origins={
+        display_origins={
             ("O1", "D1", "H2"): ("H1", "H3"),
             ("O2", "D1", "H2"): ("H1",),
             ("O3", "D2", "H2"): ("H3",),
@@ -175,8 +175,10 @@ def test_choice_capacity_cover_separator_returns_valid_violated_subset() -> None
             if sum(weights[destination] for destination in selected) > capacity + 1e-12:
                 continue
             lhs = sum(destination in selected for destination in best.destinations)
-            rhs = len(best.destinations) - 1 + (
-                capacity_index in best.adequate_capacity_indices
+            rhs = (
+                len(best.destinations)
+                - 1
+                + (capacity_index in best.adequate_capacity_indices)
             )
             assert lhs <= rhs
 
@@ -219,7 +221,7 @@ def test_directed_return_separator_finds_expected_min_cut() -> None:
             ("H3", "H1"): 0.80,
             ("H4", "H1"): 0.70,
         },
-        h_values={("H1", "H2"): 5.0},
+        offered_values={("H1", "H2"): 5.0},
         big_m={("H1", "H2"): 10.0},
     )
     assert len(cuts) == 1
@@ -240,7 +242,7 @@ def test_directed_return_separator_contracts_virtual_holding_state() -> None:
     cuts = separate_directed_return_cuts(
         physical_arcs=arcs,
         y_values={arc: value for arc, value in zip(arcs, (1.0, 0.0, 0.10, 0.20))},
-        h_values={("H1", "H2"): 3.0},
+        offered_values={("H1", "H2"): 3.0},
         big_m={("H1", "H2"): 10.0},
         contraction={"S_H2": "H2"},
     )
@@ -255,25 +257,31 @@ def test_directed_return_separator_handles_zero_capacity_and_deduplication() -> 
     first = separate_directed_return_cuts(
         arcs,
         y_values={("H1", "H2"): 1.0, ("H2", "H1"): 0.0},
-        h_values={("H1", "H2"): 1.0},
+        offered_values={("H1", "H2"): 1.0},
         big_m={("H1", "H2"): 4.0},
     )
     assert len(first) == 1
     assert first[0].crossing_arcs == (("H2", "H1"),)
     assert first[0].cut_capacity == 0.0
-    assert separate_directed_return_cuts(
-        arcs,
-        y_values={("H1", "H2"): 1.0, ("H2", "H1"): 0.0},
-        h_values={("H1", "H2"): 1.0},
-        big_m={("H1", "H2"): 4.0},
-        seen_signatures={first[0].signature()},
-    ) == ()
+    assert (
+        separate_directed_return_cuts(
+            arcs,
+            y_values={("H1", "H2"): 1.0, ("H2", "H1"): 0.0},
+            offered_values={("H1", "H2"): 1.0},
+            big_m={("H1", "H2"): 4.0},
+            seen_signatures={first[0].signature()},
+        )
+        == ()
+    )
 
 
 def test_directed_return_separator_returns_no_cut_when_satisfied() -> None:
-    assert separate_directed_return_cuts(
-        (("H1", "H2"), ("H2", "H1")),
-        y_values={("H1", "H2"): 1.0, ("H2", "H1"): 0.6},
-        h_values={("H1", "H2"): 5.0},
-        big_m={("H1", "H2"): 10.0},
-    ) == ()
+    assert (
+        separate_directed_return_cuts(
+            (("H1", "H2"), ("H2", "H1")),
+            y_values={("H1", "H2"): 1.0, ("H2", "H1"): 0.6},
+            offered_values={("H1", "H2"): 5.0},
+            big_m={("H1", "H2"): 10.0},
+        )
+        == ()
+    )
