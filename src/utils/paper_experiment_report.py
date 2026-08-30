@@ -141,6 +141,8 @@ PALETTE = {
     "paper": "#FFFFFF",
 }
 _ONE_PERCENT = 0.01
+_OPERATING_HOURS_PER_DAY = 16.0
+_OPERATING_DAYS_PER_YEAR = 365.0
 _CANONICAL_INSTANCE_FILES = (
     "metadata.json",
     "sites.csv",
@@ -703,7 +705,9 @@ def _normalise_solver_contract(
     declared_names: dict[str, str] = {}
     for declared_key, value in contract.items():
         actual_key = _SOLVER_OVERRIDE_KEYS.get(declared_key, declared_key)
-        if actual_key in normalized and not _contract_equal(normalized[actual_key], value):
+        if actual_key in normalized and not _contract_equal(
+            normalized[actual_key], value
+        ):
             raise ValueError(
                 f"{context} maps both {declared_names[actual_key]!r} and "
                 f"{declared_key!r} to {actual_key!r} with different values"
@@ -998,9 +1002,7 @@ def _enforce_role_contracts(
             )
 
         if role.category != "algorithm":
-            expected_model = _expected_model(
-                baseline_model, declared_model_overrides
-            )
+            expected_model = _expected_model(baseline_model, declared_model_overrides)
             if not _contract_equal(model, expected_model):
                 errors.append(
                     "正式角色 run_config.model 未继承 baseline.model/显式 overrides"
@@ -1716,7 +1718,9 @@ def _plot_choice_curve(
 ) -> tuple[Path, Path]:
     if not rows:
         return _pending_figure(
-            stem, "步行距离与到柜选择比例", "缺少显式用户选择参数或距离/优惠网格。"
+            stem,
+            "步行距离与条件到柜自取比例",
+            "缺少显式用户选择参数或距离/优惠网格。",
         )
     figure, axis = plt.subplots(figsize=(8.8, 5.2))
     _style_axes(axis)
@@ -1737,9 +1741,9 @@ def _plot_choice_curve(
         )
     axis.set_ylim(bottom=0)
     axis.set_xlabel("顾客到机柜的步行距离（km）", color=PALETTE["ink"])
-    axis.set_ylabel("选择到柜取餐的订单比例（%）", color=PALETTE["ink"])
+    axis.set_ylabel("成功送达展示机柜后选择自取的条件比例（%）", color=PALETTE["ink"])
     figure.suptitle(
-        "步行距离与到柜选择比例",
+        "步行距离与条件到柜自取比例",
         x=0.125,
         y=0.98,
         ha="left",
@@ -1750,7 +1754,7 @@ def _plot_choice_curve(
     figure.text(
         0.125,
         0.925,
-        "由当前未校准二项 Logit 场景参数计算；不是企业真实转化率预测。",
+        "条件于订单成功送达一个展示机柜；不是总订单转化率或企业预测。",
         color=PALETTE["muted"],
         fontsize=8.5,
     )
@@ -1771,15 +1775,15 @@ def _selected_main(evidence: Sequence[RoleEvidence]) -> RoleEvidence | None:
     return selected[0] if selected else None
 
 
-def _verify_selected_map_artifacts(
-    result_dir: Path, modes: Sequence[str]
-) -> None:
+def _verify_selected_map_artifacts(result_dir: Path, modes: Sequence[str]) -> None:
     """Verify every result file the selected-map loader will consume."""
 
     completion_path = result_dir / "run_complete.json"
     completion = _read_object(completion_path)
     if completion.get("schema_version") != 1 or completion.get("completed") is not True:
-        raise ValueError(f"selected map requires a sealed run_complete.json: {completion_path}")
+        raise ValueError(
+            f"selected map requires a sealed run_complete.json: {completion_path}"
+        )
     if completion.get("modes") != list(modes):
         raise ValueError(
             f"selected map modes disagree with run_complete.json: {completion_path}"
@@ -1957,6 +1961,652 @@ def _fmt_percent_fraction(value: Any, digits: int = 2) -> str:
     return "—" if number is None else f"{100.0 * number:.{digits}f}%"
 
 
+def _fmt_compact(value: Any) -> str:
+    number = _finite(value)
+    if number is None:
+        return "—"
+    return f"{number:,.6f}".rstrip("0").rstrip(".")
+
+
+def _fmt_sequence(value: Any) -> str:
+    if not isinstance(value, (list, tuple)):
+        return "—"
+    return "、".join(_fmt_compact(item) for item in value)
+
+
+def _numeric_sort_key(value: Any) -> tuple[bool, float]:
+    number = _finite(value)
+    return number is None, number if number is not None else math.inf
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
+
+
+def _markdown_table(headers: Sequence[str], rows: Sequence[Sequence[Any]]) -> list[str]:
+    lines = [
+        "|" + "|".join(_markdown_cell(header) for header in headers) + "|",
+        "|" + "|".join("---" for _header in headers) + "|",
+    ]
+    lines.extend(
+        "|" + "|".join(_markdown_cell(value) for value in row) + "|" for row in rows
+    )
+    return lines
+
+
+def _facility_design(row: Mapping[str, Any] | None) -> str:
+    if row is None:
+        return "—"
+    values = [
+        _integer(row.get("open_bases")),
+        _integer(row.get("open_lockers")),
+        _integer(row.get("open_swap_stations")),
+    ]
+    if any(value is None for value in values):
+        return "—"
+    return "/".join(str(value) for value in values)
+
+
+def _fleet_design(row: Mapping[str, Any] | None) -> str:
+    value = _row_number(row, "fleet_size")
+    if value is None:
+        return "—"
+    return f"{value:,.0f}" if math.isclose(value, round(value)) else f"{value:,.2f}"
+
+
+def _saving_design(row: Mapping[str, Any] | None) -> str:
+    amount = _row_number(row, "cost_saving_cny_per_hour")
+    percent = _row_number(row, "cost_saving_percent")
+    if amount is None and percent is None:
+        return "—"
+    if amount is None:
+        return f"{percent:.2f}%"
+    if percent is None:
+        return f"{amount:,.2f}"
+    return f"{amount:,.2f}（{percent:.2f}%）"
+
+
+def _certificate_scope(row: Mapping[str, Any] | None) -> str:
+    exact = _boolean(row.get("screening_is_exact")) if row is not None else None
+    if exact is True:
+        return "完整索引"
+    if exact is False:
+        return "筛选"
+    return "—"
+
+
+def _model_parameter_lines(
+    model: Mapping[str, Any], choice_parameters: Mapping[str, float] | None
+) -> list[str]:
+    rows: list[tuple[str, str, str, str, str]] = []
+
+    def add(
+        category: str,
+        label: str,
+        value: Any,
+        unit: str,
+        scope: str,
+        *,
+        transform: Any = None,
+    ) -> None:
+        if value is None:
+            return
+        rendered = transform(value) if transform is not None else _fmt_compact(value)
+        rows.append((category, label, rendered, unit, scope))
+
+    speed = _finite(model.get("drone_speed_mps"))
+    if speed is not None:
+        rows.append(
+            (
+                "物理与服务",
+                "无人机巡航速度",
+                f"{_fmt_compact(speed)}（{_fmt_compact(3.6 * speed)} km/h）",
+                "m/s",
+                "HD/MX/LO",
+            )
+        )
+    add(
+        "物理与服务",
+        "单块电池可用航程",
+        model.get("battery_range_km"),
+        "km/航段",
+        "HD/MX/LO",
+    )
+    for label, key in (
+        ("换电服务时间", "swap_service_time_hours"),
+        ("机柜最大平均处理时间", "max_locker_time_hours"),
+        ("虚拟待机最大平均等待时间", "max_virtual_wait_hours"),
+    ):
+        add(
+            "队列与服务",
+            label,
+            model.get(key),
+            "min",
+            "HD/MX/LO",
+            transform=lambda value: _fmt_compact(60.0 * float(value)),
+        )
+    if isinstance(model.get("availability_levels"), (list, tuple)):
+        rows.append(
+            (
+                "队列与服务",
+                "可用性离散等级",
+                _fmt_sequence(model["availability_levels"]),
+                "比例",
+                "HD/MX/LO",
+            )
+        )
+    if isinstance(model.get("locker_service_rates"), (list, tuple)):
+        rows.append(
+            (
+                "队列与服务",
+                "机柜处理能力等级",
+                _fmt_sequence(model["locker_service_rates"]),
+                "次/h",
+                "HD/MX/LO",
+            )
+        )
+    if isinstance(model.get("locker_capacity_costs"), (list, tuple)):
+        rows.append(
+            (
+                "成本",
+                "机柜容量档增量成本",
+                _fmt_sequence(model["locker_capacity_costs"]),
+                "CNY/(机柜·h)",
+                "HD/MX/LO",
+            )
+        )
+    cost_specs = (
+        ("无人机库固定成本", "base_cost_per_hour", "CNY/(库·h)", "HD/MX/LO"),
+        ("智能机柜固定成本", "locker_fixed_cost_per_hour", "CNY/(柜·h)", "HD/MX/LO"),
+        ("换电站固定成本", "swap_cost_per_hour", "CNY/(站·h)", "HD/MX/LO"),
+        ("普通物理连接成本", "corridor_cost_per_km_hour", "CNY/(km·h)", "HD/MX/LO"),
+        (
+            "涉及换电站的连接成本",
+            "connection_cost_per_km_hour",
+            "CNY/(km·h)",
+            "HD/MX/LO",
+        ),
+        ("航程运营成本", "flight_cost_per_km", "CNY/(架·km)", "HD/MX/LO"),
+        ("无人机机队成本", "drone_cost_per_hour", "CNY/(架·h)", "HD/MX/LO"),
+        ("骑手起步价", "rider_initial_charge_cny", "CNY/单", "HD/MX/LO"),
+        ("骑手起步价包含道路距离", "rider_included_distance_km", "km", "HD/MX/LO"),
+        (
+            "骑手超距增量成本",
+            "rider_incremental_cost_per_km",
+            "CNY/(单·km)",
+            "HD/MX/LO",
+        ),
+        ("直线至道路距离系数", "road_distance_factor", "—", "HD/MX/LO"),
+        ("首尾接驳骑手成本系数", "feeder_rider_cost_factor", "—", "HD/MX/LO"),
+        ("成功到柜处理成本", "locker_pickup_cost_per_order", "CNY/单", "MX/LO"),
+    )
+    for label, key, unit, scope in cost_specs:
+        value = model.get(key)
+        if key == "rider_initial_charge_cny" and value is None:
+            value = model.get("rider_base_cost")
+        add("成本", label, value, unit, scope)
+
+    raw_choice = model.get("choice")
+    choice = raw_choice if isinstance(raw_choice, Mapping) else choice_parameters or {}
+    choice_specs = (
+        ("机柜自取常数项", "locker_asc", "无量纲"),
+        ("配送时间敏感系数", "delivery_time_coefficient", "1/min"),
+        ("价格敏感系数", "price_coefficient", "1/CNY"),
+        ("步行距离敏感系数", "walk_distance_coefficient", "1/km"),
+        ("到家配送展示时长", "home_eta_minutes", "min"),
+        ("机柜配送展示时长", "locker_eta_minutes", "min"),
+        ("机柜自取优惠", "locker_discount_cny", "CNY"),
+        ("最大步行距离", "max_walk_km", "km"),
+    )
+    for label, key, unit in choice_specs:
+        add("用户选择", label, choice.get(key), unit, "MX/LO")
+
+    for label, key, unit, scope in (
+        ("每个展示机柜保留的候选始发机柜", "display_origin_choices", "个", "MX/LO"),
+        ("每个 OD 保留的一般运输走廊", "general_corridor_choices", "条", "HD/MX"),
+    ):
+        value = model.get(key)
+        rendered = "all（完整索引）" if value is None else _fmt_compact(value)
+        rows.append(("计算筛选", label, rendered, unit, scope))
+
+    return _markdown_table(("类别", "参数", "当前实际取值", "单位", "适用模式"), rows)
+
+
+def _fixed_cost_lines(
+    model: Mapping[str, Any], selected_mx: Mapping[str, Any] | None
+) -> list[str]:
+    hours_3y = _OPERATING_HOURS_PER_DAY * _OPERATING_DAYS_PER_YEAR * 3.0
+    hours_5y = _OPERATING_HOURS_PER_DAY * _OPERATING_DAYS_PER_YEAR * 5.0
+    rows: list[tuple[str, str, str, str]] = []
+
+    def add(label: str, hourly: Any) -> None:
+        value = _finite(hourly)
+        if value is None:
+            return
+        rows.append(
+            (
+                label,
+                f"{value:,.4f}",
+                f"{value * hours_3y:,.2f}",
+                f"{value * hours_5y:,.2f}",
+            )
+        )
+
+    add("无人机库（每库）", model.get("base_cost_per_hour"))
+    add("智能机柜固定项（每柜）", model.get("locker_fixed_cost_per_hour"))
+    add("换电站（每站）", model.get("swap_cost_per_hour"))
+    service_rates = model.get("locker_service_rates")
+    capacity_costs = model.get("locker_capacity_costs")
+    if isinstance(service_rates, (list, tuple)) and isinstance(
+        capacity_costs, (list, tuple)
+    ):
+        for rate, cost in zip(service_rates, capacity_costs):
+            add(
+                f"机柜容量档 {_fmt_compact(rate)} 次/h增量（每柜；不含固定项）",
+                cost,
+            )
+    add("普通物理连接（每 km）", model.get("corridor_cost_per_km_hour"))
+    add("涉及换电站的连接（每 km）", model.get("connection_cost_per_km_hour"))
+
+    lines = [
+        "换算只针对模型中的固定网络分项：按 **16 小时/日 × 365 日/年** 连续运营，成本不随年份变化，**无折现**。",
+        "3 年和 5 年等价运营时数分别为 17,520 h 和 29,200 h；下表是由 CNY/h 参数反算的等价一次性金额，不是企业报价、观测 CAPEX 或折现现金流。",
+        "",
+    ]
+    lines.extend(
+        _markdown_table(
+            (
+                "固定网络分项",
+                "小时参数（CNY/h）",
+                "3 年等价一次性金额（CNY）",
+                "5 年等价一次性金额（CNY）",
+            ),
+            rows,
+        )
+    )
+    components = [
+        _row_number(selected_mx, key)
+        for key in (
+            "facility_cost_cny_per_hour",
+            "capacity_cost_cny_per_hour",
+            "connection_cost_cny_per_hour",
+        )
+    ]
+    if all(value is not None for value in components):
+        fixed_hourly = sum(float(value) for value in components if value is not None)
+        h = _integer(selected_mx.get("candidate_lockers")) if selected_mx else None
+        lines.extend(
+            [
+                "",
+                f"H{h if h is not None else '—'} MX 当前解的固定网络合计为 "
+                f"{components[0]:,.4f}（设施）+ {components[1]:,.4f}（容量）+ "
+                f"{components[2]:,.4f}（连接）= **{fixed_hourly:,.4f} CNY/h**。",
+                f"在上述假设下，对应 **3 年 {fixed_hourly * hours_3y:,.2f} CNY**、"
+                f"**5 年 {fixed_hourly * hours_5y:,.2f} CNY**。机队、飞行、骑手与到柜处理成本不在该固定网络合计中。",
+            ]
+        )
+    return lines
+
+
+def _selected_mode_result_lines(selected: RoleEvidence | None) -> list[str]:
+    rows: list[tuple[str, ...]] = []
+    if selected is not None:
+        for mode in ("HD", "MX", "LO"):
+            row = _mode_row(selected, mode)
+            if row is None:
+                continue
+            rows.append(
+                (
+                    f"{MODE_NAMES[mode]}（{mode}）",
+                    _fmt_number(row.get("objective_cny_per_hour")),
+                    _fmt_number(row.get("objective_bound_cny_per_hour")),
+                    _fmt_percent_fraction(row.get("mip_gap_fraction")),
+                    _fmt_number(row.get("runtime_seconds")),
+                    str(row.get("status_name", "—")),
+                    _facility_design(row),
+                    _fleet_design(row),
+                    _fmt_percent_fraction(row.get("drone_service_fraction")),
+                    _saving_design(row),
+                    _certificate_scope(row),
+                )
+            )
+    return _markdown_table(
+        (
+            "模式",
+            "履约成本（CNY/h）",
+            "有效下界（CNY/h）",
+            "Gap",
+            "实际用时（s）",
+            "求解器状态",
+            "开放设施 L/H/E",
+            "机队（架）",
+            "无人机实际服务率",
+            "相对全骑手成本节约（CNY/h，%）",
+            "证书范围",
+        ),
+        rows,
+    )
+
+
+def _scale_result_lines(
+    evidence: Sequence[RoleEvidence], selected: RoleEvidence | None
+) -> list[str]:
+    table_rows: list[tuple[str, ...]] = []
+    scale_items = sorted(
+        (item for item in evidence if item.role.category == "scale"),
+        key=lambda item: (
+            *_numeric_sort_key(item.role.x_value),
+            item.role.scenario_id,
+        ),
+    )
+    for item in scale_items:
+        row = _mode_row(item, "MX")
+        h = _integer(item.role.x_value)
+        budget = _row_number(row, "solver_time_limit_seconds")
+        table_rows.append(
+            (
+                f"H{h}" if h is not None else item.role.label,
+                f"{budget:g}s 统一规模扫描" if budget is not None else "统一规模扫描",
+                _fmt_number(row.get("objective_cny_per_hour") if row else None),
+                _fmt_number(row.get("objective_bound_cny_per_hour") if row else None),
+                _fmt_percent_fraction(row.get("mip_gap_fraction") if row else None),
+                _fmt_number(row.get("runtime_seconds") if row else None),
+                _facility_design(row),
+                _fleet_design(row),
+                _fmt_percent_fraction(
+                    row.get("drone_service_fraction") if row else None
+                ),
+                _saving_design(row),
+                _certificate_scope(row),
+                item.status,
+            )
+        )
+    if selected is not None:
+        row = _mode_row(selected, "MX")
+        if row is not None:
+            h = _integer(row.get("candidate_lockers"))
+            budget = _row_number(row, "solver_time_limit_seconds")
+            table_rows.append(
+                (
+                    f"H{h}" if h is not None else selected.role.label,
+                    f"{budget:g}s 长时认证（selected main）"
+                    if budget is not None
+                    else "长时认证（selected main）",
+                    _fmt_number(row.get("objective_cny_per_hour")),
+                    _fmt_number(row.get("objective_bound_cny_per_hour")),
+                    _fmt_percent_fraction(row.get("mip_gap_fraction")),
+                    _fmt_number(row.get("runtime_seconds")),
+                    _facility_design(row),
+                    _fleet_design(row),
+                    _fmt_percent_fraction(row.get("drone_service_fraction")),
+                    _saving_design(row),
+                    _certificate_scope(row),
+                    selected.status,
+                )
+            )
+    return _markdown_table(
+        (
+            "规模",
+            "预算与用途",
+            "MX 履约成本",
+            "MX 下界",
+            "MX Gap",
+            "实际用时（s）",
+            "设施 L/H/E",
+            "机队",
+            "服务率",
+            "成本节约（CNY/h，%）",
+            "证书范围",
+            "证据状态",
+        ),
+        table_rows,
+    )
+
+
+def _stop_rule_lines(config: Mapping[str, Any]) -> list[str]:
+    raw_decisions = config.get("stop_rule_decisions")
+    if not isinstance(raw_decisions, list):
+        return []
+    rows: list[tuple[str, str, str, str, str]] = []
+    affected_all: list[str] = []
+    for raw in raw_decisions:
+        if not isinstance(raw, Mapping):
+            continue
+        affected = raw.get("affected_roles")
+        affected_ids = (
+            [
+                str(item.get("scenario_id"))
+                for item in affected
+                if isinstance(item, Mapping) and item.get("scenario_id")
+            ]
+            if isinstance(affected, list)
+            else []
+        )
+        if raw.get("decision_status") == "triggered" and raw.get("action") == "not_run":
+            affected_all.extend(affected_ids)
+        trigger_parts: list[str] = []
+        trigger_evidence = raw.get("trigger_evidence")
+        if isinstance(trigger_evidence, list):
+            for item in trigger_evidence:
+                if not isinstance(item, Mapping):
+                    continue
+                observed = item.get("observed", "—")
+                field = item.get("field", "—")
+                operator = item.get("operator")
+                threshold = item.get("threshold")
+                is_gap = str(field) in {"mip_gap", "mip_gap_fraction"}
+                rendered_threshold = (
+                    _fmt_percent_fraction(threshold)
+                    if is_gap
+                    else _fmt_compact(threshold)
+                )
+                rendered_observed = (
+                    _fmt_percent_fraction(observed) if is_gap else str(observed)
+                )
+                comparison = (
+                    f" {operator} {rendered_threshold}"
+                    if operator is not None and threshold is not None
+                    else ""
+                )
+                trigger_parts.append(
+                    f"{item.get('scenario_id', '—')}:{field}{comparison}"
+                    f"（观测={rendered_observed}）"
+                )
+        source = raw.get("source")
+        source_reference = (
+            str(source.get("reference", "—")) if isinstance(source, Mapping) else "—"
+        )
+        reason = str(raw.get("reason", "—"))
+        rows.append(
+            (
+                str(raw.get("decision_id", "—")),
+                f"{raw.get('decision_status', '—')} / {raw.get('action', '—')}",
+                "；".join(trigger_parts) or "—",
+                "、".join(affected_ids) or "—",
+                f"{raw.get('protocol_relation', '—')}；{source_reference}；{reason}",
+            )
+        )
+    if not rows:
+        return []
+    lines = _markdown_table(
+        ("决策 ID", "状态/动作", "触发证据", "涉及规模", "协议关系/来源/原因"), rows
+    )
+    if affected_all:
+        readable = "、".join(dict.fromkeys(affected_all))
+        lines.extend(
+            [
+                "",
+                f"{readable} 是根据上述显式停止决策**未执行**的规模点。"
+                "**未执行不是失败**，也不是求解不可行、模型不可行或该规模不可解的证据。",
+            ]
+        )
+    return lines
+
+
+def _exactness_result_lines(evidence: Sequence[RoleEvidence]) -> list[str]:
+    rows: list[tuple[str, ...]] = []
+    for item in evidence:
+        if item.role.category != "exactness":
+            continue
+        row = _mode_row(item, "MX")
+        index_scope = (
+            f"screened（{item.role.x_value}）"
+            if item.role.role == "screened"
+            else "complete-index（all/all）"
+            if item.role.role == "complete"
+            else str(item.role.x_value or "—")
+        )
+        rows.append(
+            (
+                index_scope,
+                _fmt_number(row.get("objective_cny_per_hour") if row else None),
+                _fmt_number(row.get("objective_bound_cny_per_hour") if row else None),
+                _fmt_percent_fraction(row.get("mip_gap_fraction") if row else None),
+                _fmt_number(row.get("runtime_seconds") if row else None),
+                _facility_design(row),
+                _fleet_design(row),
+                _fmt_percent_fraction(
+                    row.get("drone_service_fraction") if row else None
+                ),
+                _saving_design(row),
+                item.status,
+            )
+        )
+    return _markdown_table(
+        (
+            "索引范围",
+            "MX 履约成本",
+            "MX 下界",
+            "Gap",
+            "用时（s）",
+            "设施 L/H/E",
+            "机队",
+            "服务率",
+            "成本节约（CNY/h，%）",
+            "证据状态",
+        ),
+        rows,
+    )
+
+
+_SENSITIVITY_NAMES = {
+    "rider_cost": "骑手资费倍数",
+    "drone_system_cost": "无人机系统成本倍数",
+    "locker_discount": "机柜优惠（CNY）",
+}
+
+
+def _sensitivity_result_lines(evidence: Sequence[RoleEvidence]) -> list[str]:
+    groups: dict[str, list[RoleEvidence]] = {}
+    for item in evidence:
+        if item.role.category == "sensitivity":
+            groups.setdefault(item.role.group or "sensitivity", []).append(item)
+    lines: list[str] = []
+    for group, items in groups.items():
+        if lines:
+            lines.append("")
+        lines.extend([f"#### {_SENSITIVITY_NAMES.get(group, group)}", ""])
+        table_rows: list[tuple[str, ...]] = []
+        for item in sorted(
+            items,
+            key=lambda value: (
+                *_numeric_sort_key(value.role.x_value),
+                value.role.scenario_id,
+            ),
+        ):
+            row = _mode_row(item, "MX")
+            gap = _row_number(row, "mip_gap_fraction")
+            point_ready = (
+                item.status == "ready" and gap is not None and gap <= _ONE_PERCENT
+            )
+            objective = (
+                _fmt_number(row.get("objective_cny_per_hour"))
+                if row is not None and point_ready
+                else "—（Gap>1% 或未 ready）"
+            )
+            saving = _saving_design(row) if point_ready else "—（不作点估计比较）"
+            locker_share = "—"
+            if group == "locker_discount" and row is not None:
+                pickup = _row_number(row, "locker_pickup_per_hour")
+                demand = _row_number(row, "total_demand_per_hour")
+                if pickup is not None and demand is not None and demand > 0:
+                    locker_share = _fmt_percent_fraction(pickup / demand)
+            table_rows.append(
+                (
+                    _fmt_compact(item.role.x_value),
+                    objective,
+                    _fmt_percent_fraction(gap),
+                    saving,
+                    _facility_design(row),
+                    _fleet_design(row),
+                    _fmt_percent_fraction(
+                        row.get("drone_service_fraction") if row else None
+                    ),
+                    locker_share,
+                    item.status,
+                )
+            )
+        lines.extend(
+            _markdown_table(
+                (
+                    "水平",
+                    "MX 履约成本（CNY/h）",
+                    "Gap",
+                    "相对本情景全骑手反事实的成本节约（CNY/h，%）",
+                    "设施 L/H/E",
+                    "机队",
+                    "无人机服务率",
+                    "到柜服务占总需求（仅优惠组）",
+                    "证据状态",
+                ),
+                table_rows,
+            )
+        )
+    return lines
+
+
+def _algorithm_result_lines(evidence: Sequence[RoleEvidence]) -> list[str]:
+    rows: list[tuple[str, ...]] = []
+    for item in evidence:
+        if item.role.category != "algorithm":
+            continue
+        row = _mode_row(item, "MX")
+        method = _integer(row.get("solver_miqcp_method")) if row else None
+        rows.append(
+            (
+                f"MIQCPMethod={method}" if method is not None else item.role.label,
+                _fmt_number(row.get("objective_cny_per_hour") if row else None),
+                _fmt_number(row.get("objective_bound_cny_per_hour") if row else None),
+                _fmt_percent_fraction(row.get("mip_gap_fraction") if row else None),
+                _fmt_number(row.get("runtime_seconds") if row else None),
+                str(row.get("status_name", "—")) if row else "—",
+                _facility_design(row),
+                _fleet_design(row),
+                _fmt_percent_fraction(
+                    row.get("drone_service_fraction") if row else None
+                ),
+                _saving_design(row),
+                item.status,
+            )
+        )
+    return _markdown_table(
+        (
+            "方法",
+            "MX incumbent",
+            "MX bound",
+            "Gap",
+            "用时（s）",
+            "求解器状态",
+            "设施 L/H/E",
+            "机队",
+            "服务率",
+            "成本节约（CNY/h，%）",
+            "证据级别",
+        ),
+        rows,
+    )
+
+
 def _markdown_report(
     output_dir: Path,
     evidence: Sequence[RoleEvidence],
@@ -1965,6 +2615,9 @@ def _markdown_report(
     ledger_paths: Sequence[Path],
     map_render: MapRender,
     report_kind: str,
+    config: Mapping[str, Any],
+    selected_run_config: Mapping[str, Any] | None,
+    choice_parameters: Mapping[str, float] | None,
 ) -> Path:
     selected = _selected_main(evidence)
     mx = _mode_row(selected, "MX") if selected and selected.ready else None
@@ -1973,16 +2626,17 @@ def _markdown_report(
     pilot_count = sum(item.status == "pilot" for item in evidence)
     invalid_count = sum(item.status == "invalid" for item in evidence)
     pending_count = sum(item.status == "pending" for item in evidence)
+    selected_h = _integer(mx.get("candidate_lockers")) if mx is not None else None
+    selected_gap = _row_number(mx, "mip_gap_fraction") if mx is not None else None
+    selected_budget = (
+        _row_number(mx, "solver_time_limit_seconds") if mx is not None else None
+    )
+    selected_target_met = selected_gap is not None and selected_gap <= _ONE_PERCENT
     if mx is not None:
-        h = _integer(mx.get("candidate_lockers"))
-        gap = _row_number(mx, "mip_gap_fraction")
         main_sentence = (
-            f"显式选定的 H{h} MX 主算例 Gap 为 {_fmt_percent_fraction(gap)}，"
-            + (
-                "达到 1% 目标。"
-                if gap is not None and gap <= _ONE_PERCENT
-                else "尚未达到 1% 目标。"
-            )
+            f"显式选定的 H{selected_h} MX 主算例 Gap 为 "
+            f"{_fmt_percent_fraction(selected_gap)}，"
+            + ("达到 1% 目标。" if selected_target_met else "尚未达到 1% 目标。")
         )
         screening = _boolean(mx.get("screening_is_exact"))
         certificate_sentence = (
@@ -1994,9 +2648,16 @@ def _markdown_report(
         main_sentence = "主算例尚未形成可用于论文结论的三模式验证结果。"
         certificate_sentence = "缺失或未通过验证的结果只列入 pending/invalid 清单。"
     if largest is None:
-        scale_sentence = "当前账本尚无通过验证且 MX Gap≤1% 的规模点。"
+        scale_sentence = "在统一规模扫描中，尚无通过验证且 MX Gap≤1% 的规模点。"
     else:
-        scale_sentence = f"在显式登记并已完成的规模点中，最大达标档为 H{largest[0]}（Gap {100 * largest[1]:.2f}%）。"
+        scale_sentence = f"在统一规模扫描中，最大达标档为 H{largest[0]}（Gap {100 * largest[1]:.2f}%）。"
+    if mx is not None:
+        if selected_budget is not None:
+            scale_sentence += (
+                f" 另行选定的 H{selected_h if selected_h is not None else '—'} "
+                f"长时认证预算为 {selected_budget:g}s，MX Gap "
+                f"为 {_fmt_percent_fraction(selected_gap)}；该证书不与统一预算规模扫描混为同一预算结论。"
+            )
 
     report_title = (
         "MLND 南山论文数值实验报告"
@@ -2012,6 +2673,46 @@ def _markdown_report(
         choice_path = choice_source.path.relative_to(_repo_root()).as_posix()
     except ValueError:
         choice_path = str(choice_source.path)
+    run_model = _as_mapping(
+        selected_run_config.get("model")
+        if isinstance(selected_run_config, Mapping)
+        else None
+    )
+    if not run_model:
+        run_model = _as_mapping(_nested_value(config, ("baseline", "model")))
+    parameter_lines = _model_parameter_lines(run_model, choice_parameters)
+    fixed_cost_lines = _fixed_cost_lines(run_model, mx)
+    selected_result_lines = _selected_mode_result_lines(selected)
+    scale_result_lines = _scale_result_lines(evidence, selected)
+    stop_rule_lines = _stop_rule_lines(config)
+    exactness_result_lines = _exactness_result_lines(evidence)
+    sensitivity_result_lines = _sensitivity_result_lines(evidence)
+    algorithm_result_lines = _algorithm_result_lines(evidence)
+    final_ready = (
+        report_kind == "final"
+        and pending_count == 0
+        and invalid_count == 0
+        and map_render.status == "ready"
+        and selected_target_met
+    )
+    if pending_count or invalid_count:
+        next_step = (
+            f"当前仍有 {pending_count} 个 pending 和 {invalid_count} 个 invalid 角色；"
+            "完成或修复这些角色后重建 ledger 并重新生成报告。"
+            "只有 Gap≤1% 且独立验证通过的敏感性情景才进入成本点估计比较。"
+        )
+    elif not final_ready:
+        next_step = (
+            "已登记角色没有 pending/invalid，但完整最终产物尚需满足 final registry、地图和选定 MX Gap≤1% 三项条件；"
+            "满足后用同一密封账本重新生成。"
+        )
+    else:
+        next_step = (
+            "当前 final evidence registry 没有 pending 或 invalid 角色，不需要补跑已登记实验。"
+            f"其中 {pilot_count} 个算法角色仍是 pilot；如需正式方法排名，必须在当前 selected-main 实现上预注册并重跑匹配对照。"
+            "下一步应聚焦外部有效性：用企业观测数据校准用户选择参数，"
+            "并在新的显式计算预算下评估更宽筛选集的稳健性。"
+        )
     lines = [
         f"# {report_title}",
         "",
@@ -2022,6 +2723,58 @@ def _markdown_report(
         f"{scale_sentence}",
         f"本报告共读取 {len(evidence)} 个显式论文角色：{formal_ready_count} 个 ready、{pilot_count} 个 pilot、{pending_count} 个 pending、{invalid_count} 个 invalid。",
         "所有金额指标均为模型中的履约成本或相对全骑手反事实的成本节约（CNY/h），不是营业收入或利润。",
+        "",
+        "## 当前模型与场景参数",
+        "",
+        "参数表来自显式选定主算例的密封 `run_config.model`；用户选择系数是透明场景设定，尚未用企业行为数据校准。",
+        "",
+        *parameter_lines,
+        "",
+        "### 3 年/5 年等价一次性固定成本",
+        "",
+        *fixed_cost_lines,
+        "",
+        "## 详细数值结果",
+        "",
+        (
+            f"### 选定主算例三模式（H{selected_h}）"
+            if selected_h is not None
+            else "### 选定主算例三模式"
+        ),
+        "",
+        *selected_result_lines,
+        "",
+        "设施列按 L/H/E 分别表示无人机库、智能机柜和实体换电站。"
+        "成本节约一律相对同一情景的全骑手反事实，不是收入或利润。",
+        "",
+        "### 统一预算规模扫描与选定主算例长时认证",
+        "",
+        *scale_result_lines,
+        "",
+        "规模扫描行只用于各自登记预算下的横向比较；selected-main 行是单独的长时认证。"
+        "因此，长时证书不能倒填为相同规模的统一预算扫描证书。",
+        "",
+        *(["#### 顶层停止决策", "", *stop_rule_lines, ""] if stop_rule_lines else []),
+        "### 筛选索引与完整索引对照",
+        "",
+        *exactness_result_lines,
+        "",
+        "两行的 Gap 分别约束各自的索引集。screened 与 complete-index 可行集不同，"
+        "目标值差异不能无条件解读为成本改善，更不能解读为利润差。",
+        "",
+        "### 三组敏感性三点结果",
+        "",
+        *sensitivity_result_lines,
+        "",
+        "敏感性成本点估计只在独立验证通过且 Gap≤1% 时展示。"
+        "骑手资费变动时，履约成本和全骑手反事实同时改变；节约不是营收或利润。",
+        "",
+        "### MIQCPMethod 算法 pilot",
+        "",
+        *algorithm_result_lines,
+        "",
+        "pilot 行是匹配登记预算下的开发期算法证据，不是正式管理结果；"
+        "如果实现提交或实现哈希与 selected main 不同，不作同基线的算法排名。",
         "",
         "## 关键结果与图证",
         "",
@@ -2053,7 +2806,9 @@ def _markdown_report(
         "",
         "![用户选择距离曲线](figures/choice_distance_curve.png)",
         "",
-        f"距离曲线由 `{choice_path}` 的 `{choice_source.locator}` 参数计算。它给出场景内到柜比例，不是由企业行为数据校准的真实转化率预测。",
+        f"距离曲线由 `{choice_path}` 的 `{choice_source.locator}` 参数计算。"
+        "它给出订单成功送达一个展示机柜后选择自取的条件比例，"
+        "不是总订单到柜转化率，也不是由企业行为数据校准的预测。",
         "",
         "## 范围、数据与指标定义",
         "",
@@ -2090,7 +2845,7 @@ def _markdown_report(
             "",
             "## 建议的下一步",
             "",
-            "先完成 pending 角色并重新生成账本与本报告；只有 Gap≤1% 且独立验证通过的敏感性情景进入论文点估计比较。若主算例使用筛选，需保留 complete-index 小算例作为完整模型证书，且分别报告两类证书范围。",
+            next_step,
             "",
             "## 进一步问题",
             "",
@@ -2121,9 +2876,9 @@ def _markdown_report(
             lines.extend(
                 [
                     "",
-                    "## 用户选择直观锚点",
+                    "## 用户选择条件比例直观锚点",
                     "",
-                    "|步行距离 km|优惠 CNY|到柜比例|",
+                    "|步行距离 km|优惠 CNY|成功送达展示机柜后的自取条件比例|",
                     "|---:|---:|---:|",
                 ]
             )
@@ -2329,7 +3084,8 @@ def _write_artifact(
                 "tables_used": [choice_path, choice_parameter_path],
                 "filters": [],
                 "metric_definitions": [
-                    "到柜比例来自未校准二项 Logit 场景，不是企业真实转化率预测。"
+                    "该比例条件于订单成功送达一个展示机柜，来自未校准二项 Logit 场景；"
+                    "不是总订单到柜转化率或企业预测。"
                 ],
             },
         },
@@ -2581,10 +3337,10 @@ def _write_artifact(
         charts.append(
             {
                 "id": "choice_distance",
-                "title": "步行距离与到柜选择比例",
-                "subtitle": "当前未校准二项 Logit 场景；不同机柜优惠水平。",
+                "title": "步行距离与条件到柜自取比例",
+                "subtitle": "条件于成功送达展示机柜；当前未校准二项 Logit 场景。",
                 "intent": "relationship",
-                "question": "步行距离和优惠如何改变模型中的到柜比例？",
+                "question": "步行距离和优惠如何改变送达展示机柜后的自取条件比例？",
                 "rationale": "距离为连续输入，优惠为有意义的情景分组。",
                 "type": "line",
                 "dataset": "choice_curve",
@@ -2599,7 +3355,7 @@ def _write_artifact(
                         "field": "locker_choice_share",
                         "type": "quantitative",
                         "format": "percent",
-                        "label": "到柜比例",
+                        "label": "条件自取比例",
                     },
                     "color": {
                         "field": "locker_discount_cny",
@@ -2652,6 +3408,34 @@ def _write_artifact(
         if report_kind == "final"
         else "MLND 南山数值实验进度报告"
     )
+    artifact_final_ready = (
+        report_kind == "final"
+        and bool(evidence)
+        and all(item.status in {"ready", "pilot"} for item in evidence)
+        and map_render.status == "ready"
+        and main_mx is not None
+        and _finite(main_mx.get("mip_gap_fraction")) is not None
+        and float(main_mx["mip_gap_fraction"]) <= _ONE_PERCENT
+    )
+    no_unresolved_roles = bool(evidence) and all(
+        item.status in {"ready", "pilot"} for item in evidence
+    )
+    if artifact_final_ready:
+        artifact_next_step = (
+            "## 建议的下一步\n\n当前没有 pending/invalid 角色。"
+            "算法对照仍是 pilot；正式方法排名需在当前 selected-main 实现上预注册重跑。"
+            "同时应使用企业观测数据校准用户选择参数。"
+        )
+    elif no_unresolved_roles:
+        artifact_next_step = (
+            "## 建议的下一步\n\n当前没有 pending/invalid 角色，但最终就绪仍要求"
+            "地图可用且选定 MX Gap≤1%。满足后用同一密封账本重新生成。"
+        )
+    else:
+        artifact_next_step = (
+            "## 建议的下一步\n\n完成或修复 pending/invalid 角色后重建 ledger，"
+            "再运行同一报告命令；不得用未达 1% 的敏感性 incumbent 作精确排序。"
+        )
     blocks: list[dict[str, Any]] = [
         {
             "id": "title",
@@ -2742,7 +3526,7 @@ def _write_artifact(
             {
                 "id": "next_steps",
                 "type": "markdown",
-                "body": "## 建议的下一步\n\n补齐 pending 实验后重建 ledger，再运行同一报告命令；不得用未达 1% 的敏感性 incumbent 作精确排序。",
+                "body": artifact_next_step,
                 "layout": "full",
             },
             {
@@ -2773,14 +3557,7 @@ def _write_artifact(
         "snapshot": {
             "version": 1,
             "generatedAt": generated_at,
-            "status": (
-                "ready"
-                if report_kind == "final"
-                and evidence
-                and all(item.status in {"ready", "pilot"} for item in evidence)
-                and map_render.status == "ready"
-                else "partial"
-            ),
+            "status": ("ready" if artifact_final_ready else "partial"),
             "datasets": {
                 "headline": headline,
                 "results": result_rows,
@@ -2852,7 +3629,7 @@ def write_paper_experiment_report(
     )
     roles = _parse_roles(config, experiment_root)
     evidence = _evidence_for_roles(roles, ledger_rows)
-    evidence, _run_configs = _enforce_role_contracts(
+    evidence, run_configs = _enforce_role_contracts(
         config, evidence, ledger_rows, experiment_root
     )
     if not any(item.status in {"ready", "pilot"} for item in evidence):
@@ -2923,6 +3700,9 @@ def write_paper_experiment_report(
         ledger_paths,
         map_render,
         report_kind,
+        config,
+        (run_configs.get(selected.role.run_path) if selected is not None else None),
+        parameters,
     )
     generated_at = datetime.now(UTC).isoformat()
     artifact = _write_artifact(

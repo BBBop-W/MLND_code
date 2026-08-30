@@ -17,14 +17,36 @@ from src.utils.paper_experiment_ledger import build_paper_experiment_ledger
 _BASELINE_MODEL: dict[str, object] = {
     "drone_speed_mps": 20.0,
     "battery_range_km": 10.0,
+    "swap_service_time_hours": 0.05,
+    "max_locker_time_hours": 5.0 / 60.0,
+    "max_virtual_wait_hours": 5.0 / 60.0,
+    "availability_levels": [0.5, 0.65, 0.8, 0.9, 0.95],
+    "locker_service_rates": [30.0, 40.0, 50.0],
+    "locker_capacity_costs": [0.5, 1.0, 2.0],
     "display_origin_choices": 8,
     "general_corridor_choices": 10,
-    "choice": {"locker_discount_cny": 1.0},
+    "choice": {
+        "locker_asc": -1.0,
+        "delivery_time_coefficient": 0.06,
+        "price_coefficient": 0.35,
+        "walk_distance_coefficient": 1.2,
+        "home_eta_minutes": 30.0,
+        "locker_eta_minutes": 20.0,
+        "locker_discount_cny": 1.0,
+        "max_walk_km": 1.5,
+    },
     "rider_base_cost": 6.4,
+    "rider_included_distance_km": 3.0,
     "rider_incremental_cost_per_km": 1.8,
+    "road_distance_factor": 1.25,
+    "feeder_rider_cost_factor": 0.3,
+    "locker_pickup_cost_per_order": 0.3,
     "base_cost_per_hour": 14.0,
     "locker_fixed_cost_per_hour": 1.0,
     "swap_cost_per_hour": 3.0,
+    "corridor_cost_per_km_hour": 0.02,
+    "connection_cost_per_km_hour": 0.05,
+    "flight_cost_per_km": 0.2,
     "drone_cost_per_hour": 5.0,
 }
 
@@ -123,7 +145,7 @@ def _write_instance(root: Path, key: str, h: int) -> tuple[Path, dict[str, str]]
         )
     if not sites.exists():
         sites.write_text(
-            "site_id,site_type,x_km,y_km\n" f"{key}-L1,locker,0.0,0.0\n",
+            f"site_id,site_type,x_km,y_km\n{key}-L1,locker,0.0,0.0\n",
             encoding="utf-8",
         )
     if not od_nodes.exists():
@@ -264,8 +286,10 @@ def _write_run_sources(
             "costs_cny_per_hour": {
                 "optimized_total": objective,
                 "facility": 100.0,
+                "capacity": 40.0,
+                "connection": 10.0,
                 "fleet": 500.0,
-                "direct_courier_fallback": objective - 600.0,
+                "direct_courier_fallback": objective - 650.0,
             },
             "demand_funnel_orders_per_hour": {
                 "total_demand": demand,
@@ -645,6 +669,14 @@ def test_report_is_dynamic_and_keeps_pending_roles_out_of_claims(
     assert "H120" not in markdown
     assert "不是营业收入或利润" in markdown
     assert "只属于预设筛选模型" in markdown
+    assert "## 当前模型与场景参数" in markdown
+    assert "|物理与服务|无人机巡航速度|20（72 km/h）|" in markdown
+    assert "**16 小时/日 × 365 日/年**" in markdown
+    assert "### 选定主算例三模式（H24）" in markdown
+    assert "### 筛选索引与完整索引对照" in markdown
+    assert "### 三组敏感性三点结果" in markdown
+    assert "### MIQCPMethod 算法 pilot" in markdown
+    assert "开放设施 L/H/E" in markdown
 
     artifact = json.loads(outputs.artifact.read_text(encoding="utf-8"))
     assert artifact["surface"] == "report"
@@ -667,6 +699,154 @@ def test_report_is_dynamic_and_keeps_pending_roles_out_of_claims(
     assert len(outputs.figures) == 12
     assert all(path.is_file() and path.stat().st_size > 0 for path in outputs.figures)
     assert all(path.is_file() for path in outputs.tables)
+
+
+def test_final_ready_markdown_renders_stop_decisions_and_no_pending_instruction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    experiment_root = tmp_path / "experiment"
+    experiment_root.mkdir()
+    rows = [
+        _ledger_row("main/h24", mode=mode, solver_time_limit_seconds=900)
+        for mode in ("HD", "MX", "LO")
+    ]
+    _write_ledger_bundle(experiment_root, rows)
+    config = _config_with_roles(
+        experiment_root,
+        {"main": _selected_main_role(experiment_root, modes=["HD", "MX", "LO"])},
+    )
+    config["stop_rule_decisions"] = [
+        {
+            "decision_id": "scale-stop-after-H43",
+            "decision_status": "triggered",
+            "action": "not_run",
+            "protocol_relation": "amendment_before_H68",
+            "source": {"reference": "frozen before H68"},
+            "trigger_evidence": [
+                {
+                    "scenario_id": "scale_H43_300s",
+                    "field": "mip_gap",
+                    "operator": ">",
+                    "threshold": 0.05,
+                    "observed": 0.6,
+                }
+            ],
+            "affected_roles": [
+                {"scenario_id": "scale_H68_300s"},
+                {"scenario_id": "scale_H87_300s"},
+                {"scenario_id": "scale_H120_300s"},
+            ],
+            "reason": "Not attempted under the current algorithm-budget pair.",
+        }
+    ]
+    config_path = _write_config(tmp_path / "scenario_config.json", config)
+
+    def fake_map(selected, experiment_root, basemap_cache, stem):  # noqa: ANN001
+        png, svg = report._pending_figure(stem, "测试地图", "地图接口已调用")
+        return report.MapRender(png, svg, "ready", "fixture map ready")
+
+    monkeypatch.setattr(report, "_plot_selected_map", fake_map)
+    outputs = report.write_paper_experiment_report(config_path, tmp_path / "report")
+    markdown = outputs.markdown.read_text(encoding="utf-8")
+    assert "H24 MX 当前解的固定网络合计" in markdown
+    assert "**150.0000 CNY/h**" in markdown
+    assert "**3 年 2,628,000.00 CNY**" in markdown
+    assert "mip_gap > 5.00%（观测=60.00%）" in markdown
+    assert "scale_H68_300s、scale_H87_300s、scale_H120_300s" in markdown
+    assert "**未执行不是失败**" in markdown
+    assert "当前 final evidence registry 没有 pending 或 invalid 角色" in markdown
+    assert "成功送达展示机柜后的自取条件比例" in markdown
+    assert "先完成 pending" not in markdown
+    assert "补齐 pending" not in markdown
+    artifact = json.loads(outputs.artifact.read_text(encoding="utf-8"))
+    next_step = next(
+        block["body"]
+        for block in artifact["manifest"]["blocks"]
+        if block["id"] == "next_steps"
+    )
+    assert "补齐 pending" not in next_step
+    assert "当前没有 pending/invalid 角色" in next_step
+
+
+def test_fractional_fixed_network_total_uses_auditable_display_precision() -> None:
+    selected_mx = {
+        "candidate_lockers": 24,
+        "facility_cost_cny_per_hour": 58.0,
+        "capacity_cost_cny_per_hour": 48.0,
+        "connection_cost_cny_per_hour": 16.9628807835,
+    }
+    rendered = "\n".join(report._fixed_cost_lines(_BASELINE_MODEL, selected_mx))
+    assert "16.9629（连接）= **122.9629 CNY/h**" in rendered
+    assert "**3 年 2,154,309.67 CNY**" in rendered
+    assert "**5 年 3,590,516.12 CNY**" in rendered
+
+
+def test_final_artifact_is_partial_when_selected_mx_misses_one_percent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    experiment_root = tmp_path / "experiment"
+    experiment_root.mkdir()
+    rows = [
+        _ledger_row("main/h24", mode=mode, gap=0.012, solver_time_limit_seconds=900)
+        for mode in ("HD", "MX", "LO")
+    ]
+    _write_ledger_bundle(experiment_root, rows)
+    config = _config_with_roles(
+        experiment_root,
+        {"main": _selected_main_role(experiment_root, modes=["HD", "MX", "LO"])},
+    )
+    config_path = _write_config(tmp_path / "scenario_config.json", config)
+
+    def fake_map(selected, experiment_root, basemap_cache, stem):  # noqa: ANN001
+        png, svg = report._pending_figure(stem, "测试地图", "地图接口已调用")
+        return report.MapRender(png, svg, "ready", "fixture map ready")
+
+    monkeypatch.setattr(report, "_plot_selected_map", fake_map)
+    outputs = report.write_paper_experiment_report(config_path, tmp_path / "report")
+    artifact = json.loads(outputs.artifact.read_text(encoding="utf-8"))
+    markdown = outputs.markdown.read_text(encoding="utf-8")
+    assert artifact["snapshot"]["status"] == "partial"
+    assert "尚未达到 1% 目标" in markdown
+    assert "选定 MX Gap≤1%" in markdown
+
+
+def test_locker_discount_sensitivity_is_sorted_and_uses_explicit_share_denominator() -> (
+    None
+):
+    evidence: list[report.RoleEvidence] = []
+    for level, pickup in ((1.0, 30.0), (2.0, 40.0), (0.0, 20.0)):
+        role = report.ScenarioRole(
+            category="sensitivity",
+            scenario_id=f"discount_{level:g}",
+            label=f"discount {level:g}",
+            run_path=f"discount/{level:g}",
+            instance_dir=None,
+            modes=("MX",),
+            x_value=level,
+            group="locker_discount",
+            role=None,
+            declared_status=None,
+            contract={},
+        )
+        row = {
+            "mode": "MX",
+            "objective_cny_per_hour": 100.0 + level,
+            "mip_gap_fraction": 0.005,
+            "cost_saving_cny_per_hour": 10.0,
+            "cost_saving_percent": 2.0,
+            "drone_realized_per_hour": 100.0,
+            "total_demand_per_hour": 100.0,
+            "locker_pickup_per_hour": pickup,
+            "drone_service_fraction": 0.1,
+        }
+        evidence.append(report.RoleEvidence(role, "ready", "fixture", (row,)))
+
+    rendered = "\n".join(report._sensitivity_result_lines(evidence))
+    assert rendered.index("|0|") < rendered.index("|1|") < rendered.index("|2|")
+    assert "|20.00%|" in rendered
+    assert "|30.00%|" in rendered
+    assert "|40.00%|" in rendered
+    assert "到柜服务占总需求" in rendered
 
 
 def test_role_assignment_uses_exact_explicit_run_path(tmp_path: Path) -> None:
