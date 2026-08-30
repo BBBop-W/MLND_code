@@ -26,7 +26,15 @@ The recommended top-level document is::
 
     {
       "schema_version": 1,
+      "artifact_status": "final_evidence_registry",
       "experiment_root": "results/paper_experiments_20260831",
+      "implementation_sha256_required": "<64-character solver implementation hash>",
+      "repository_commit_required": "<selected-main provenance commit>",
+      "instance_family": {
+        "family_id": "<nested geographic crop family>",
+        "required_solve_demand_scale": 1.0
+      },
+      "baseline": {"formulation_id": "<current formulation id>"},
       "ledger": {
         "run_ledger": "ledger/run_ledger.csv",
         "scenario_summary": "ledger/scenario_summary.csv",
@@ -56,18 +64,24 @@ For compatibility with small hand-written registries, ``selected_main``,
 placed at the top level.  ``results_dir`` is accepted as an alias for
 ``run_path``.  The registry is allowed to contain planned scenarios that do
 not yet occur in the ledger; these are rendered as ``pending`` and excluded
-from quantitative conclusions.  A completed scenario is evidence-ready only
-when its ledger rows are present and every requested mode has an independent
-``validation_pass=true`` record.
+from quantitative conclusions.  ``planning_only_not_a_result`` creates a
+progress report, while ``final_evidence_registry`` is the only final-report
+status.  A completed scenario is evidence-ready only when its ledger rows are
+present, every requested mode has an independent ``validation_pass=true``
+record, all sealed source hashes still match, and the instance/model/solver
+role contract matches the real ``run_config.json``.  If no role remains
+evidence-ready, generation fails before writing a deliverable artifact.
 
 Outputs
 -------
 
 The writer creates a Chinese Markdown technical report, CSV evidence tables,
 PNG/SVG research figures, a canonical portable-report ``artifact.json``, and
-``report_manifest.json`` with hashes.  Solver gaps for screened runs certify
-only the explicitly screened formulation.  All monetary outcomes are modeled
-fulfilment cost or cost saving in CNY/hour, never revenue or profit.
+``report_manifest.json`` with hashes.  Portable HTML is an interactive
+supplement without the static Nanshan maps; Markdown plus PNG/SVG is the
+complete geographic report.  Solver gaps for screened runs certify only the
+explicitly screened formulation.  All monetary outcomes are modeled fulfilment
+cost or cost saving in CNY/hour, never revenue or profit.
 """
 
 from __future__ import annotations
@@ -117,6 +131,17 @@ PALETTE = {
     "paper": "#FFFFFF",
 }
 _ONE_PERCENT = 0.01
+_CANONICAL_INSTANCE_FILES = (
+    "metadata.json",
+    "sites.csv",
+    "od_nodes.csv",
+    "od_demand.csv",
+    "periods.csv",
+)
+_REGISTRY_STATUS = {
+    "planning_only_not_a_result": "progress",
+    "final_evidence_registry": "final",
+}
 
 
 @dataclass(frozen=True)
@@ -131,6 +156,7 @@ class ScenarioRole:
     group: str | None
     role: str | None
     declared_status: str | None
+    contract: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -152,6 +178,30 @@ class ReportOutputs:
     manifest: Path
     figures: tuple[Path, ...]
     tables: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class MapRender:
+    png: Path
+    svg: Path
+    status: str
+    note: str
+
+
+@dataclass(frozen=True)
+class ProvenanceSource:
+    path: Path
+    locator: str
+
+
+def _canonical_json(payload: Any) -> str:
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _payload_sha256(payload: Any) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -284,6 +334,7 @@ def _load_verified_ledger(
 ) -> tuple[
     list[dict[str, str]], list[dict[str, str]], dict[str, Any], tuple[Path, ...]
 ]:
+    experiment_root = experiment_root.resolve()
     ledger_path, scenario_path, manifest_path = _ledger_paths(config, experiment_root)
     manifest = _read_object(manifest_path)
     if manifest.get("schema_version") != 1:
@@ -297,6 +348,46 @@ def _load_verified_ledger(
         expected = outputs.get(path.name)
         if not isinstance(expected, str) or expected != _sha256(path):
             raise ValueError(f"ledger output hash mismatch: {path}")
+    source_files = manifest.get("source_files")
+    if not isinstance(source_files, list) or not source_files:
+        raise ValueError(
+            f"ledger manifest source_files must be nonempty: {manifest_path}"
+        )
+    source_index: dict[str, Mapping[str, Any]] = {}
+    for index, source in enumerate(source_files):
+        if not isinstance(source, Mapping):
+            raise ValueError(f"ledger source_files[{index}] must be an object")
+        relative = source.get("path")
+        if not isinstance(relative, str) or not relative:
+            raise ValueError(f"ledger source_files[{index}].path must be nonempty")
+        normalized = Path(os.path.normpath(relative))
+        if (
+            normalized.is_absolute()
+            or normalized == Path("..")
+            or ".." in normalized.parts
+        ):
+            raise ValueError(
+                f"ledger source path escapes experiment_root: {relative!r}"
+            )
+        relative_key = normalized.as_posix()
+        if relative_key in source_index:
+            raise ValueError(f"duplicate ledger source path: {relative_key}")
+        source_path = (experiment_root / normalized).resolve()
+        try:
+            source_path.relative_to(experiment_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"ledger source path escapes experiment_root: {relative!r}"
+            ) from exc
+        if not source_path.is_file():
+            raise ValueError(f"ledger source file is missing: {source_path}")
+        expected_size = _integer(source.get("size_bytes"))
+        expected_hash = source.get("sha256")
+        if expected_size != source_path.stat().st_size:
+            raise ValueError(f"ledger source file size mismatch: {source_path}")
+        if not isinstance(expected_hash, str) or expected_hash != _sha256(source_path):
+            raise ValueError(f"ledger source file hash mismatch: {source_path}")
+        source_index[relative_key] = source
     ledger_rows = _read_csv(ledger_path)
     scenario_rows = _read_csv(scenario_path)
     if not ledger_rows:
@@ -326,6 +417,69 @@ def _load_verified_ledger(
         raise ValueError("ledger manifest mode_row_count disagrees with run_ledger")
     if _integer(manifest.get("run_count")) != len(run_paths):
         raise ValueError("ledger manifest run_count disagrees with run_ledger")
+    manifest_runs = manifest.get("runs")
+    if not isinstance(manifest_runs, list) or len(manifest_runs) != len(run_paths):
+        raise ValueError("ledger manifest runs disagree with run_count")
+    manifest_run_map: dict[str, Mapping[str, Any]] = {}
+    for item in manifest_runs:
+        if not isinstance(item, Mapping) or not isinstance(item.get("run_path"), str):
+            raise ValueError("ledger manifest runs must contain run_path objects")
+        run_path = str(item["run_path"])
+        if run_path in manifest_run_map:
+            raise ValueError(f"duplicate ledger manifest run: {run_path}")
+        manifest_run_map[run_path] = item
+    if set(manifest_run_map) != run_paths:
+        raise ValueError("ledger manifest runs disagree with run_ledger paths")
+    rows_by_run: dict[str, list[Mapping[str, str]]] = {}
+    for row in ledger_rows:
+        rows_by_run.setdefault(str(row["run_path"]), []).append(row)
+    scenario_by_run = {str(row["run_path"]): row for row in scenario_rows}
+    mode_order = {"HD": 0, "MX": 1, "LO": 2}
+    for run_path, rows in rows_by_run.items():
+        manifest_run = manifest_run_map[run_path]
+        signatures = {row.get("run_signature_sha256") for row in rows}
+        if (
+            len(signatures) != 1
+            or manifest_run.get("run_signature_sha256") not in signatures
+        ):
+            raise ValueError(f"ledger manifest run signature mismatch: {run_path}")
+        ledger_modes = sorted((str(row["mode"]) for row in rows), key=mode_order.get)
+        if manifest_run.get("modes") != ledger_modes:
+            raise ValueError(f"ledger manifest run modes mismatch: {run_path}")
+        scenario = scenario_by_run[run_path]
+        scenario_modes = str(scenario.get("modes", "")).split(",")
+        if (
+            scenario_modes != ledger_modes
+            or _integer(scenario.get("mode_count")) != len(ledger_modes)
+            or scenario.get("run_signature_sha256")
+            != manifest_run.get("run_signature_sha256")
+        ):
+            raise ValueError(
+                f"scenario_summary run modes/signature mismatch: {run_path}"
+            )
+        common_sources = {
+            "run_config_sha256": f"{run_path}/run_config.json",
+            "run_complete_sha256": f"{run_path}/run_complete.json",
+            "validation_sha256": f"{run_path}/validation.json",
+        }
+        for field, relative in common_sources.items():
+            expected_hash = rows[0].get(field)
+            source = source_index.get(relative)
+            if (
+                not expected_hash
+                or source is None
+                or source.get("sha256") != expected_hash
+            ):
+                raise ValueError(
+                    f"ledger {field} disagrees with source manifest: {run_path}"
+                )
+        for row in rows:
+            relative = f"{run_path}/{row['mode']}/summary.json"
+            source = source_index.get(relative)
+            if source is None or source.get("sha256") != row.get("summary_sha256"):
+                raise ValueError(
+                    f"ledger summary hash disagrees with source manifest: {relative}"
+                )
     return (
         ledger_rows,
         scenario_rows,
@@ -374,10 +528,18 @@ def _parse_roles(
                 item.get("run_path", item.get("results_dir")), experiment_root
             )
             modes_raw = item.get("modes", [])
-            if not isinstance(modes_raw, list) or any(
-                mode not in MODE_NAMES for mode in modes_raw
+            if (
+                not isinstance(modes_raw, list)
+                or not modes_raw
+                or any(mode not in MODE_NAMES for mode in modes_raw)
             ):
-                raise ValueError(f"{category}[{index}] modes must use HD/MX/LO")
+                raise ValueError(
+                    f"{category}[{index}] modes must be a nonempty HD/MX/LO array"
+                )
+            if len(set(modes_raw)) != len(modes_raw):
+                raise ValueError(
+                    f"{category}[{index}] modes must not contain duplicates"
+                )
             scale = item.get("scale")
             scale_map = scale if isinstance(scale, Mapping) else {}
             x_value: float | str | None = item.get(
@@ -405,13 +567,509 @@ def _parse_roles(
                     declared_status=(
                         str(item["status"]) if item.get("status") is not None else None
                     ),
+                    contract=dict(item),
                 )
             )
     mains = [role for role in parsed if role.category == "main"]
     selected = [role for role in mains if role.role in {"selected", "selected_main"}]
-    if len(mains) > 1 and len(selected) != 1:
-        raise ValueError("multiple main roles require exactly one role='selected'")
+    if mains and len(selected) != 1:
+        raise ValueError("main roles require exactly one explicit role='selected'")
+    selected_alias = config.get("selected_main")
+    if selected_alias is not None:
+        if not isinstance(selected_alias, Mapping):
+            raise ValueError("selected_main must be an object when provided")
+        alias_id = selected_alias.get("scenario_id", selected_alias.get("id"))
+        alias_path = _normalise_run_path(
+            selected_alias.get("run_path", selected_alias.get("results_dir")),
+            experiment_root,
+        )
+        if not selected or (
+            alias_id != selected[0].scenario_id or alias_path != selected[0].run_path
+        ):
+            raise ValueError("selected_main alias disagrees with role='selected'")
     return parsed
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _nested_value(payload: Mapping[str, Any], path: Sequence[str]) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _contract_equal(actual: Any, expected: Any) -> bool:
+    if expected == "all":
+        return actual is None
+    if (isinstance(expected, (int, float)) and not isinstance(expected, bool)) or (
+        isinstance(actual, (int, float)) and not isinstance(actual, bool)
+    ):
+        actual_number = _finite(actual)
+        expected_number = _finite(expected)
+        return (
+            actual_number is not None
+            and expected_number is not None
+            and math.isclose(
+                actual_number, expected_number, rel_tol=1e-10, abs_tol=1e-10
+            )
+        )
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _contract_equal(left, right) for left, right in zip(actual, expected)
+        )
+    if isinstance(actual, Mapping) and isinstance(expected, Mapping):
+        return set(actual) == set(expected) and all(
+            _contract_equal(actual[key], expected[key]) for key in actual
+        )
+    return actual == expected
+
+
+_MODEL_OVERRIDE_PATHS: dict[str, tuple[str, ...]] = {
+    "locker_discount_cny": ("choice", "locker_discount_cny"),
+    "rider_initial_charge_cny": ("rider_base_cost",),
+    "rider_extra_cost_cny_per_km": ("rider_incremental_cost_per_km",),
+    "locker_capacity_costs_cny_per_hour": ("locker_capacity_costs",),
+    "base_cost_cny_per_hour": ("base_cost_per_hour",),
+    "locker_fixed_cost_cny_per_hour": ("locker_fixed_cost_per_hour",),
+    "swap_cost_cny_per_hour": ("swap_cost_per_hour",),
+    "corridor_cost_cny_per_km_hour": ("corridor_cost_per_km_hour",),
+    "connection_cost_cny_per_km_hour": ("connection_cost_per_km_hour",),
+    "flight_cost_cny_per_km": ("flight_cost_per_km",),
+    "drone_cost_cny_per_hour": ("drone_cost_per_hour",),
+}
+
+
+_SOLVER_OVERRIDE_KEYS = {
+    "time_limit_seconds": "time_limit",
+    "time_limit_seconds_per_mode": "time_limit",
+    "target_mip_gap_fraction": "mip_gap",
+    "solver_seed": "seed",
+    "root_method": "root_relaxation_method",
+}
+
+
+def _set_nested(payload: dict[str, Any], path: Sequence[str], value: Any) -> None:
+    current = payload
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            current[key] = child
+        current = child
+    current[path[-1]] = None if value == "all" else value
+
+
+def _expected_model(
+    baseline: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> dict[str, Any]:
+    expected = json.loads(json.dumps(baseline))
+    for key, value in overrides.items():
+        mapped_path = _MODEL_OVERRIDE_PATHS.get(key, (key,))
+        path = (key,) if key in baseline else mapped_path
+        _set_nested(expected, path, value)
+    return expected
+
+
+def _canonical_instance_contract(
+    instance_dir: Path,
+    run_config: Mapping[str, Any],
+    cache: dict[Path, dict[str, str]],
+) -> tuple[dict[str, str] | None, list[str]]:
+    errors: list[str] = []
+    instance = _as_mapping(run_config.get("instance"))
+    configured_directory = instance.get("directory")
+    if not isinstance(configured_directory, str):
+        errors.append("run_config.instance.directory 缺失")
+    else:
+        if Path(configured_directory).expanduser().resolve() != instance_dir.resolve():
+            errors.append("instance_dir 与 run_config.instance.directory 不一致")
+    declared = instance.get("canonical_file_sha256")
+    if not isinstance(declared, Mapping) or set(declared) != set(
+        _CANONICAL_INSTANCE_FILES
+    ):
+        errors.append("run_config 未声明恰好五个 canonical instance hashes")
+        return None, errors
+    if instance_dir not in cache:
+        actual: dict[str, str] = {}
+        for filename in _CANONICAL_INSTANCE_FILES:
+            path = instance_dir / filename
+            if not path.is_file():
+                errors.append(f"实例规范文件缺失：{filename}")
+                continue
+            actual[filename] = _sha256(path)
+        cache[instance_dir] = actual
+    actual = cache[instance_dir]
+    for filename in _CANONICAL_INSTANCE_FILES:
+        if actual.get(filename) != declared.get(filename):
+            errors.append(f"实例规范文件哈希不匹配：{filename}")
+    return dict(declared), errors
+
+
+def _validate_solver_overrides(
+    solver: Mapping[str, Any], overrides: Mapping[str, Any]
+) -> list[str]:
+    errors: list[str] = []
+    for declared_key, expected in overrides.items():
+        actual_key = _SOLVER_OVERRIDE_KEYS.get(declared_key, declared_key)
+        if not _contract_equal(solver.get(actual_key), expected):
+            errors.append(
+                f"solver override 未生效：{declared_key}={expected!r}，"
+                f"实际 {actual_key}={solver.get(actual_key)!r}"
+            )
+    return errors
+
+
+def _enforce_role_contracts(
+    config: Mapping[str, Any],
+    evidence: Sequence[RoleEvidence],
+    ledger_rows: Sequence[Mapping[str, str]],
+    experiment_root: Path,
+) -> tuple[list[RoleEvidence], dict[str, dict[str, Any]]]:
+    """Cross-check registry labels against the sealed run configurations."""
+
+    required_commit = config.get("repository_commit_required")
+    if required_commit is not None and (
+        not isinstance(required_commit, str) or len(required_commit) != 40
+    ):
+        raise ValueError(
+            "scenario_config repository_commit_required must be a 40-character hash"
+        )
+    configured_implementation = config.get("implementation_sha256_required")
+    if configured_implementation is not None and (
+        not isinstance(configured_implementation, str)
+        or len(configured_implementation) != 64
+    ):
+        raise ValueError(
+            "scenario_config implementation_sha256_required must be a 64-character hash"
+        )
+    family = _as_mapping(config.get("instance_family"))
+    required_family = family.get("family_id")
+    required_demand_scale = _finite(family.get("required_solve_demand_scale"))
+    if not isinstance(required_family, str) or required_demand_scale is None:
+        raise ValueError(
+            "scenario_config.instance_family requires family_id and required_solve_demand_scale"
+        )
+    baseline_config = _as_mapping(config.get("baseline"))
+    if baseline_config.get("formulation_id") != FORMULATION_ID:
+        raise ValueError(
+            "scenario_config baseline formulation_id disagrees with current model"
+        )
+
+    ledger_by_run: dict[str, list[Mapping[str, str]]] = {}
+    for row in ledger_rows:
+        ledger_by_run.setdefault(str(row["run_path"]), []).append(row)
+    run_configs: dict[str, dict[str, Any]] = {}
+    instance_hash_cache: dict[Path, dict[str, str]] = {}
+    for item in evidence:
+        if not item.rows:
+            continue
+        run_path = item.role.run_path
+        if run_path not in run_configs:
+            run_config_path = experiment_root / run_path / "run_config.json"
+            run_config = _read_object(run_config_path)
+            if (
+                run_config.get("schema_version") != RESULT_SCHEMA_VERSION
+                or run_config.get("formulation_id") != FORMULATION_ID
+            ):
+                raise ValueError(f"incompatible run_config: {run_config_path}")
+            run_configs[run_path] = run_config
+
+    selected_candidates = [
+        item
+        for item in evidence
+        if item.role.category == "main"
+        and item.role.role in {"selected", "selected_main"}
+    ]
+    if len(selected_candidates) != 1:
+        raise ValueError("evidence requires exactly one selected main role")
+    selected_item = selected_candidates[0]
+    selected_config = run_configs.get(selected_item.role.run_path)
+    baseline_model = (
+        _as_mapping(selected_config.get("model")) if selected_config is not None else {}
+    )
+    baseline_implementation = (
+        _nested_value(selected_config, ("implementation", "sha256"))
+        if selected_config is not None
+        else None
+    )
+    required_implementation = configured_implementation or baseline_implementation
+    selected_input_hash = (
+        _payload_sha256(
+            _as_mapping(
+                _nested_value(selected_config, ("instance", "canonical_file_sha256"))
+            )
+        )
+        if selected_config is not None
+        else None
+    )
+
+    revised: list[RoleEvidence] = []
+    for item in evidence:
+        if not item.rows or item.status in {"pending", "invalid"}:
+            revised.append(item)
+            continue
+        role = item.role
+        run_config = run_configs[role.run_path]
+        errors: list[str] = []
+        warnings: list[str] = []
+        all_run_rows = ledger_by_run[role.run_path]
+        configured_modes = run_config.get("modes")
+        ledger_modes = [str(row["mode"]) for row in all_run_rows]
+        if not isinstance(configured_modes, list) or set(configured_modes) != set(
+            ledger_modes
+        ):
+            errors.append("run_config.modes 与完整账本模式不一致")
+        if not set(role.modes).issubset(set(ledger_modes)):
+            errors.append("角色 modes 不属于该 run 的实际模式")
+        demand_scale = _finite(run_config.get("demand_scale"))
+        if demand_scale is None or not math.isclose(
+            demand_scale, required_demand_scale, rel_tol=0.0, abs_tol=1e-12
+        ):
+            errors.append("run_config demand_scale 与实例族契约不一致")
+        nested_scale = _as_mapping(
+            _nested_value(run_config, ("instance", "metadata", "nested_scale"))
+        )
+        if nested_scale.get("family_id") != required_family:
+            errors.append("run_config scale family 与注册表不一致")
+        for row in item.rows:
+            if not _contract_equal(row.get("demand_scale"), required_demand_scale):
+                errors.append(f"{row.get('mode')} ledger demand_scale 不一致")
+            if row.get("scale_family_id") != required_family:
+                errors.append(f"{row.get('mode')} ledger scale_family_id 不一致")
+
+        if role.instance_dir is None:
+            errors.append("角色未显式声明 instance_dir")
+            declared_hashes = None
+        else:
+            declared_hashes, hash_errors = _canonical_instance_contract(
+                role.instance_dir, run_config, instance_hash_cache
+            )
+            errors.extend(hash_errors)
+        if declared_hashes is not None:
+            input_hash = _payload_sha256(declared_hashes)
+            for row in item.rows:
+                if row.get("input_sha256") != input_hash:
+                    errors.append(f"{row.get('mode')} ledger input_sha256 不一致")
+        else:
+            input_hash = None
+
+        model = _as_mapping(run_config.get("model"))
+        solver = _as_mapping(run_config.get("solver"))
+        actual_git_head = _nested_value(run_config, ("git", "head"))
+        actual_implementation = _nested_value(run_config, ("implementation", "sha256"))
+        for row in item.rows:
+            mode = str(row.get("mode"))
+            if row.get("git_head") != actual_git_head:
+                errors.append(f"{mode} ledger git_head 与 run_config 不一致")
+            if row.get("implementation_sha256") != actual_implementation:
+                errors.append(
+                    f"{mode} ledger implementation_sha256 与 run_config 不一致"
+                )
+            exact_map = _as_mapping(run_config.get("screening_is_exact"))
+            if _boolean(row.get("screening_is_exact")) is not _boolean(
+                exact_map.get(mode)
+            ):
+                errors.append(f"{mode} screening_is_exact 与 run_config 不一致")
+            if row.get("model_parameters_sha256") != _payload_sha256(model):
+                errors.append(f"{mode} ledger model_parameters_sha256 不一致")
+            if row.get("solver_parameters_sha256") != _payload_sha256(solver):
+                errors.append(f"{mode} ledger solver_parameters_sha256 不一致")
+
+        actual_h = _integer(
+            _nested_value(
+                run_config,
+                ("instance", "metadata", "nested_scale", "facility_actual_counts", "H"),
+            )
+        )
+        for row in item.rows:
+            if _integer(row.get("candidate_lockers")) != actual_h:
+                errors.append(f"{row.get('mode')} ledger candidate_lockers 不一致")
+
+        if role.category != "algorithm":
+            if actual_implementation != required_implementation:
+                errors.append("正式角色 implementation hash 与正式实现契约不一致")
+            if (
+                role.category == "main"
+                and role.role in {"selected", "selected_main"}
+                and required_commit is not None
+                and actual_git_head != required_commit
+            ):
+                errors.append(
+                    "selected main git commit 与 repository_commit_required 不一致"
+                )
+            elif (
+                required_commit is not None
+                and actual_git_head != required_commit
+                and actual_implementation == required_implementation
+            ):
+                warnings.append(
+                    "git_head 与 selected main 不同，但求解 implementation hash 完全一致"
+                )
+
+        declared_model_overrides = _as_mapping(role.contract.get("model_overrides"))
+        declared_solver_overrides = _as_mapping(role.contract.get("solver_overrides"))
+        errors.extend(_validate_solver_overrides(solver, declared_solver_overrides))
+
+        if role.category == "scale":
+            scale = _as_mapping(role.contract.get("scale"))
+            if not scale or _integer(scale.get("H")) is None:
+                errors.append("规模角色必须显式声明 scale.H")
+            else:
+                expected_h = _integer(scale.get("H"))
+                if expected_h != actual_h or _integer(role.x_value) != actual_h:
+                    errors.append("规模角色 H 与实际 candidate_lockers 不一致")
+                facility_counts = _as_mapping(
+                    nested_scale.get("facility_actual_counts")
+                )
+                for site_type in ("H", "L", "E"):
+                    if _integer(scale.get(site_type)) != _integer(
+                        facility_counts.get(site_type)
+                    ):
+                        errors.append(f"规模角色 {site_type} 数与实例不一致")
+                for declared_key, actual_key in (
+                    ("crop_side_km", "crop_side_km"),
+                    ("crop_area_km2", "crop_area_km2"),
+                ):
+                    if not _contract_equal(
+                        nested_scale.get(actual_key), scale.get(declared_key)
+                    ):
+                        errors.append(f"规模角色 {declared_key} 与实例不一致")
+            if baseline_model and not _contract_equal(model, baseline_model):
+                errors.append("规模实验模型参数与 selected main 基线不一致")
+
+        elif role.category == "algorithm":
+            required_algorithm_keys = {
+                "miqcp_method",
+                "seed",
+                "threads",
+                "time_limit_seconds",
+            }
+            if not required_algorithm_keys.issubset(declared_solver_overrides):
+                errors.append(
+                    "算法角色 solver_overrides 必须显式声明 miqcp_method/seed/threads/time_limit_seconds"
+                )
+            if baseline_model and not _contract_equal(model, baseline_model):
+                errors.append("算法先导试验模型参数与 selected main 基线不一致")
+            if selected_input_hash is not None and input_hash != selected_input_hash:
+                errors.append("算法先导试验实例与 selected main 不一致")
+            for row in item.rows:
+                if not _contract_equal(
+                    row.get("solver_miqcp_method"),
+                    declared_solver_overrides.get("miqcp_method"),
+                ):
+                    errors.append("算法角色 MIQCPMethod 与 ledger 不一致")
+                for field, key in (
+                    ("solver_seed", "seed"),
+                    ("solver_threads", "threads"),
+                    ("solver_time_limit_seconds", "time_limit_seconds"),
+                ):
+                    if not _contract_equal(
+                        row.get(field), declared_solver_overrides.get(key)
+                    ):
+                        errors.append(f"算法角色 {field} 与声明不一致")
+
+        elif role.category == "exactness":
+            if role.role not in {"screened", "complete"}:
+                errors.append("exactness 角色必须声明 role=screened/complete")
+            expected_exact = role.role == "complete"
+            if any(
+                _boolean(row.get("screening_is_exact")) is not expected_exact
+                for row in item.rows
+            ):
+                errors.append("exactness 角色与 screening_is_exact 语义冲突")
+            if expected_exact and {
+                "display_origin_choices",
+                "general_corridor_choices",
+            } - set(declared_model_overrides):
+                errors.append("complete-index 必须显式声明两个 all/all model overrides")
+            if role.role == "screened" and isinstance(role.x_value, str):
+                parts = role.x_value.split("/")
+                if len(parts) == 2 and all(part.isdigit() for part in parts):
+                    if not _contract_equal(
+                        model.get("display_origin_choices"), int(parts[0])
+                    ):
+                        errors.append(
+                            "screened display_origin_choices 与 x_value 不一致"
+                        )
+                    if not _contract_equal(
+                        model.get("general_corridor_choices"), int(parts[1])
+                    ):
+                        errors.append(
+                            "screened general_corridor_choices 与 x_value 不一致"
+                        )
+            if baseline_model:
+                expected_model = _expected_model(
+                    baseline_model, declared_model_overrides
+                )
+                if not _contract_equal(model, expected_model):
+                    errors.append("exactness model_overrides 与真实 run_config 不一致")
+
+        elif role.category == "sensitivity":
+            if not isinstance(role.group, str) or role.x_value is None:
+                errors.append("敏感性角色必须声明 group 与 x_value/factor")
+            if baseline_model:
+                expected_model = _expected_model(
+                    baseline_model, declared_model_overrides
+                )
+                if not _contract_equal(model, expected_model):
+                    errors.append("敏感性 model_overrides 与真实 run_config 不一致")
+
+        if errors:
+            revised.append(
+                RoleEvidence(
+                    role,
+                    "invalid",
+                    "角色契约失败：" + "；".join(dict.fromkeys(errors)),
+                    item.rows,
+                )
+            )
+        else:
+            revised.append(
+                RoleEvidence(
+                    role,
+                    item.status,
+                    item.note
+                    + ("；" + "；".join(dict.fromkeys(warnings)) if warnings else ""),
+                    item.rows,
+                )
+            )
+
+    selected_revised = next(
+        item
+        for item in revised
+        if item.role.category == "main"
+        and item.role.role in {"selected", "selected_main"}
+    )
+    selected_versions = {
+        (row.get("git_head"), row.get("implementation_sha256"))
+        for row in selected_revised.rows
+    }
+    final: list[RoleEvidence] = []
+    for item in revised:
+        if item.status != "pilot":
+            final.append(item)
+            continue
+        pilot_versions = {
+            (row.get("git_head"), row.get("implementation_sha256")) for row in item.rows
+        }
+        if pilot_versions != selected_versions:
+            final.append(
+                RoleEvidence(
+                    item.role,
+                    item.status,
+                    item.note
+                    + "；实现提交或实现哈希与 selected main 不一致，因此仅作开发期算法证据",
+                    item.rows,
+                )
+            )
+        else:
+            final.append(item)
+    return final, run_configs
 
 
 def _evidence_for_roles(
@@ -469,39 +1127,7 @@ def _evidence_for_roles(
         )
         evidence.append(RoleEvidence(role, status, note, tuple(selected_rows)))
 
-    main = next(
-        (
-            item
-            for item in evidence
-            if item.role.category == "main" and item.status == "ready" and item.rows
-        ),
-        None,
-    )
-    if main is None:
-        return evidence
-    main_versions = {
-        (row.get("git_head"), row.get("implementation_sha256")) for row in main.rows
-    }
-    revised: list[RoleEvidence] = []
-    for item in evidence:
-        if item.status != "pilot":
-            revised.append(item)
-            continue
-        pilot_versions = {
-            (row.get("git_head"), row.get("implementation_sha256")) for row in item.rows
-        }
-        comparable_versions = {
-            version for version in main_versions | pilot_versions if any(version)
-        }
-        if comparable_versions and pilot_versions != main_versions:
-            note = (
-                item.note
-                + "；实现提交或实现哈希与 selected main 不一致，因此仅作开发期算法证据"
-            )
-            revised.append(RoleEvidence(item.role, item.status, note, item.rows))
-        else:
-            revised.append(item)
-    return revised
+    return evidence
 
 
 def _mode_row(item: RoleEvidence, mode: str = "MX") -> dict[str, Any] | None:
@@ -888,12 +1514,20 @@ def _plot_sensitivity(
 
 
 def _choice_parameters(
-    config: Mapping[str, Any], selected: RoleEvidence | None, experiment_root: Path
-) -> tuple[dict[str, float] | None, list[float], list[float], str]:
+    config: Mapping[str, Any],
+    selected: RoleEvidence | None,
+    experiment_root: Path,
+    scenario_path: Path,
+) -> tuple[
+    dict[str, float] | None,
+    list[float],
+    list[float],
+    ProvenanceSource,
+]:
     choice_config = config.get("choice_curve")
     curve = choice_config if isinstance(choice_config, Mapping) else {}
     raw_parameters = curve.get("parameters")
-    source = "scenario_config.choice_curve.parameters"
+    source = ProvenanceSource(scenario_path, "choice_curve.parameters")
     parameters: Mapping[str, Any] | None = (
         raw_parameters if isinstance(raw_parameters, Mapping) else None
     )
@@ -910,7 +1544,7 @@ def _choice_parameters(
                     model.get("choice"), Mapping
                 ):
                     parameters = model["choice"]
-                    source = str(run_config_path)
+                    source = ProvenanceSource(run_config_path, "model.choice")
     required = (
         "locker_asc",
         "delivery_time_coefficient",
@@ -1028,11 +1662,15 @@ def _plot_choice_curve(
 
 
 def _selected_main(evidence: Sequence[RoleEvidence]) -> RoleEvidence | None:
-    mains = [item for item in evidence if item.role.category == "main"]
     selected = [
-        item for item in mains if item.role.role in {"selected", "selected_main"}
+        item
+        for item in evidence
+        if item.role.category == "main"
+        and item.role.role in {"selected", "selected_main"}
     ]
-    return (selected or mains or [None])[0]
+    if len(selected) > 1:
+        raise ValueError("evidence contains more than one selected main role")
+    return selected[0] if selected else None
 
 
 def _plot_selected_map(
@@ -1040,32 +1678,32 @@ def _plot_selected_map(
     experiment_root: Path,
     basemap_cache: Path | None,
     stem: Path,
-) -> tuple[Path, Path, str]:
+) -> MapRender:
     if selected is None:
         paths = _pending_figure(
             stem, "南山主算例三模式网络", "scenario_config 未指定 selected main。"
         )
-        return (*paths, "未指定主算例")
+        return MapRender(*paths, "pending", "未指定主算例")
     if not selected.ready:
         paths = _pending_figure(stem, "南山主算例三模式网络", selected.note)
-        return (*paths, selected.note)
+        return MapRender(*paths, "pending", selected.note)
     if selected.role.instance_dir is None:
         paths = _pending_figure(
             stem, "南山主算例三模式网络", "主算例未显式提供 instance_dir。"
         )
-        return (*paths, "缺少 instance_dir")
+        return MapRender(*paths, "failed", "缺少 instance_dir")
     if set(selected.role.modes) != {"HD", "MX", "LO"}:
         paths = _pending_figure(
             stem, "南山主算例三模式网络", "主算例必须显式包含 HD、MX、LO。"
         )
-        return (*paths, "主算例模式不完整")
+        return MapRender(*paths, "failed", "主算例模式不完整")
     mx = _mode_row(selected, "MX")
     h = _integer(mx.get("candidate_lockers")) if mx else None
     if h is None:
         paths = _pending_figure(
             stem, "南山主算例三模式网络", "账本缺少 candidate_lockers。"
         )
-        return (*paths, "缺少候选 H 数")
+        return MapRender(*paths, "failed", "缺少候选 H 数")
     result_dir = experiment_root / selected.role.run_path
     try:
         case = geo._load_case(
@@ -1119,12 +1757,12 @@ def _plot_selected_map(
         )
         figure.subplots_adjust(top=0.88, bottom=0.105, wspace=0.04)
         png, svg = _save_figure(figure, stem)
-        return png, svg, f"已生成 H{h} 三模式南山地图"
+        return MapRender(png, svg, "ready", f"已生成 H{h} 三模式南山地图")
     except (OSError, ValueError, RuntimeError) as exc:
         paths = _pending_figure(
             stem, f"南山 H{h} 主算例三模式网络", f"地图生成失败：{exc}"
         )
-        return (*paths, f"地图生成失败：{exc}")
+        return MapRender(*paths, "failed", f"地图生成失败：{exc}")
 
 
 def _largest_certified_scale(
@@ -1156,9 +1794,10 @@ def _markdown_report(
     output_dir: Path,
     evidence: Sequence[RoleEvidence],
     choice_rows: Sequence[Mapping[str, Any]],
-    choice_source: str,
+    choice_source: ProvenanceSource,
     ledger_paths: Sequence[Path],
-    map_note: str,
+    map_render: MapRender,
+    report_kind: str,
 ) -> Path:
     selected = _selected_main(evidence)
     mx = _mode_row(selected, "MX") if selected and selected.ready else None
@@ -1192,11 +1831,26 @@ def _markdown_report(
     else:
         scale_sentence = f"在显式登记并已完成的规模点中，最大达标档为 H{largest[0]}（Gap {100 * largest[1]:.2f}%）。"
 
+    report_title = (
+        "MLND 南山论文数值实验报告"
+        if report_kind == "final"
+        else "MLND 南山数值实验进度报告"
+    )
+    registry_sentence = (
+        "本报告由 final evidence registry 生成。"
+        if report_kind == "final"
+        else "当前注册表是 planning registry；本产物只汇报完成进度，不是最终论文证据包。"
+    )
+    try:
+        choice_path = choice_source.path.relative_to(_repo_root()).as_posix()
+    except ValueError:
+        choice_path = str(choice_source.path)
     lines = [
-        "# MLND 南山论文数值实验报告",
+        f"# {report_title}",
         "",
         "## 技术摘要",
         "",
+        registry_sentence,
         f"{main_sentence}{certificate_sentence}",
         f"{scale_sentence}",
         f"本报告共读取 {len(evidence)} 个显式论文角色：{formal_ready_count} 个 ready、{pilot_count} 个 pilot、{pending_count} 个 pending、{invalid_count} 个 invalid。",
@@ -1214,7 +1868,7 @@ def _markdown_report(
         "",
         "![南山主算例三模式网络](figures/selected_three_modes_map.png)",
         "",
-        map_note,
+        f"地图状态：{map_render.status}；{map_render.note}",
         "",
         "### 求解方法与完整性检查",
         "",
@@ -1232,7 +1886,7 @@ def _markdown_report(
         "",
         "![用户选择距离曲线](figures/choice_distance_curve.png)",
         "",
-        f"距离曲线由 `{choice_source}` 中的当前二项 Logit 参数计算。它给出场景内到柜比例，不是由企业行为数据校准的真实转化率预测。",
+        f"距离曲线由 `{choice_path}` 的 `{choice_source.locator}` 参数计算。它给出场景内到柜比例，不是由企业行为数据校准的真实转化率预测。",
         "",
         "## 范围、数据与指标定义",
         "",
@@ -1244,7 +1898,7 @@ def _markdown_report(
         "",
         "## 实验设计与验证",
         "",
-        "报告器核对 ledger manifest 中两个 CSV 的 SHA-256，并只把 `validation_pass=true` 的请求模式标为 ready。主地图还要求选中算例显式给出实例目录以及 HD、MX、LO 三种结果。所有图表都从本次账本动态计算，不沿用其他报告中的固化结论。",
+        "报告器核对 ledger manifest 中两个 CSV 及全部 source_files 的路径、大小和 SHA-256，并只把 `validation_pass=true` 且角色契约与真实 run_config 一致的请求模式标为 ready。选中算例还绑定五个规范实例文件的 SHA-256；主地图要求 HD、MX、LO 三种结果。所有图表都从本次账本动态计算，不沿用其他报告中的固化结论。",
         "",
         "## 局限、稳健性与未完成项",
         "",
@@ -1265,6 +1919,7 @@ def _markdown_report(
         [
             "- 用户选择参数尚未用企业观测数据校准；优惠额当前影响效用，但不自动作为平台补贴成本计入目标。",
             "- 南山底图的坐标转换仅用于结构展示，不作为测绘级站点坐标。",
+            "- Portable HTML 是不含静态南山地图的交互补充；包含全部地理图证的完整阅读版本是本 Markdown 与同目录 PNG/SVG。",
             "",
             "## 建议的下一步",
             "",
@@ -1367,24 +2022,54 @@ def _artifact_dataset_rows(evidence: Sequence[RoleEvidence]) -> list[dict[str, A
     return rows
 
 
+def _portable_source_path(path: Path, output_dir: Path) -> str:
+    """Return the actual source path relative to the portable artifact."""
+
+    resolved = path.resolve()
+    for base in (output_dir.resolve(), _repo_root().resolve()):
+        try:
+            return resolved.relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return Path(os.path.relpath(resolved, output_dir.resolve())).as_posix()
+
+
 def _write_artifact(
     output_dir: Path,
     evidence: Sequence[RoleEvidence],
     choice_rows: Sequence[Mapping[str, Any]],
     generated_at: str,
+    *,
+    scenario_path: Path,
+    ledger_paths: Sequence[Path],
+    choice_source: ProvenanceSource,
+    result_snapshot_path: Path,
+    choice_snapshot_path: Path,
+    report_kind: str,
+    map_render: MapRender,
 ) -> Path:
     result_rows = _artifact_dataset_rows(evidence)
     validated_rows = [
         row for row in result_rows if row["evidence_status"] in {"ready", "pilot"}
     ]
     ready_rows = [row for row in validated_rows if row["evidence_status"] == "ready"]
-    main_mx = next(
-        (
-            row
-            for row in ready_rows
-            if row["category"] == "main" and row["mode"] == "MX"
-        ),
-        None,
+    selected = _selected_main(evidence)
+    selected_mx = _mode_row(selected, "MX") if selected and selected.ready else None
+    main_mx = (
+        next(
+            (
+                row
+                for row in ready_rows
+                if selected is not None
+                and row["category"] == "main"
+                and row["scenario_id"] == selected.role.scenario_id
+                and row["run_path"] == selected.role.run_path
+                and row["mode"] == "MX"
+            ),
+            None,
+        )
+        if selected_mx is not None
+        else None
     )
     headline = [
         {
@@ -1408,26 +2093,34 @@ def _write_artifact(
         }
         for row in choice_rows
     ]
+    evidence_path = _portable_source_path(result_snapshot_path, output_dir)
+    choice_path = _portable_source_path(choice_snapshot_path, output_dir)
+    registry_path = _portable_source_path(scenario_path, output_dir)
+    choice_parameter_path = _portable_source_path(choice_source.path, output_dir)
+    upstream = [scenario_path, *ledger_paths]
+    upstream_text = "; ".join(
+        f"{_portable_source_path(path, output_dir)} sha256={_sha256(path)}"
+        for path in upstream
+    )
     sources = [
         {
-            "id": "sealed_ledger",
-            "label": "密封论文实验账本",
-            "path": "ledger/run_ledger.csv",
+            "id": "evidence_snapshot",
+            "label": "显式角色与密封账本连接快照",
+            "path": evidence_path,
             "query": {
                 "engine": "duckdb",
                 "language": "sql",
-                "sql": (
-                    "SELECT * FROM read_csv_auto('ledger/run_ledger.csv', "
-                    "header=true) WHERE lower(CAST(validation_pass AS VARCHAR)) "
-                    "= 'true'"
+                "sql": f"SELECT * FROM read_csv_auto('{evidence_path}', header=true)",
+                "description": (
+                    "该 CSV 是报告器按显式 run_path 连接 registry 与密封 ledger，"
+                    f"再执行角色契约校验后的可复现快照。上游：{upstream_text}"
                 ),
-                "description": "按 scenario_config 的显式 run_path 连接角色与已验证 ledger 行。",
-                "tables_used": [
-                    "run_ledger.csv",
-                    "scenario_summary.csv",
-                    "ledger_manifest.json",
+                "tables_used": [evidence_path, registry_path]
+                + [_portable_source_path(path, output_dir) for path in ledger_paths],
+                "filters": [
+                    "ready 要求 validation_pass=true 且 run_config 角色契约全部一致",
+                    "pilot 仅为算法开发证据",
                 ],
-                "filters": ["validation_pass=true 才标记 ready"],
                 "metric_definitions": [
                     "Gap 为最小化模型 incumbent 与 bound 的相对差。",
                     "screening_is_exact=false 时只解释为筛选模型证书。",
@@ -1438,17 +2131,39 @@ def _write_artifact(
         {
             "id": "scenario_registry",
             "label": "显式论文角色注册表",
-            "path": "scenario_config.json",
+            "path": registry_path,
             "query": {
                 "engine": "duckdb",
                 "language": "sql",
                 "sql": (
-                    "SELECT * FROM read_json_auto('scenario_config.json', "
+                    f"SELECT * FROM read_json_auto('{registry_path}', "
                     "maximum_object_size=16777216)"
                 ),
-                "description": "角色完全由配置路径决定，不从目录名称推断。",
-                "tables_used": ["scenario_config.json"],
+                "description": (
+                    "角色完全由该配置路径决定，不从目录名称推断；"
+                    f"sha256={_sha256(scenario_path)}。"
+                ),
+                "tables_used": [registry_path],
                 "filters": [],
+            },
+        },
+        {
+            "id": "choice_snapshot",
+            "label": "用户选择距离曲线快照",
+            "path": choice_path,
+            "query": {
+                "engine": "duckdb",
+                "language": "sql",
+                "sql": f"SELECT * FROM read_csv_auto('{choice_path}', header=true)",
+                "description": (
+                    f"曲线由 {choice_parameter_path} 的 {choice_source.locator} 动态计算；"
+                    f"参数源 sha256={_sha256(choice_source.path)}。"
+                ),
+                "tables_used": [choice_path, choice_parameter_path],
+                "filters": [],
+                "metric_definitions": [
+                    "到柜比例来自未校准二项 Logit 场景，不是企业真实转化率预测。"
+                ],
             },
         },
     ]
@@ -1456,7 +2171,7 @@ def _write_artifact(
         {
             "id": "main_quality",
             "dataset": "headline",
-            "sourceId": "sealed_ledger",
+            "sourceId": "evidence_snapshot",
             "description": "显式选中主算例的 MX 求解证书；空值表示 pending。",
             "metrics": [
                 {"label": "候选 H", "field": "selected_h", "format": "number"},
@@ -1471,7 +2186,7 @@ def _write_artifact(
         {
             "id": "evidence_state",
             "dataset": "headline",
-            "sourceId": "scenario_registry",
+            "sourceId": "evidence_snapshot",
             "description": "显式登记论文角色的证据状态。",
             "metrics": [
                 {"label": "Ready", "field": "ready_roles", "format": "number"},
@@ -1496,7 +2211,7 @@ def _write_artifact(
                 "rationale": "按候选 H 排序的线点图展示离散规模下的证书变化。",
                 "type": "line",
                 "dataset": "scale_ready",
-                "sourceId": "sealed_ledger",
+                "sourceId": "evidence_snapshot",
                 "encodings": {
                     "x": {
                         "field": "x_value",
@@ -1551,7 +2266,7 @@ def _write_artifact(
                 "rationale": "方法是少量离散类别，柱形图支持直接比较。",
                 "type": "bar",
                 "dataset": "algorithm_pilot",
-                "sourceId": "sealed_ledger",
+                "sourceId": "evidence_snapshot",
                 "encodings": {
                     "x": {"field": "label", "type": "nominal", "label": "方法"},
                     "y": {
@@ -1598,7 +2313,7 @@ def _write_artifact(
                 "rationale": "离散模型版本以同单位 Gap 柱形比较。",
                 "type": "bar",
                 "dataset": "exactness_ready",
-                "sourceId": "sealed_ledger",
+                "sourceId": "evidence_snapshot",
                 "encodings": {
                     "x": {"field": "label", "type": "nominal", "label": "索引版本"},
                     "y": {
@@ -1649,7 +2364,7 @@ def _write_artifact(
                 "rationale": "场景水平有顺序，分组线点图突出各因素的求解质量。",
                 "type": "line",
                 "dataset": "sensitivity_ready",
-                "sourceId": "sealed_ledger",
+                "sourceId": "evidence_snapshot",
                 "encodings": {
                     "x": {
                         "field": "x_value",
@@ -1706,7 +2421,7 @@ def _write_artifact(
                 "rationale": "距离为连续输入，优惠为有意义的情景分组。",
                 "type": "line",
                 "dataset": "choice_curve",
-                "sourceId": "scenario_registry",
+                "sourceId": "choice_snapshot",
                 "encodings": {
                     "x": {
                         "field": "walk_distance_km",
@@ -1735,7 +2450,7 @@ def _write_artifact(
             "title": "显式论文角色与证据状态",
             "subtitle": "只有 ready 行进入定量结论；成本单位 CNY/h。",
             "dataset": "results",
-            "sourceId": "sealed_ledger",
+            "sourceId": "evidence_snapshot",
             "defaultSort": {"field": "category", "direction": "asc"},
             "density": "dense",
             "layout": "full",
@@ -1761,20 +2476,34 @@ def _write_artifact(
             ],
         }
     ]
+    if not charts:
+        raise ValueError(
+            "no evidence-backed quantitative chart is available for the portable artifact"
+        )
+    report_title = (
+        "MLND 南山论文数值实验报告"
+        if report_kind == "final"
+        else "MLND 南山数值实验进度报告"
+    )
     blocks: list[dict[str, Any]] = [
         {
             "id": "title",
             "type": "markdown",
-            "body": "# MLND 南山论文数值实验报告",
+            "body": f"# {report_title}",
             "layout": "full",
         },
         {
             "id": "technical_summary",
             "type": "markdown",
-            "sourceId": "sealed_ledger",
+            "sourceId": "evidence_snapshot",
             "body": (
                 "## 技术摘要\n\n"
-                "本报告只使用显式 scenario_config 与密封 ledger。筛选运行的 Gap 仅证实筛选模型；"
+                + (
+                    "本产物来自 final evidence registry。"
+                    if report_kind == "final"
+                    else "本产物来自 planning registry，只表示实验进度，不是最终论文证据包。"
+                )
+                + "筛选运行的 Gap 仅证实筛选模型；"
                 "金额是模型履约成本或成本节约，不是收入或利润。"
             ),
             "layout": "full",
@@ -1788,8 +2517,19 @@ def _write_artifact(
         {
             "id": "findings",
             "type": "markdown",
-            "sourceId": "sealed_ledger",
+            "sourceId": "evidence_snapshot",
             "body": "## 关键结果与证书\n\n图表和表格中的结论均由当前账本动态计算。",
+            "layout": "full",
+        },
+        {
+            "id": "geographic_scope",
+            "type": "markdown",
+            "body": (
+                "## 地理图证\n\n"
+                "本 portable HTML 是交互补充，不嵌入静态南山地图。"
+                "包含三模式南山地图的完整阅读版本是同目录 Markdown 与 PNG/SVG。"
+                f"当前地图状态：{map_render.status}；{map_render.note}。"
+            ),
             "layout": "full",
         },
     ]
@@ -1824,7 +2564,7 @@ def _write_artifact(
             {
                 "id": "limitations",
                 "type": "markdown",
-                "sourceId": "sealed_ledger",
+                "sourceId": "evidence_snapshot",
                 "body": (
                     "## 局限与稳健性\n\n"
                     "未完成或验证失败的角色保持 pending/invalid。用户选择参数未用企业数据校准；"
@@ -1851,8 +2591,11 @@ def _write_artifact(
         "manifest": {
             "version": 1,
             "surface": "report",
-            "title": "MLND 南山论文数值实验报告",
-            "description": "显式情景注册、密封账本与独立验证约束下的数值实验技术报告。",
+            "title": report_title,
+            "description": (
+                "显式情景注册、密封账本与角色契约校验下的数值实验"
+                + ("技术报告。" if report_kind == "final" else "进度报告。")
+            ),
             "generatedAt": generated_at,
             "blocks": blocks,
             "cards": cards,
@@ -1865,8 +2608,10 @@ def _write_artifact(
             "generatedAt": generated_at,
             "status": (
                 "ready"
-                if evidence
+                if report_kind == "final"
+                and evidence
                 and all(item.status in {"ready", "pilot"} for item in evidence)
+                and map_render.status == "ready"
                 else "partial"
             ),
             "datasets": {
@@ -1881,6 +2626,15 @@ def _write_artifact(
         },
         "sources": sources,
     }
+    if map_render.status != "ready":
+        artifact["snapshot"]["accessIssues"] = [
+            {
+                "id": "selected_map_unavailable",
+                "scope": "selected_map",
+                "dataset": "selected_map",
+                "message": map_render.note,
+            }
+        ]
     path = output_dir / "artifact.json"
     path.write_text(
         json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -1900,18 +2654,17 @@ def write_paper_experiment_report(
     config = _read_object(scenario_path)
     if config.get("schema_version") != 1:
         raise ValueError("scenario_config schema_version must equal 1")
+    registry_status = config.get("artifact_status")
+    report_kind = _REGISTRY_STATUS.get(registry_status)
+    if report_kind is None:
+        allowed = ", ".join(sorted(_REGISTRY_STATUS))
+        raise ValueError(f"scenario_config artifact_status must be one of: {allowed}")
     root_raw = config.get("experiment_root")
     if not isinstance(root_raw, str) or not root_raw:
         raise ValueError("scenario_config requires experiment_root")
     experiment_root = _resolve_repo_path(root_raw, base=scenario_path.parent)
     if not experiment_root.is_dir():
         raise ValueError(f"experiment_root is not a directory: {experiment_root}")
-    destination = Path(output_dir).expanduser().resolve()
-    destination.mkdir(parents=True, exist_ok=True)
-    figures_dir = destination / "figures"
-    tables_dir = destination / "tables"
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    tables_dir.mkdir(parents=True, exist_ok=True)
 
     plt.rcParams.update(
         {
@@ -1932,7 +2685,27 @@ def write_paper_experiment_report(
     )
     roles = _parse_roles(config, experiment_root)
     evidence = _evidence_for_roles(roles, ledger_rows)
+    evidence, _run_configs = _enforce_role_contracts(
+        config, evidence, ledger_rows, experiment_root
+    )
+    if not any(item.status in {"ready", "pilot"} for item in evidence):
+        failures = " | ".join(
+            f"{item.role.scenario_id}: {item.note}"
+            for item in evidence
+            if item.status == "invalid"
+        )
+        raise ValueError(
+            "no evidence-ready roles remain after ledger and role-contract validation"
+            + (f": {failures}" if failures else "")
+        )
     selected = _selected_main(evidence)
+
+    destination = Path(output_dir).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    figures_dir = destination / "figures"
+    tables_dir = destination / "tables"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
 
     cache_value = (
         basemap_cache if basemap_cache is not None else config.get("basemap_cache")
@@ -1952,26 +2725,28 @@ def write_paper_experiment_report(
     ):
         figure_paths.extend(paths)
     parameters, distances, discounts, choice_source = _choice_parameters(
-        config, selected, experiment_root
+        config, selected, experiment_root, scenario_path
     )
     choice_rows = _choice_curve_rows(parameters, distances, discounts)
     figure_paths.extend(
         _plot_choice_curve(choice_rows, figures_dir / "choice_distance_curve")
     )
-    map_png, map_svg, map_note = _plot_selected_map(
+    map_render = _plot_selected_map(
         selected,
         experiment_root,
         cache_path,
         figures_dir / "selected_three_modes_map",
     )
-    figure_paths.extend((map_png, map_svg))
+    figure_paths.extend((map_render.png, map_render.svg))
 
     role_rows = _role_table_rows(evidence)
     role_csv = tables_dir / "scenario_evidence_zh.csv"
     choice_csv = tables_dir / "choice_distance_curve_zh.csv"
+    artifact_results_csv = tables_dir / "artifact_results.csv"
     _write_csv(role_csv, role_rows)
     _write_csv(choice_csv, choice_rows)
-    table_paths = [role_csv, choice_csv]
+    _write_csv(artifact_results_csv, _artifact_dataset_rows(evidence))
+    table_paths = [role_csv, choice_csv, artifact_results_csv]
 
     markdown = _markdown_report(
         destination,
@@ -1979,10 +2754,24 @@ def write_paper_experiment_report(
         choice_rows,
         choice_source,
         ledger_paths,
-        map_note,
+        map_render,
+        report_kind,
     )
     generated_at = datetime.now(UTC).isoformat()
-    artifact = _write_artifact(destination, evidence, choice_rows, generated_at)
+    artifact = _write_artifact(
+        destination,
+        evidence,
+        choice_rows,
+        generated_at,
+        scenario_path=scenario_path,
+        ledger_paths=ledger_paths,
+        choice_source=choice_source,
+        result_snapshot_path=artifact_results_csv,
+        choice_snapshot_path=choice_csv,
+        report_kind=report_kind,
+        map_render=map_render,
+    )
+    artifact_payload = _read_object(artifact)
     manifest_payload = {
         "schema_version": 1,
         "generated_at": generated_at,
@@ -1991,13 +2780,31 @@ def write_paper_experiment_report(
             "formulation_id": FORMULATION_ID,
         },
         "inputs": {
+            "registry_status": registry_status,
+            "report_kind": report_kind,
             "scenario_config": str(scenario_path),
             "scenario_config_sha256": _sha256(scenario_path),
             "experiment_root": str(experiment_root),
             "ledger_manifest_sha256": _sha256(ledger_paths[2]),
+            "ledger_run_csv_sha256": _sha256(ledger_paths[0]),
+            "ledger_scenario_csv_sha256": _sha256(ledger_paths[1]),
             "ledger_run_count": ledger_manifest.get("run_count"),
             "ledger_mode_row_count": ledger_manifest.get("mode_row_count"),
+            "choice_parameter_source": str(choice_source.path),
+            "choice_parameter_locator": choice_source.locator,
+            "choice_parameter_source_sha256": _sha256(choice_source.path),
         },
+        "map": {
+            "status": map_render.status,
+            "note": map_render.note,
+            "png": str(map_render.png),
+            "svg": str(map_render.svg),
+        },
+        "map_status": map_render.status,
+        "map_note": map_render.note,
+        "artifact_snapshot_status": _nested_value(
+            artifact_payload, ("snapshot", "status")
+        ),
         "evidence_state": {
             "ready": sum(item.status == "ready" for item in evidence),
             "pilot": sum(item.status == "pilot" for item in evidence),
