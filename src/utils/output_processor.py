@@ -50,7 +50,11 @@ _STATUS_NAMES = {
 class ResultProcessor:
     """Extract, print, and persist one incumbent from :class:`MLNDModel`."""
 
-    TOL = 1e-7
+    # Keep solver-scale positive flows in the audit tables.  At large scale,
+    # tens of thousands of individually tiny chi values can sum to a material
+    # OD/cost reconciliation residual even though each is below Gurobi's
+    # feasibility tolerance.  Values below 1e-9 remain numerical zero.
+    TOL = 1e-9
 
     def __init__(
         self,

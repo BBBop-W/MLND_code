@@ -5,6 +5,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -44,6 +45,23 @@ from src.utils.scale_report import collect_scale_results
 
 
 TEST_RUN_SIGNATURE_SHA256 = "f" * 64
+
+
+def test_result_export_keeps_solver_scale_positive_flows() -> None:
+    processor = ResultProcessor.__new__(ResultProcessor)
+    processor.wrapper = SimpleNamespace(
+        vars={
+            "chi": {
+                ("retained",): SimpleNamespace(X=5e-9),
+                ("numeric_zero",): SimpleNamespace(X=5e-10),
+            }
+        }
+    )
+
+    values = processor._tupledict_values("chi")
+
+    assert values[("retained",)] == pytest.approx(5e-9)
+    assert values[("numeric_zero",)] == 0.0
 
 
 def _write_canonical_instance(root: Path, *, include_swap: bool = True) -> Path:
