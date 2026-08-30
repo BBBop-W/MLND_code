@@ -15,6 +15,8 @@ from src.utils.paper_experiment_ledger import build_paper_experiment_ledger
 
 
 _BASELINE_MODEL: dict[str, object] = {
+    "drone_speed_mps": 20.0,
+    "battery_range_km": 10.0,
     "display_origin_choices": 8,
     "general_corridor_choices": 10,
     "choice": {"locker_discount_cny": 1.0},
@@ -62,6 +64,7 @@ def _ledger_row(
     solver_seed: int = 43,
     solver_threads: int = 4,
     solver_time_limit_seconds: float = 300.0,
+    solver_updates: dict[str, object] | None = None,
 ) -> dict[str, object]:
     objective = 32000 + {"HD": 100, "MX": 0, "LO": 200}[mode]
     return {
@@ -93,6 +96,7 @@ def _ledger_row(
         "_solver_seed": solver_seed,
         "_solver_threads": solver_threads,
         "_solver_time_limit_seconds": solver_time_limit_seconds,
+        "_solver_updates": dict(solver_updates or {}),
     }
 
 
@@ -187,6 +191,7 @@ def _write_run_sources(
             "time_limit": first["_solver_time_limit_seconds"],
         }
     )
+    solver.update(dict(first["_solver_updates"]))
     modes = [
         mode for mode in ("HD", "MX", "LO") if any(row["mode"] == mode for row in rows)
     ]
@@ -300,14 +305,43 @@ def _write_run_sources(
         (mode_dir / "summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, sort_keys=True), encoding="utf-8"
         )
+        (mode_dir / "incumbent.sol").write_text(
+            "# fixture incumbent\nvarphi[L1,H1,__direct__] 1\n",
+            encoding="utf-8",
+        )
+        (mode_dir / "open_facilities.csv").write_text(
+            "site_id,site_type,rho,locker_service_rate_per_hour,"
+            "locker_workload_per_hour,incident_physical_flow_per_hour,"
+            "swap_throughput_per_hour\n"
+            f"{mode}-L1,L,,,,,\n",
+            encoding="utf-8",
+        )
     validations = {row["validation_pass"] for row in rows}
     if len(validations) != 1:
         raise AssertionError("fixture requires one run-level validation result")
     (run_dir / "validation.json").write_text(
         json.dumps({"valid": validations == {"true"}}), encoding="utf-8"
     )
+    artifacts = [
+        {
+            "path": path.relative_to(run_dir).as_posix(),
+            "size_bytes": path.stat().st_size,
+            "sha256": _sha256(path),
+        }
+        for path in sorted(run_dir.rglob("*"))
+        if path.is_file() and path.name != "run_complete.json"
+    ]
     (run_dir / "run_complete.json").write_text(
-        json.dumps({"completed": True, "modes": modes}), encoding="utf-8"
+        json.dumps(
+            {
+                "schema_version": 1,
+                "completed": True,
+                "modes": modes,
+                "artifact_count": len(artifacts),
+                "artifacts": artifacts,
+            }
+        ),
+        encoding="utf-8",
     )
 
 
@@ -833,6 +867,110 @@ def test_scale_role_with_mismatched_h_is_invalid_not_ready(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
+    ("section", "key", "mismatched_value"),
+    [
+        ("model", "drone_speed_mps", 21.0),
+        ("model", "battery_range_km", 11.0),
+        ("solver", "solver_seed", 99),
+        ("solver", "threads", 8),
+        ("solver", "root_method", 1),
+        ("solver", "miqcp_method", 0),
+        ("solver", "target_mip_gap_fraction", 0.02),
+    ],
+)
+def test_registry_baseline_must_match_selected_main_run_config(
+    tmp_path: Path,
+    section: str,
+    key: str,
+    mismatched_value: object,
+) -> None:
+    experiment_root = tmp_path / "experiment"
+    experiment_root.mkdir()
+    _write_ledger_bundle(experiment_root, [_ledger_row("main/h24")])
+    config = _config_with_roles(
+        experiment_root, {"main": _selected_main_role(experiment_root)}
+    )
+    baseline = config["baseline"]
+    assert isinstance(baseline, dict)
+    contract = baseline[section]
+    assert isinstance(contract, dict)
+    contract[key] = mismatched_value
+    config_path = _write_config(tmp_path / "scenario_config.json", config)
+
+    with pytest.raises(
+        ValueError,
+        match=r"selected main run_config\.(model|solver).*baseline\.(model|solver)",
+    ):
+        report.write_paper_experiment_report(config_path, tmp_path / "report")
+
+
+def test_formal_roles_inherit_baseline_except_declared_overrides(
+    tmp_path: Path,
+) -> None:
+    experiment_root = tmp_path / "experiment"
+    experiment_root.mkdir()
+    _write_ledger_bundle(
+        experiment_root,
+        [
+            _ledger_row("main/h24"),
+            _ledger_row(
+                "scale/model-drift",
+                model_updates={"drone_speed_mps": 21.0},
+            ),
+            _ledger_row("scale/solver-drift", solver_seed=99),
+            _ledger_row("scale/declared-seed", solver_seed=99),
+        ],
+    )
+
+    def scale_role(
+        scenario_id: str, run_path: str, *, declare_seed: bool = False
+    ) -> dict[str, object]:
+        solver_overrides: dict[str, object] = {"time_limit_seconds": 300}
+        if declare_seed:
+            solver_overrides["seed"] = 99
+        return {
+            "id": scenario_id,
+            "label": scenario_id,
+            "run_path": run_path,
+            "instance_dir": str(experiment_root / "instances/H24"),
+            "modes": ["MX"],
+            "scale": {
+                "H": 24,
+                "L": 2,
+                "E": 3,
+                "crop_side_km": 9,
+                "crop_area_km2": 81,
+            },
+            "solver_overrides": solver_overrides,
+        }
+
+    config_path = _write_config(
+        tmp_path / "scenario_config.json",
+        _config_with_roles(
+            experiment_root,
+            {
+                "main": _selected_main_role(experiment_root),
+                "scale": [
+                    scale_role("model_drift", "scale/model-drift"),
+                    scale_role("solver_drift", "scale/solver-drift"),
+                    scale_role(
+                        "declared_seed",
+                        "scale/declared-seed",
+                        declare_seed=True,
+                    ),
+                ],
+            },
+        ),
+    )
+
+    outputs = report.write_paper_experiment_report(config_path, tmp_path / "report")
+    artifact = json.loads(outputs.artifact.read_text(encoding="utf-8"))
+    assert _artifact_result_status(artifact, "model_drift") == "invalid"
+    assert _artifact_result_status(artifact, "solver_drift") == "invalid"
+    assert _artifact_result_status(artifact, "declared_seed") == "ready"
+
+
+@pytest.mark.parametrize(
     ("mismatch", "row_options", "instance_key"),
     [
         ("method", {"solver_miqcp_method": 0}, "H24"),
@@ -1028,6 +1166,65 @@ def test_selected_map_failure_marks_partial_and_records_access_issue(
     )
     manifest = json.loads(outputs.manifest.read_text(encoding="utf-8"))
     assert manifest["map_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("relative", "tamper_kind", "expected_note"),
+    [
+        ("MX/incumbent.sol", "size", "artifact size mismatch"),
+        ("LO/open_facilities.csv", "hash", "artifact hash mismatch"),
+    ],
+)
+def test_selected_map_rejects_unsealed_result_artifact_before_loading_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative: str,
+    tamper_kind: str,
+    expected_note: str,
+) -> None:
+    experiment_root = tmp_path / "experiment"
+    experiment_root.mkdir()
+    rows = [
+        _ledger_row("main/h24", mode=mode, solver_time_limit_seconds=900)
+        for mode in ("HD", "MX", "LO")
+    ]
+    _write_run_sources(experiment_root, "main/h24", rows)
+    target = experiment_root / "main/h24" / relative
+    payload = bytearray(target.read_bytes())
+    if tamper_kind == "size":
+        payload.extend(b"x")
+    else:
+        assert payload
+        payload[0] ^= 1
+    target.write_bytes(payload)
+
+    role = report.ScenarioRole(
+        category="main",
+        scenario_id="main_h24",
+        label="H24 selected main",
+        run_path="main/h24",
+        instance_dir=experiment_root / "instances/H24",
+        modes=("HD", "MX", "LO"),
+        x_value=None,
+        group=None,
+        role="selected",
+        declared_status=None,
+        contract={},
+    )
+    selected = report.RoleEvidence(role, "ready", "fixture ready", tuple(rows))
+
+    def unexpected_case_load(*args: object, **kwargs: object) -> None:
+        raise AssertionError("map loader ran before source artifact verification")
+
+    monkeypatch.setattr(report.geo, "_load_case", unexpected_case_load)
+    rendered = report._plot_selected_map(
+        selected,
+        experiment_root,
+        None,
+        tmp_path / f"tampered_map_{tamper_kind}",
+    )
+    assert rendered.status == "failed"
+    assert expected_note in rendered.note
 
 
 def test_final_registry_with_all_roles_pending_refuses_result_artifact(

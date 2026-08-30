@@ -34,7 +34,17 @@ The recommended top-level document is::
         "family_id": "<nested geographic crop family>",
         "required_solve_demand_scale": 1.0
       },
-      "baseline": {"formulation_id": "<current formulation id>"},
+      "baseline": {
+        "formulation_id": "<current formulation id>",
+        "model": {"...": "the complete selected-main run_config.model"},
+        "solver": {
+          "target_mip_gap_fraction": 0.01,
+          "threads": 4,
+          "solver_seed": 43,
+          "root_method": 2,
+          "miqcp_method": -1
+        }
+      },
       "ledger": {
         "run_ledger": "ledger/run_ledger.csv",
         "scenario_summary": "ledger/scenario_summary.csv",
@@ -142,6 +152,15 @@ _REGISTRY_STATUS = {
     "planning_only_not_a_result": "progress",
     "final_evidence_registry": "final",
 }
+_REQUIRED_BASELINE_MODEL_KEYS = {"drone_speed_mps", "battery_range_km"}
+_REQUIRED_BASELINE_SOLVER_KEYS = {
+    "mip_gap",
+    "threads",
+    "seed",
+    "root_relaxation_method",
+    "miqcp_method",
+}
+_MAP_SOURCE_ARTIFACTS = ("incumbent.sol", "open_facilities.csv")
 
 
 @dataclass(frozen=True)
@@ -675,6 +694,41 @@ def _expected_model(
     return expected
 
 
+def _normalise_solver_contract(
+    contract: Mapping[str, Any], *, context: str
+) -> dict[str, Any]:
+    """Map registry-facing solver names to their run_config keys."""
+
+    normalized: dict[str, Any] = {}
+    declared_names: dict[str, str] = {}
+    for declared_key, value in contract.items():
+        actual_key = _SOLVER_OVERRIDE_KEYS.get(declared_key, declared_key)
+        if actual_key in normalized and not _contract_equal(normalized[actual_key], value):
+            raise ValueError(
+                f"{context} maps both {declared_names[actual_key]!r} and "
+                f"{declared_key!r} to {actual_key!r} with different values"
+            )
+        normalized[actual_key] = value
+        declared_names[actual_key] = declared_key
+    return normalized
+
+
+def _solver_contract_errors(
+    solver: Mapping[str, Any],
+    expected: Mapping[str, Any],
+    *,
+    context: str,
+) -> list[str]:
+    errors: list[str] = []
+    for actual_key, value in expected.items():
+        if not _contract_equal(solver.get(actual_key), value):
+            errors.append(
+                f"{context}：{actual_key} 应为 {value!r}，"
+                f"实际为 {solver.get(actual_key)!r}"
+            )
+    return errors
+
+
 def _canonical_instance_contract(
     instance_dir: Path,
     run_config: Mapping[str, Any],
@@ -713,15 +767,8 @@ def _canonical_instance_contract(
 def _validate_solver_overrides(
     solver: Mapping[str, Any], overrides: Mapping[str, Any]
 ) -> list[str]:
-    errors: list[str] = []
-    for declared_key, expected in overrides.items():
-        actual_key = _SOLVER_OVERRIDE_KEYS.get(declared_key, declared_key)
-        if not _contract_equal(solver.get(actual_key), expected):
-            errors.append(
-                f"solver override 未生效：{declared_key}={expected!r}，"
-                f"实际 {actual_key}={solver.get(actual_key)!r}"
-            )
-    return errors
+    expected = _normalise_solver_contract(overrides, context="solver_overrides")
+    return _solver_contract_errors(solver, expected, context="solver override 未生效")
 
 
 def _enforce_role_contracts(
@@ -759,6 +806,28 @@ def _enforce_role_contracts(
         raise ValueError(
             "scenario_config baseline formulation_id disagrees with current model"
         )
+    raw_baseline_model = baseline_config.get("model")
+    raw_baseline_solver = baseline_config.get("solver")
+    if not isinstance(raw_baseline_model, Mapping) or not raw_baseline_model:
+        raise ValueError("scenario_config baseline.model must be a nonempty mapping")
+    if not isinstance(raw_baseline_solver, Mapping) or not raw_baseline_solver:
+        raise ValueError("scenario_config baseline.solver must be a nonempty mapping")
+    baseline_model = dict(raw_baseline_model)
+    missing_model_keys = _REQUIRED_BASELINE_MODEL_KEYS - set(baseline_model)
+    if missing_model_keys:
+        raise ValueError(
+            "scenario_config baseline.model is missing required selected-main keys: "
+            + ", ".join(sorted(missing_model_keys))
+        )
+    baseline_solver = _normalise_solver_contract(
+        raw_baseline_solver, context="scenario_config baseline.solver"
+    )
+    missing_solver_keys = _REQUIRED_BASELINE_SOLVER_KEYS - set(baseline_solver)
+    if missing_solver_keys:
+        raise ValueError(
+            "scenario_config baseline.solver is missing required selected-main keys: "
+            + ", ".join(sorted(missing_solver_keys))
+        )
 
     ledger_by_run: dict[str, list[Mapping[str, str]]] = {}
     for row in ledger_rows:
@@ -789,9 +858,6 @@ def _enforce_role_contracts(
         raise ValueError("evidence requires exactly one selected main role")
     selected_item = selected_candidates[0]
     selected_config = run_configs.get(selected_item.role.run_path)
-    baseline_model = (
-        _as_mapping(selected_config.get("model")) if selected_config is not None else {}
-    )
     baseline_implementation = (
         _nested_value(selected_config, ("implementation", "sha256"))
         if selected_config is not None
@@ -915,6 +981,54 @@ def _enforce_role_contracts(
         declared_solver_overrides = _as_mapping(role.contract.get("solver_overrides"))
         errors.extend(_validate_solver_overrides(solver, declared_solver_overrides))
 
+        if role.category == "main" and role.role in {"selected", "selected_main"}:
+            if not _contract_equal(model, baseline_model):
+                errors.append(
+                    "selected main run_config.model 与 scenario_config baseline.model 不一致"
+                )
+            errors.extend(
+                _solver_contract_errors(
+                    solver,
+                    baseline_solver,
+                    context=(
+                        "selected main run_config.solver 与 "
+                        "scenario_config baseline.solver 不一致"
+                    ),
+                )
+            )
+
+        if role.category != "algorithm":
+            expected_model = _expected_model(
+                baseline_model, declared_model_overrides
+            )
+            if not _contract_equal(model, expected_model):
+                errors.append(
+                    "正式角色 run_config.model 未继承 baseline.model/显式 overrides"
+                )
+            # Per-role wall-clock budgets are allowed to differ.  They become a
+            # checked contract only when the role explicitly declares one.
+            expected_solver = {
+                key: value
+                for key, value in baseline_solver.items()
+                if key != "time_limit"
+            }
+            expected_solver.update(
+                _normalise_solver_contract(
+                    declared_solver_overrides,
+                    context=f"{role.scenario_id} solver_overrides",
+                )
+            )
+            errors.extend(
+                _solver_contract_errors(
+                    solver,
+                    expected_solver,
+                    context=(
+                        "正式角色 run_config.solver 未继承 "
+                        "baseline.solver/显式 overrides"
+                    ),
+                )
+            )
+
         if role.category == "scale":
             scale = _as_mapping(role.contract.get("scale"))
             if not scale or _integer(scale.get("H")) is None:
@@ -939,9 +1053,6 @@ def _enforce_role_contracts(
                         nested_scale.get(actual_key), scale.get(declared_key)
                     ):
                         errors.append(f"规模角色 {declared_key} 与实例不一致")
-            if baseline_model and not _contract_equal(model, baseline_model):
-                errors.append("规模实验模型参数与 selected main 基线不一致")
-
         elif role.category == "algorithm":
             required_algorithm_keys = {
                 "miqcp_method",
@@ -1002,22 +1113,9 @@ def _enforce_role_contracts(
                         errors.append(
                             "screened general_corridor_choices 与 x_value 不一致"
                         )
-            if baseline_model:
-                expected_model = _expected_model(
-                    baseline_model, declared_model_overrides
-                )
-                if not _contract_equal(model, expected_model):
-                    errors.append("exactness model_overrides 与真实 run_config 不一致")
-
         elif role.category == "sensitivity":
             if not isinstance(role.group, str) or role.x_value is None:
                 errors.append("敏感性角色必须声明 group 与 x_value/factor")
-            if baseline_model:
-                expected_model = _expected_model(
-                    baseline_model, declared_model_overrides
-                )
-                if not _contract_equal(model, expected_model):
-                    errors.append("敏感性 model_overrides 与真实 run_config 不一致")
 
         if errors:
             revised.append(
@@ -1673,6 +1771,74 @@ def _selected_main(evidence: Sequence[RoleEvidence]) -> RoleEvidence | None:
     return selected[0] if selected else None
 
 
+def _verify_selected_map_artifacts(
+    result_dir: Path, modes: Sequence[str]
+) -> None:
+    """Verify every result file the selected-map loader will consume."""
+
+    completion_path = result_dir / "run_complete.json"
+    completion = _read_object(completion_path)
+    if completion.get("schema_version") != 1 or completion.get("completed") is not True:
+        raise ValueError(f"selected map requires a sealed run_complete.json: {completion_path}")
+    if completion.get("modes") != list(modes):
+        raise ValueError(
+            f"selected map modes disagree with run_complete.json: {completion_path}"
+        )
+    artifacts = completion.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ValueError(
+            f"selected map requires run_complete.json artifacts manifest: {completion_path}"
+        )
+
+    indexed: dict[str, list[Mapping[str, Any]]] = {}
+    for record in artifacts:
+        if not isinstance(record, Mapping):
+            continue
+        relative = record.get("path")
+        if isinstance(relative, str):
+            indexed.setdefault(relative, []).append(record)
+
+    for mode in modes:
+        for filename in _MAP_SOURCE_ARTIFACTS:
+            relative = f"{mode}/{filename}"
+            records = indexed.get(relative, [])
+            if len(records) != 1:
+                qualifier = "missing" if not records else "duplicated"
+                raise ValueError(
+                    f"selected map artifact manifest record is {qualifier}: {relative}"
+                )
+            record = records[0]
+            expected_size = record.get("size_bytes")
+            expected_hash = record.get("sha256")
+            if type(expected_size) is not int or expected_size < 0:
+                raise ValueError(
+                    f"selected map artifact manifest has invalid size: {relative}"
+                )
+            if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+                raise ValueError(
+                    f"selected map artifact manifest has invalid sha256: {relative}"
+                )
+            try:
+                int(expected_hash, 16)
+            except ValueError as exc:
+                raise ValueError(
+                    f"selected map artifact manifest has invalid sha256: {relative}"
+                ) from exc
+            artifact_path = (result_dir / mode / filename).resolve()
+            try:
+                artifact_path.relative_to(result_dir.resolve())
+            except ValueError as exc:
+                raise ValueError(
+                    f"selected map artifact path escapes result directory: {relative}"
+                ) from exc
+            if not artifact_path.is_file():
+                raise ValueError(f"selected map artifact is missing: {relative}")
+            if artifact_path.stat().st_size != expected_size:
+                raise ValueError(f"selected map artifact size mismatch: {relative}")
+            if _sha256(artifact_path) != expected_hash:
+                raise ValueError(f"selected map artifact hash mismatch: {relative}")
+
+
 def _plot_selected_map(
     selected: RoleEvidence | None,
     experiment_root: Path,
@@ -1706,6 +1872,7 @@ def _plot_selected_map(
         return MapRender(*paths, "failed", "缺少候选 H 数")
     result_dir = experiment_root / selected.role.run_path
     try:
+        _verify_selected_map_artifacts(result_dir, selected.role.modes)
         case = geo._load_case(
             h,
             selected.role.instance_dir,
