@@ -251,6 +251,9 @@ class SolverConfig:
     use_local_branching: bool = True
     local_branching_radius: int = 12
     root_relaxation_method: int = 2
+    # Gurobi's mixed-integer QCP strategy. This is distinct from ``Method``,
+    # which controls how each continuous relaxation is solved.
+    miqcp_method: int = -1
 
     def validate(self) -> None:
         if not math.isfinite(self.time_limit) or self.time_limit <= 0:
@@ -287,6 +290,8 @@ class SolverConfig:
             raise ValueError(
                 "root_relaxation_method must be a valid Gurobi Method value"
             )
+        if self.miqcp_method not in {-1, 0, 1}:
+            raise ValueError("miqcp_method must be -1, 0, or 1")
 
 
 def _window_hours(start: int, end: int) -> int:

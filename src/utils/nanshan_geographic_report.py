@@ -1268,6 +1268,7 @@ def _parameter_rows(scale_config: Mapping[str, Any]) -> list[dict[str, Any]]:
         ("网络初始解预算", "network_start_seconds", "s"),
         ("NoRel 启发式预算", "no_rel_heur_seconds", "s"),
         ("根松弛方法", "root_relaxation_method", "—"),
+        ("混合整数锥策略", "miqcp_method", "—"),
         ("原生根节点 cut passes", "root_cut_passes", "轮"),
         ("最大用户割轮数", "max_root_cut_rounds", "轮"),
         ("每轮最大割数", "max_cuts_per_round", "条"),
@@ -1275,7 +1276,14 @@ def _parameter_rows(scale_config: Mapping[str, Any]) -> list[dict[str, Any]]:
         ("局部分支半径", "local_branching_radius", "—"),
     ]
     for label, key, unit in solver_specs:
-        add("规模实验求解", label, solver[key], unit, "H11–H120 的 HD/MX", "正式运行设置")
+        add(
+            "规模实验求解",
+            label,
+            solver.get(key, "未记录"),
+            unit,
+            "H11–H120 的 HD/MX",
+            "正式运行设置",
+        )
     return rows
 
 
@@ -1337,6 +1345,12 @@ def _solver_setting_rows(
             "六档规模实验": int(scale["root_relaxation_method"]),
             "正式H120": int(formal["root_relaxation_method"]),
             "说明": "Method=2",
+        },
+        {
+            "设置": "混合整数锥策略",
+            "六档规模实验": scale.get("miqcp_method", "未记录"),
+            "正式H120": formal.get("miqcp_method", "未记录"),
+            "说明": "MIQCPMethod；与 Method 分开记录",
         },
         {
             "设置": "原生根节点 cut passes",

@@ -148,6 +148,14 @@ class ResultProcessor:
         number = float(value)
         return number if math.isfinite(number) else None
 
+    def _model_attribute_or_none(self, name: str) -> float | None:
+        """Read a post-solve numeric Gurobi attribute when it is available."""
+
+        try:
+            return self._finite_or_none(getattr(self.model, name))
+        except Exception:
+            return None
+
     @classmethod
     def _clean(cls, value: float) -> float:
         return 0.0 if abs(value) <= cls.TOL else float(value)
@@ -778,6 +786,7 @@ class ResultProcessor:
             "root_relaxation_method": getattr(
                 solver_config, "root_relaxation_method", None
             ),
+            "miqcp_method": getattr(solver_config, "miqcp_method", None),
             "static_pool_enabled": bool(
                 getattr(solver_config, "use_valid_inequalities", False)
             ),
@@ -965,6 +974,18 @@ class ResultProcessor:
                 "external_start_matched_variables": int(
                     getattr(self.wrapper, "external_start_matched_variables", 0)
                 ),
+                "search_statistics": {
+                    "node_count": self._model_attribute_or_none("NodeCount"),
+                    "simplex_iterations": self._model_attribute_or_none("IterCount"),
+                    "barrier_iterations": self._model_attribute_or_none("BarIterCount"),
+                    "work_units": self._model_attribute_or_none("Work"),
+                },
+                "solution_quality": {
+                    "maximum_violation": self._model_attribute_or_none("MaxVio"),
+                    "constraint_violation": self._model_attribute_or_none("ConstrVio"),
+                    "bound_violation": self._model_attribute_or_none("BoundVio"),
+                    "integrality_violation": self._model_attribute_or_none("IntVio"),
+                },
                 "algorithm": algorithm,
             },
             "instance": {

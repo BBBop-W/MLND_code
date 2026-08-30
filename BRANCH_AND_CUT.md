@@ -201,7 +201,10 @@ cross-mode start is optional and is reported explicitly when installed.
 
 ## 4. Root relaxation
 
-The default root method is conic barrier (`Gurobi Method=2`). User cuts are
+The default root method is conic barrier (`Gurobi Method=2`). The distinct
+mixed-integer conic strategy is recorded as `Gurobi MIQCPMethod` and defaults
+to `-1` (automatic); matched computational experiments may also use `0` or
+`1`. `Method=2` must never be reported as an `MIQCPMethod` setting. User cuts are
 added only at an optimal root `MIPNODE` relaxation with `PreCrush=1`. They are
 strengthening cuts, not lazy feasibility constraints. The default uses three
 callback separation rounds and two solver-native root cut passes; this keeps

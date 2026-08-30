@@ -209,6 +209,7 @@ python main.py solve \
   --solver-seed 43 \
   --max-root-cut-rounds 3 \
   --root-cut-passes 2 \
+  --miqcp-method -1 \
   --time-limit 900 \
   --mip-gap 0.01
 ```
@@ -301,9 +302,28 @@ The mode directory also contains:
 
 `run_config.json` records the input hashes, demand scale, modes, screening
 controls, raw and derived model parameters, formulation ID, manuscript hash,
-implementation-file hashes, and a signature also embedded in every summary.
+implementation-file hashes, Git state, non-sensitive execution environment,
+and a signature also embedded in every summary. `run_complete.json` seals a
+finished multi-mode run with SHA-256 hashes for every solver-produced artifact.
 A requested result directory must be absent or empty; the solver refuses to
 mix a new run with stale artifacts.
+
+Independently validate a completed result package, then aggregate validated
+formal runs into the paper ledger:
+
+```bash
+python -m src.utils.result_validator results/my_completed_run
+python -m src.utils.paper_experiment_ledger results/paper_experiments
+```
+
+The validator writes `validation.json` and `validation_checks.csv`. The ledger
+writes `run_ledger.csv`, `scenario_summary.csv`, and a hashed
+`ledger_manifest.json`; it rejects incomplete runs instead of silently omitting
+them.
+
+`--root-method` sets Gurobi `Method` for continuous relaxations, while
+`--miqcp-method` explicitly sets `MIQCPMethod` to `-1`, `0`, or `1`. These are
+different controls and are recorded separately in every formal run.
 
 Run the six-level scale experiment sequentially so every level uses the same
 model and solver settings. Each run solves `HD` first and then installs that
@@ -335,6 +355,7 @@ while read -r h instance; do
     --solver-seed 43 \
     --max-root-cut-rounds 3 \
     --root-cut-passes 2 \
+    --miqcp-method -1 \
     --time-limit 300 \
     --mip-gap 0.01
 done <<'LEVELS'

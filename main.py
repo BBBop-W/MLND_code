@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path
+import subprocess
+import sys
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mlnd-matplotlib")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/mlnd-xdg-cache")
@@ -372,6 +376,16 @@ def _add_solve_arguments(
         default=2,
         help="Gurobi Method for the root relaxation; 2=barrier (default), -1=automatic",
     )
+    parser.add_argument(
+        "--miqcp-method",
+        type=int,
+        choices=(-1, 0, 1),
+        default=SolverConfig().miqcp_method,
+        help=(
+            "Gurobi MIQCPMethod: -1=automatic, 0=continuous QCP node "
+            "relaxations, 1=outer approximation"
+        ),
+    )
     if include_instance:
         parser.add_argument(
             "--solver-seed", "--seed", dest="solver_seed", type=int, default=42
@@ -596,6 +610,9 @@ def _prepare_empty_results_root(results_root: Path) -> None:
 
 
 def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object]]:
+    started_at = datetime.now(timezone.utc).isoformat()
+    git_provenance = _git_provenance()
+    execution_environment = _execution_environment(started_at)
     modes = _validated_modes(args.modes)
     if not math.isfinite(args.demand_scale) or args.demand_scale <= 0:
         raise ValueError("demand_scale must be positive and finite")
@@ -618,6 +635,7 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
         use_local_branching=not args.no_local_branching,
         local_branching_radius=args.local_branching_radius,
         root_relaxation_method=args.root_method,
+        miqcp_method=args.miqcp_method,
     )
     solver_config.validate()
     instance_path = Path(instance_dir).expanduser().resolve()
@@ -723,6 +741,8 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
                 "model": to_dict(model_config),
                 "model_derived": model_derived,
                 "solver": to_dict(solver_config),
+                "git": git_provenance,
+                "execution_environment": execution_environment,
             },
             handle,
             ensure_ascii=False,
@@ -778,6 +798,12 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
             dispose()
 
     _write_mode_comparison(results_root, summaries)
+    completion_path = _write_run_complete(
+        results_root,
+        started_at=started_at,
+        summaries=summaries,
+    )
+    print(f"Run completion manifest: {completion_path.resolve()}")
     print(f"Results: {results_root.resolve()}")
     return summaries
 
@@ -991,6 +1017,122 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _git_text(*args: str) -> str | None:
+    """Return one short Git value without making the experiment depend on Git."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip()
+
+
+def _git_provenance() -> dict[str, object]:
+    """Record the exact tracked source state used by a computational run."""
+
+    tracked_status = _git_text("status", "--porcelain=v1", "--untracked-files=no")
+    diff_payload = _git_text("diff", "--binary", "HEAD")
+    return {
+        "branch": _git_text("branch", "--show-current"),
+        "head": _git_text("rev-parse", "HEAD"),
+        "tracked_worktree_dirty": bool(tracked_status),
+        "tracked_status": tracked_status or "",
+        "tracked_diff_sha256": (
+            hashlib.sha256(diff_payload.encode("utf-8")).hexdigest()
+            if diff_payload
+            else None
+        ),
+    }
+
+
+def _sysctl_value(name: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["sysctl", "-n", name],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return value or None
+
+
+def _execution_environment(started_at: str) -> dict[str, object]:
+    """Return non-sensitive hardware and software fields needed for replication."""
+
+    try:
+        import gurobipy as gp
+
+        gurobi_version: list[int] | None = list(gp.gurobi.version())
+    except Exception:
+        gurobi_version = None
+    memory_raw = _sysctl_value("hw.memsize")
+    return {
+        "started_at_utc": started_at,
+        "python_version": platform.python_version(),
+        "python_executable": str(Path(sys.executable).resolve()),
+        "gurobi_version": gurobi_version,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "cpu_model": _sysctl_value("machdep.cpu.brand_string") or platform.processor(),
+        "logical_cpu_count": os.cpu_count(),
+        "memory_bytes": int(memory_raw) if memory_raw and memory_raw.isdigit() else None,
+    }
+
+
+def _write_run_complete(
+    results_root: Path,
+    *,
+    started_at: str,
+    summaries: list[dict[str, object]],
+) -> Path:
+    """Seal one complete run with hashes for every solver-produced artifact."""
+
+    artifacts: list[dict[str, object]] = []
+    for path in sorted(results_root.rglob("*")):
+        if not path.is_file() or path.name == "run_complete.json":
+            continue
+        artifacts.append(
+            {
+                "path": path.relative_to(results_root).as_posix(),
+                "size_bytes": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
+        )
+    payload = {
+        "schema_version": 1,
+        "completed": True,
+        "started_at_utc": started_at,
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "modes": [str(summary["mode"]) for summary in summaries],
+        "mode_status": {
+            str(summary["mode"]): {
+                "status": summary.get("status_name"),
+                "objective": summary.get("objective"),
+                "objective_bound": summary.get("objective_bound"),
+                "mip_gap": summary.get("mip_gap"),
+                "runtime_seconds": summary.get("runtime_seconds"),
+                "screening_is_exact": summary.get("screening_is_exact"),
+            }
+            for summary in summaries
+        },
+        "artifact_count": len(artifacts),
+        "artifacts": artifacts,
+    }
+    output = results_root / "run_complete.json"
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output
 
 
 def _implementation_provenance() -> dict[str, object]:

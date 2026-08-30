@@ -1058,6 +1058,7 @@ class MLNDModel:
         self.model.Params.OutputFlag = solver.output_flag
         self.model.Params.Seed = solver.seed
         self.model.Params.Method = solver.root_relaxation_method
+        self.model.Params.MIQCPMethod = solver.miqcp_method
         start_budget = min(solver.network_start_seconds, 0.20 * solver.time_limit)
         if start_budget > 1e-9 and self.chi_keys:
             self._construct_network_start(start_budget, solver)

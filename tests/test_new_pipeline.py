@@ -1044,6 +1044,7 @@ def test_default_algorithm_path_runs_with_energy_constraints(
             use_local_branching=True,
             local_branching_radius=6,
             root_relaxation_method=2,
+            miqcp_method=1,
         )
     )
 
@@ -1065,12 +1066,14 @@ def test_default_algorithm_path_runs_with_energy_constraints(
     } == original_x_bounds
     assert wrapper.local_branching_status is not None
     assert wrapper.model.Params.PreCrush == 1
+    assert wrapper.model.Params.MIQCPMethod == 1
     processor = ResultProcessor(
         wrapper,
         instance,
         run_signature_sha256=TEST_RUN_SIGNATURE_SHA256,
     )
     algorithm = processor.summary["solver"]["algorithm"]
+    assert algorithm["miqcp_method"] == 1
     assert algorithm["installed_mip_start_count"] == 3
     assert algorithm["network_partial_start_installed"] is True
     assert algorithm["network_partial_start_index"] == 1
@@ -1373,6 +1376,8 @@ def test_invalid_windows_and_solver_parameters_are_rejected() -> None:
         SolverConfig(no_rel_heur_seconds=-1).validate()
     with pytest.raises(ValueError, match="root_cut_passes"):
         SolverConfig(root_cut_passes=-2).validate()
+    with pytest.raises(ValueError, match="miqcp_method"):
+        SolverConfig(miqcp_method=2).validate()
     with pytest.raises(ValueError, match="strictly positive"):
         ModelConfig(drone_cost_per_hour=0.0).validate()
     with pytest.raises(ValueError, match="feeder_rider_cost_factor"):
@@ -1395,6 +1400,7 @@ def test_cli_imports_defaults_and_solve_seed() -> None:
     )
     assert solve.modes == ("MX", "LO")
     assert solve.solver_seed == 17
+    assert solve.miqcp_method == -1
     assert solve.root_cut_passes == 2
     default_model_config = _model_config(solve)
     assert default_model_config.drone_speed_mps == pytest.approx(20.0)
@@ -1600,6 +1606,13 @@ def test_run_config_uses_current_schema_source_and_implementation_hash(
     assert payload["model"]["choice"]["max_walk_km"] == pytest.approx(1.5)
     assert payload["model"]["locker_pickup_cost_per_order"] == pytest.approx(0.47)
     assert payload["model_derived"]["drone_speed_kmph"] == pytest.approx(72.0)
+    assert payload["solver"]["miqcp_method"] == -1
+    assert payload["git"]["head"]
+    assert payload["execution_environment"]["python_version"]
+    completion = json.loads((results_dir / "run_complete.json").read_text())
+    assert completion["completed"] is True
+    assert completion["modes"] == ["HD", "MX", "LO"]
+    assert completion["artifact_count"] >= 4
     assert payload["model_derived"]["usable_battery_time_minutes"] == pytest.approx(
         10.0 / 72.0 * 60.0
     )
