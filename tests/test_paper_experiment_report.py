@@ -344,7 +344,7 @@ def _write_run_sources(
     if len(validations) != 1:
         raise AssertionError("fixture requires one run-level validation result")
     (run_dir / "validation.json").write_text(
-        json.dumps({"valid": validations == {"true"}}), encoding="utf-8"
+        json.dumps({"valid": validations == {"true"}, "result_schema_version": run_config["schema_version"], "formulation_id": FORMULATION_ID, "run_signature_sha256": signature}), encoding="utf-8"
     )
     artifacts = [
         {
@@ -599,9 +599,12 @@ def _artifact_result_status(artifact: dict[str, Any], scenario_id: str) -> str:
     return statuses.pop()
 
 
+@pytest.mark.parametrize("source_schema", [5, 6])
 def test_report_is_dynamic_and_keeps_pending_roles_out_of_claims(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_schema: int
 ) -> None:
+    # Historical fixture versions must not be relabelled by the schema-6 writer.
+    monkeypatch.setitem(globals(), "RESULT_SCHEMA_VERSION", source_schema)
     experiment_root = tmp_path / "experiment"
     experiment_root.mkdir()
     rows = [
@@ -690,6 +693,8 @@ def test_report_is_dynamic_and_keeps_pending_roles_out_of_claims(
     assert [row["x_value"] for row in scale] == [24.0]
 
     manifest = json.loads(outputs.manifest.read_text(encoding="utf-8"))
+    assert manifest["result_contract"]["schema_version"] == source_schema
+    assert manifest["result_contract"]["schema_versions"] == [source_schema]
     assert manifest["evidence_state"] == {
         "ready": 6,
         "pilot": 1,
@@ -1453,3 +1458,35 @@ def test_repo_relative_run_path_is_normalized_against_experiment_root(
         report._normalise_run_path("results/paper/formal/main/H24", root)
         == "formal/main/H24"
     )
+
+
+def test_algorithm_role_rejects_cross_schema_timing_contract(tmp_path: Path) -> None:
+    experiment_root = tmp_path / "experiment"
+    experiment_root.mkdir()
+    _write_ledger_bundle(
+        experiment_root,
+        [_ledger_row("main/h24"), _ledger_row("algorithm/h24")],
+    )
+    run = experiment_root / "algorithm/h24"
+    for relative, key in (("run_config.json", "schema_version"), ("MX/summary.json", "schema_version"), ("validation.json", "result_schema_version")):
+        path = run / relative
+        payload = json.loads(path.read_text())
+        payload[key] = 5
+        path.write_text(json.dumps(payload))
+    build_paper_experiment_ledger(experiment_root, experiment_root / "ledger")
+    config = _config_with_roles(experiment_root, {
+        "main": _selected_main_role(experiment_root),
+        "algorithm": [{
+            "id": "historical_algorithm", "label": "Historical algorithm",
+            "run_path": "algorithm/h24", "modes": ["MX"],
+            "instance_dir": str(experiment_root / "instances/H24"),
+            "solver_overrides": {"miqcp_method": -1, "seed": 43, "threads": 4, "time_limit_seconds": 300},
+        }],
+    })
+    rows, _, _, _ = report._load_verified_ledger(config, experiment_root)
+    roles = report._parse_roles(config, experiment_root)
+    evidence = report._evidence_for_roles(roles, rows)
+    checked, _ = report._enforce_role_contracts(config, evidence, rows, experiment_root)
+    historical = next(item for item in checked if item.role.scenario_id == "historical_algorithm")
+    assert historical.status == "invalid"
+    assert "计时契约" in historical.note

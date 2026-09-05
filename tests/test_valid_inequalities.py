@@ -7,14 +7,271 @@ import pytest
 from src.model.valid_inequalities import (
     ChoiceCorridorCoverData,
     build_choice_corridor_cover_data,
+    build_nearest_display_suffix_rows,
+    build_swap_route_bundles,
+    evaluate_route_bundle_vub,
     most_violated_queue_perspective_cut,
     queue_perspective_intercept,
     queue_support_minimizer,
+    route_swap_leg_vub_bound,
+    route_swap_station_vub_bound,
     separate_choice_capacity_covers,
     separate_directed_return_cuts,
     separate_queue_perspective_cut,
     stable_arrival_capacity,
 )
+
+
+def test_nearest_display_suffix_rows_use_strict_relation_and_preserve_ties() -> None:
+    display = {
+        "D1": ("K0", "K1A", "K1B", "K2", "K3"),
+    }
+    closer = {
+        ("D1", "K0"): (),
+        ("D1", "K1A"): ("K0",),
+        ("D1", "K1B"): ("K0",),
+        ("D1", "K2"): ("K0", "K1A", "K1B"),
+        ("D1", "K3"): ("K0", "K1A", "K1B", "K2", "OFFSCREEN"),
+    }
+
+    rows = build_nearest_display_suffix_rows(display, closer)
+
+    assert tuple(
+        (row.anchor_locker, row.farther_lockers) for row in rows
+    ) == (
+        ("K0", ("K1A", "K1B", "K2", "K3")),
+        ("K1A", ("K2", "K3")),
+        ("K1B", ("K2", "K3")),
+    )
+    # K1A and K1B are adjacent only because locker ID stabilizes their tied
+    # distance order.  Neither is incorrectly treated as farther than the other.
+    assert all(
+        not ({"K1A", "K1B"} <= {row.anchor_locker, *row.farther_lockers})
+        for row in rows
+        if row.anchor_locker in {"K1A", "K1B"}
+    )
+
+
+def test_nearest_display_suffix_rows_skip_pairwise_and_empty_degeneracies() -> None:
+    assert build_nearest_display_suffix_rows(
+        {"D1": ("K0", "K1")},
+        {("D1", "K0"): (), ("D1", "K1"): ("K0",)},
+    ) == ()
+    assert build_nearest_display_suffix_rows(
+        {"D1": ("K0", "K1", "K2")},
+        {
+            ("D1", "K0"): (),
+            ("D1", "K1"): (),
+            ("D1", "K2"): (),
+        },
+    ) == ()
+
+
+def test_nearest_display_suffix_is_valid_for_all_binary_base_assignments() -> None:
+    lockers = ("K0", "K1", "K2", "K3")
+    rows = build_nearest_display_suffix_rows(
+        {"D1": lockers},
+        {
+            ("D1", "K0"): (),
+            ("D1", "K1"): ("K0",),
+            ("D1", "K2"): ("K0", "K1"),
+            ("D1", "K3"): ("K0", "K1", "K2"),
+        },
+    )
+
+    for x_mask in range(1 << len(lockers)):
+        x = {
+            locker: float(bool(x_mask & (1 << index)))
+            for index, locker in enumerate(lockers)
+        }
+        for alpha_mask in range(1 << len(lockers)):
+            alpha = {
+                locker: float(bool(alpha_mask & (1 << index)))
+                for index, locker in enumerate(lockers)
+            }
+            if sum(alpha.values()) > 1.0:
+                continue
+            if any(alpha[locker] > x[locker] for locker in lockers):
+                continue
+            if any(
+                alpha[farther] > 1.0 - x[nearer]
+                for farther in lockers
+                for nearer in {
+                    "K0": (),
+                    "K1": ("K0",),
+                    "K2": ("K0", "K1"),
+                    "K3": ("K0", "K1", "K2"),
+                }[farther]
+            ):
+                continue
+            assert all(
+                sum(alpha[locker] for locker in row.farther_lockers)
+                <= 1.0 - x[row.anchor_locker]
+                for row in rows
+            )
+
+    # The aggregation is genuinely stronger at the LP relaxation: all three
+    # pairwise rows and the display limit hold, but the K0 suffix row does not.
+    fractional_x_k0 = 0.5
+    fractional_farther = (0.25, 0.25, 0.25)
+    assert sum(fractional_farther) <= 1.0
+    assert all(value <= 1.0 - fractional_x_k0 for value in fractional_farther)
+    assert sum(fractional_farther) > 1.0 - fractional_x_k0
+
+
+def test_nearest_display_suffix_rows_reject_malformed_choice_relations() -> None:
+    with pytest.raises(ValueError, match="duplicate lockers"):
+        build_nearest_display_suffix_rows(
+            {"D1": ("K0", "K0")},
+            {("D1", "K0"): ()},
+        )
+    with pytest.raises(ValueError, match="missing strict-nearness"):
+        build_nearest_display_suffix_rows(
+            {"D1": ("K0", "K1")},
+            {("D1", "K0"): ()},
+        )
+    with pytest.raises(ValueError, match="contains the locker itself"):
+        build_nearest_display_suffix_rows(
+            {"D1": ("K0",)},
+            {("D1", "K0"): ("K0",)},
+        )
+
+
+def test_swap_route_bundle_index_counts_legs_once_and_station_once() -> None:
+    direct = "__direct__"
+    route_options = {
+        ("L1", "H1"): (direct, "E1", "E2"),
+        ("L1", "H2"): ("E1",),
+        ("H1", "L1"): (direct, "E1"),
+    }
+    by_leg, by_station = build_swap_route_bundles(
+        route_options,
+        direct_option=direct,
+    )
+
+    swap_keys = {
+        (u, v, option)
+        for (u, v), options in route_options.items()
+        for option in options
+        if option != direct
+    }
+    leg_memberships = [key for keys in by_leg.values() for key in keys]
+    station_memberships = [key for keys in by_station.values() for key in keys]
+    assert set(leg_memberships) == swap_keys
+    assert set(station_memberships) == swap_keys
+    assert all(leg_memberships.count(key) == 2 for key in swap_keys)
+    assert all(station_memberships.count(key) == 1 for key in swap_keys)
+    assert by_leg["L1", "E1"] == (
+        ("L1", "H1", "E1"),
+        ("L1", "H2", "E1"),
+    )
+    assert by_station["E1"] == (
+        ("H1", "L1", "E1"),
+        ("L1", "H1", "E1"),
+        ("L1", "H2", "E1"),
+    )
+
+
+def test_swap_route_bounds_use_unique_arc_mass_and_safe_category_caps() -> None:
+    base_keys = (
+        ("L1", "H1", "E1"),
+        ("L1", "H2", "E1"),
+    )
+    upper = {
+        ("L1", "H1"): 60.0,
+        ("L1", "H2"): 70.0,
+        ("H1", "H2"): 200.0,
+        ("H1", "L1"): 200.0,
+        ("H2", "H1"): 80.0,
+        ("H2", "L1"): 80.0,
+    }
+    base_bound = route_swap_leg_vub_bound(
+        base_keys,
+        upper,
+        endpoint_kind="base",
+        realized_demand_upper=100.0,
+    )
+    assert base_bound.summed_individual_upper == pytest.approx(130.0)
+    assert base_bound.coefficient == pytest.approx(100.0)
+    assert base_bound.strictly_strengthens()
+
+    locker_bound = route_swap_leg_vub_bound(
+        (("H1", "H2", "E1"), ("H1", "L1", "E1")),
+        upper,
+        endpoint_kind="locker",
+        realized_demand_upper=100.0,
+        locker_service_rates=(120.0, 240.0),
+        max_locker_time=0.1,
+    )
+    assert locker_bound.summed_individual_upper == pytest.approx(400.0)
+    assert locker_bound.coefficient == pytest.approx(230.0)
+    assert locker_bound.strictly_strengthens()
+
+    station_keys = (
+        ("L1", "H1", "E1"),
+        ("L1", "H2", "E1"),
+        ("H1", "H2", "E1"),
+        ("H2", "H1", "E1"),
+        ("H1", "L1", "E1"),
+        ("H2", "L1", "E1"),
+    )
+    categories = {
+        ("L1", "H1"): "LH",
+        ("L1", "H2"): "LH",
+        ("H1", "H2"): "HH",
+        ("H2", "H1"): "HH",
+        ("H1", "L1"): "HL",
+        ("H2", "L1"): "HL",
+    }
+    station_bound = route_swap_station_vub_bound(
+        station_keys,
+        upper,
+        categories,
+        realized_demand_upper=100.0,
+    )
+    assert station_bound.summed_individual_upper == pytest.approx(690.0)
+    assert station_bound.coefficient == pytest.approx(300.0)
+    assert station_bound.strictly_strengthens()
+
+
+def test_route_bundle_helpers_reject_duplicate_variable_keys() -> None:
+    duplicate = (("L1", "H1", "E1"),) * 2
+    upper = {("L1", "H1"): 60.0}
+
+    with pytest.raises(ValueError, match="duplicate variable keys"):
+        route_swap_leg_vub_bound(
+            duplicate,
+            upper,
+            endpoint_kind="base",
+            realized_demand_upper=100.0,
+        )
+    with pytest.raises(ValueError, match="duplicate variable keys"):
+        route_swap_station_vub_bound(
+            duplicate,
+            upper,
+            {("L1", "H1"): "LH"},
+            realized_demand_upper=100.0,
+        )
+    with pytest.raises(ValueError, match="duplicate variable keys"):
+        evaluate_route_bundle_vub(
+            duplicate,
+            {duplicate[0]: 6.0},
+            activation_value=1.0,
+            coefficient=60.0,
+        )
+
+
+def test_route_bundle_fractional_violation_is_flow_not_leg_double_count() -> None:
+    keys = (("L1", "H1", "E1"), ("L1", "H2", "E1"))
+    evaluated = evaluate_route_bundle_vub(
+        keys,
+        {keys[0]: 6.0, keys[1]: 7.0},
+        activation_value=0.25,
+        coefficient=40.0,
+    )
+    assert evaluated.lhs_value == pytest.approx(13.0)
+    assert evaluated.rhs_value == pytest.approx(10.0)
+    assert evaluated.violation == pytest.approx(3.0)
 
 
 def _queue_value(mu: float, arrival: float) -> float:

@@ -167,3 +167,14 @@ def test_parameter_collection_returns_bound_signature(tmp_path: Path) -> None:
     assert rows[0]["run_signature_sha256"] == RUN_SIGNATURE
     assert rows[0]["summary_schema_version"] == RESULT_SCHEMA_VERSION
     assert rows[0]["formulation_id"] == FORMULATION_ID
+
+
+def test_parameter_sweep_does_not_pool_different_runtime_contracts(tmp_path: Path) -> None:
+    _write_scenario(tmp_path, "current")
+    historical = _write_scenario(tmp_path, "historical")
+    for path in (historical / "run_config.json", historical / "MX/summary.json"):
+        payload = json.loads(path.read_text())
+        payload["schema_version"] = 5
+        path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="runtime contracts"):
+        collect_parameter_results(tmp_path)

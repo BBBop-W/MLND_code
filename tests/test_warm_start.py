@@ -167,7 +167,7 @@ def test_cli_applies_file_start_once_then_prefers_hd_and_writes_solutions(
             self.external_start_source: str | None = None
             self.external_start_matched_variables = 0
 
-        def prepare_algorithm(self, _solver: SolverConfig) -> FakeModel:
+        def build(self) -> FakeModel:
             return self
 
         def solve(

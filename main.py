@@ -327,10 +327,61 @@ def _add_solve_arguments(
         ),
     )
     parser.add_argument(
+        "--network-start-method",
+        type=int,
+        choices=(-1, 0, 1, 2, 3, 4, 5),
+        default=SolverConfig().network_start_method,
+        help=(
+            "Gurobi Method used only by network-start auxiliary solves; "
+            "the main solve still uses --root-method"
+        ),
+    )
+    parser.add_argument(
+        "--start-mode",
+        choices=("auto", "none", "courier", "network", "network_and_courier"),
+        default=SolverConfig().start_mode,
+        help=(
+            "explicit MIP-start policy; f884's interactive default is 'auto', "
+            "while formal native baselines use 'none'"
+        ),
+    )
+    parser.add_argument(
+        "--dev-objective-partial-start",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().use_objective_partial_start,
+        help=(
+            "development-only bounded objective-aware partial MIP starts; requires "
+            "--start-mode none and zero legacy start/local-branching budgets"
+        ),
+    )
+    parser.add_argument(
+        "--objective-partial-start-seconds",
+        type=float,
+        default=SolverConfig().objective_partial_start_seconds,
+        help=(
+            "partial-start preparation allowance; always capped at five percent "
+            "of --time-limit (default: that five-percent cap)"
+        ),
+    )
+    parser.add_argument(
+        "--objective-partial-start-max-candidates",
+        type=int,
+        default=SolverConfig().objective_partial_start_max_candidates,
+        help="maximum gated network supports, excluding the all-courier safety start",
+    )
+    parser.add_argument(
+        "--fixed-integer-repair-seconds",
+        type=float,
+        default=SolverConfig().fixed_integer_repair_seconds,
+    )
+    parser.add_argument(
         "--no-rel-heur-seconds",
         type=float,
         default=SolverConfig().no_rel_heur_seconds,
-        help="maximum main-solve time used by Gurobi's pre-root primal heuristic",
+        help=(
+            "f884 maximum pre-root heuristic allowance when --no-rel-heur-time "
+            "is not supplied"
+        ),
     )
     static_group = parser.add_mutually_exclusive_group()
     static_group.add_argument(
@@ -364,9 +415,70 @@ def _add_solve_arguments(
     parser.add_argument("--max-cuts-per-round", type=int, default=250)
     parser.add_argument("--cut-violation-tolerance", type=float, default=1e-6)
     parser.add_argument(
+        "--cut-efficacy-tolerance",
+        type=float,
+        default=SolverConfig().cut_efficacy_tolerance,
+    )
+    parser.add_argument(
+        "--static-od-vub-per-corridor",
+        type=int,
+        default=SolverConfig().static_chi_vub_top_k_per_corridor,
+        help=(
+            "when static strengthening is enabled, predeclare the top-k "
+            "OD-corridor variable-upper-bound rows per corridor"
+        ),
+    )
+    parser.add_argument(
+        "--nearest-display-suffix-rows",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().static_nearest_display_suffix,
+        help="development-only nearest-display suffix strengthening (default: off)",
+    )
+    parser.add_argument(
+        "--od-facility-vub-cuts",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().cut_chi_facility_vub,
+        help="development-only OD incident-star facility VUB cuts (default: off)",
+    )
+    parser.add_argument(
+        "--route-swap-station-vub-cuts",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().cut_route_swap_station_vub,
+        help="development-only swap-station throughput VUB cuts (default: off)",
+    )
+    parser.add_argument(
+        "--route-swap-leg-vub-cuts",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().cut_route_swap_leg_vub,
+        help="development-only directed swap-leg VUB cuts (default: off)",
+    )
+    parser.add_argument(
+        "--directed-return-cuts",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().cut_directed_return,
+        help=(
+            "directed return-connectivity root cuts (default: on); the negative "
+            "form is exposed for registered single-family development ablations"
+        ),
+    )
+    parser.add_argument(
+        "--od-disaggregated-return-cuts",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().cut_od_disaggregated_return,
+        help=(
+            "development-only OD-disaggregated directed return-connectivity "
+            "root cuts (default: off)"
+        ),
+    )
+    parser.add_argument(
         "--no-local-branching",
         action="store_true",
         help="disable exact-conic local branching in the network-start phase",
+    )
+    parser.add_argument(
+        "--local-branching-seconds",
+        type=float,
+        default=SolverConfig().local_branching_seconds,
     )
     parser.add_argument("--local-branching-radius", type=int, default=12)
     parser.add_argument(
@@ -382,9 +494,48 @@ def _add_solve_arguments(
         choices=(-1, 0, 1),
         default=SolverConfig().miqcp_method,
         help=(
-            "Gurobi MIQCPMethod: -1=automatic, 0=continuous QCP node "
-            "relaxations, 1=outer approximation"
+            "matched Gurobi MIQCPMethod for the main solve: -1=automatic, "
+            "0=continuous QCP node relaxations, 1=outer approximation"
         ),
+    )
+    parser.add_argument("--mip-focus", type=int, choices=(0, 1, 2, 3))
+    parser.add_argument("--heuristics", type=float)
+    parser.add_argument(
+        "--no-rel-heur-time",
+        type=float,
+        help=(
+            "exact Gurobi NoRelHeurTime override; formal profiles set this "
+            "explicitly and it takes precedence over --no-rel-heur-seconds"
+        ),
+    )
+    parser.add_argument(
+        "--presolve",
+        type=int,
+        choices=(-1, 0, 1, 2),
+        default=SolverConfig().presolve,
+    )
+    parser.add_argument(
+        "--native-cuts",
+        type=int,
+        choices=(-1, 0, 1, 2, 3),
+        default=SolverConfig().cuts,
+    )
+    parser.add_argument(
+        "--numeric-focus",
+        type=int,
+        choices=(0, 1, 2, 3),
+        default=SolverConfig().numeric_focus,
+    )
+    parser.add_argument(
+        "--collect-progress",
+        action=argparse.BooleanOptionalAction,
+        default=SolverConfig().collect_progress,
+        help="capture matched incumbent/bound trajectories for development comparisons",
+    )
+    parser.add_argument(
+        "--progress-interval-seconds",
+        type=float,
+        default=SolverConfig().progress_interval_seconds,
     )
     if include_instance:
         parser.add_argument(
@@ -614,6 +765,10 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
     git_provenance = _git_provenance()
     execution_environment = _execution_environment(started_at)
     modes = _validated_modes(args.modes)
+    if args.dev_objective_partial_start and "LO" in modes:
+        raise ValueError(
+            "objective partial starts support only HD/MX; remove LO from --modes"
+        )
     if not math.isfinite(args.demand_scale) or args.demand_scale <= 0:
         raise ValueError("demand_scale must be positive and finite")
     model_config = _model_config(args)
@@ -624,7 +779,15 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
         threads=args.threads,
         output_flag=0 if args.quiet else 1,
         seed=args.solver_seed,
+        start_mode=args.start_mode,
+        use_objective_partial_start=args.dev_objective_partial_start,
+        objective_partial_start_seconds=args.objective_partial_start_seconds,
+        objective_partial_start_max_candidates=(
+            args.objective_partial_start_max_candidates
+        ),
         network_start_seconds=args.network_start_seconds,
+        network_start_method=args.network_start_method,
+        fixed_integer_repair_seconds=args.fixed_integer_repair_seconds,
         no_rel_heur_seconds=args.no_rel_heur_seconds,
         use_valid_inequalities=args.use_valid_inequalities,
         use_user_cuts=not args.no_user_cuts,
@@ -632,10 +795,27 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
         root_cut_passes=args.root_cut_passes,
         max_cuts_per_round=args.max_cuts_per_round,
         cut_violation_tolerance=args.cut_violation_tolerance,
+        cut_efficacy_tolerance=args.cut_efficacy_tolerance,
+        static_chi_vub_top_k_per_corridor=args.static_od_vub_per_corridor,
+        static_nearest_display_suffix=args.nearest_display_suffix_rows,
+        cut_chi_facility_vub=args.od_facility_vub_cuts,
+        cut_route_swap_station_vub=args.route_swap_station_vub_cuts,
+        cut_route_swap_leg_vub=args.route_swap_leg_vub_cuts,
+        cut_directed_return=args.directed_return_cuts,
+        cut_od_disaggregated_return=args.od_disaggregated_return_cuts,
         use_local_branching=not args.no_local_branching,
+        local_branching_seconds=args.local_branching_seconds,
         local_branching_radius=args.local_branching_radius,
         root_relaxation_method=args.root_method,
         miqcp_method=args.miqcp_method,
+        mip_focus=args.mip_focus,
+        heuristics=args.heuristics,
+        no_rel_heur_time=args.no_rel_heur_time,
+        presolve=args.presolve,
+        cuts=args.native_cuts,
+        numeric_focus=args.numeric_focus,
+        collect_progress=args.collect_progress,
+        progress_interval_seconds=args.progress_interval_seconds,
     )
     solver_config.validate()
     instance_path = Path(instance_dir).expanduser().resolve()
@@ -752,15 +932,15 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
     summaries: list[dict[str, object]] = []
     hd_start: dict[str, float] | None = None
     for mode_index, mode in enumerate(modes):
-        model = MLNDModel(instance, mode=mode).prepare_algorithm(solver_config)
+        # Common model construction is outside the algorithm budget; solve()
+        # must perform the first strengthening/start preparation inside it.
+        model = MLNDModel(instance, mode=mode).build()
         mode_dir = results_root / mode
         mode_dir.mkdir(parents=True, exist_ok=True)
         # Keep the complete solver trace next to the structured result.  The
         # trace is needed to audit incumbent/bound progress on time-limited
         # benchmark runs; summary.json alone contains only the final point.
         model.model.Params.LogFile = str(mode_dir / "solver.log")
-        if args.write_lp:
-            model.write_model(str(mode_dir / "model.lp"))
         external_start: dict[str, float] | None = None
         external_start_source: str | None = None
         if mode_index == 0 and warm_start_values is not None:
@@ -769,11 +949,16 @@ def _solve(args: argparse.Namespace, instance_dir: str) -> list[dict[str, object
         elif mode == "MX" and hd_start is not None:
             external_start = hd_start
             external_start_source = "HD"
-        if not model.solve(
+        has_incumbent = model.solve(
             solver_config,
             external_start=external_start,
             external_start_source=external_start_source,
-        ):
+        )
+        if args.write_lp:
+            # Export the strengthened model after timed preparation, including
+            # unsuccessful solves, without charging disk I/O to the algorithm.
+            model.write_model(str(mode_dir / "model.lp"))
+        if not has_incumbent:
             raise RuntimeError(
                 f"{mode} finished without a feasible incumbent (status={model.model.Status})"
             )

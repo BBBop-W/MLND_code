@@ -116,7 +116,11 @@ matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import numpy as np
 
-from src.model_contract import FORMULATION_ID, RESULT_SCHEMA_VERSION
+from src.model_contract import (
+    FORMULATION_ID, READABLE_RESULT_SCHEMA_VERSIONS, require_result_contract,
+    require_same_result_schema, require_validation_binding, runtime_contract,
+    result_contract_metadata,
+)
 from src.utils import nanshan_geographic_report as geo
 
 
@@ -415,12 +419,14 @@ def _load_verified_ledger(
         raise ValueError(f"ledger has no mode rows: {ledger_path}")
     keys: set[tuple[str, str]] = set()
     for index, row in enumerate(ledger_rows, start=2):
-        schema_version = _integer(row.get("schema_version"))
         formulation_id = row.get("formulation_id")
-        if schema_version != RESULT_SCHEMA_VERSION or formulation_id != FORMULATION_ID:
+        if (
+            row.get("schema_version") not in {str(value) for value in READABLE_RESULT_SCHEMA_VERSIONS}
+            or formulation_id != FORMULATION_ID
+        ):
             raise ValueError(
                 f"incompatible ledger row {ledger_path}:{index}; expected schema "
-                f"{RESULT_SCHEMA_VERSION} and formulation {FORMULATION_ID!r}"
+                f"{READABLE_RESULT_SCHEMA_VERSIONS} and formulation {FORMULATION_ID!r}"
             )
         run_path = row.get("run_path")
         mode = row.get("mode")
@@ -478,6 +484,19 @@ def _load_verified_ledger(
             raise ValueError(
                 f"scenario_summary run modes/signature mismatch: {run_path}"
             )
+        run_config = _read_object(experiment_root / run_path / "run_config.json")
+        source_schema = require_result_contract(run_config, "run_config")
+        validation = _read_object(experiment_root / run_path / "validation.json")
+        require_validation_binding(validation, run_config, f"{run_path}/validation.json")
+        for row in rows:
+            summary_path = experiment_root / run_path / str(row["mode"]) / "summary.json"
+            summary = _read_object(summary_path)
+            require_same_result_schema(run_config, summary, summary_path)
+            if _integer(row.get("schema_version")) != source_schema:
+                raise ValueError(f"ledger schema disagrees with source: {summary_path}")
+            declared_runtime = row.get("runtime_contract")
+            if declared_runtime and declared_runtime != runtime_contract(source_schema):
+                raise ValueError(f"ledger runtime contract disagrees with source: {summary_path}")
         common_sources = {
             "run_config_sha256": f"{run_path}/run_config.json",
             "run_complete_sha256": f"{run_path}/run_complete.json",
@@ -845,11 +864,7 @@ def _enforce_role_contracts(
         if run_path not in run_configs:
             run_config_path = experiment_root / run_path / "run_config.json"
             run_config = _read_object(run_config_path)
-            if (
-                run_config.get("schema_version") != RESULT_SCHEMA_VERSION
-                or run_config.get("formulation_id") != FORMULATION_ID
-            ):
-                raise ValueError(f"incompatible run_config: {run_config_path}")
+            require_result_contract(run_config, f"run_config {run_config_path}")
             run_configs[run_path] = run_config
 
     selected_candidates = [
@@ -862,6 +877,14 @@ def _enforce_role_contracts(
         raise ValueError("evidence requires exactly one selected main role")
     selected_item = selected_candidates[0]
     selected_config = run_configs.get(selected_item.role.run_path)
+    declared_baseline_schema = baseline_config.get("result_schema_version")
+    if declared_baseline_schema is not None:
+        require_result_contract(
+            {"schema_version": declared_baseline_schema, "formulation_id": baseline_config.get("formulation_id")},
+            "scenario_config baseline",
+        )
+        if selected_config is not None and declared_baseline_schema != selected_config["schema_version"]:
+            raise ValueError("selected main result schema disagrees with scenario_config baseline")
     baseline_implementation = (
         _nested_value(selected_config, ("implementation", "sha256"))
         if selected_config is not None
@@ -1056,6 +1079,8 @@ def _enforce_role_contracts(
                     ):
                         errors.append(f"规模角色 {declared_key} 与实例不一致")
         elif role.category == "algorithm":
+            if selected_config is not None and runtime_contract(run_config["schema_version"]) != runtime_contract(selected_config["schema_version"]):
+                errors.append("算法计时契约与 selected main 不一致；schema 5/6 不能作匹配预算耗时比较")
             required_algorithm_keys = {
                 "miqcp_method",
                 "seed",
@@ -1635,16 +1660,13 @@ def _choice_parameters(
         run_config_path = experiment_root / selected.role.run_path / "run_config.json"
         if run_config_path.is_file():
             run_config = _read_object(run_config_path)
-            if (
-                run_config.get("schema_version") == RESULT_SCHEMA_VERSION
-                and run_config.get("formulation_id") == FORMULATION_ID
+            require_result_contract(run_config, run_config_path)
+            model = run_config.get("model")
+            if isinstance(model, Mapping) and isinstance(
+                model.get("choice"), Mapping
             ):
-                model = run_config.get("model")
-                if isinstance(model, Mapping) and isinstance(
-                    model.get("choice"), Mapping
-                ):
-                    parameters = model["choice"]
-                    source = ProvenanceSource(run_config_path, "model.choice")
+                parameters = model["choice"]
+                source = ProvenanceSource(run_config_path, "model.choice")
     required = (
         "locker_asc",
         "delivery_time_coefficient",
@@ -3722,10 +3744,9 @@ def write_paper_experiment_report(
     manifest_payload = {
         "schema_version": 1,
         "generated_at": generated_at,
-        "result_contract": {
-            "schema_version": RESULT_SCHEMA_VERSION,
-            "formulation_id": FORMULATION_ID,
-        },
+        "result_contract": result_contract_metadata(
+            int(row["schema_version"]) for row in ledger_rows
+        ),
         "inputs": {
             "registry_status": registry_status,
             "report_kind": report_kind,

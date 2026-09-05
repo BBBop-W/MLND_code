@@ -19,8 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-from src.model_contract import FORMULATION_ID as RESULT_FORMULATION_ID
-from src.model_contract import RESULT_SCHEMA_VERSION
+from src.model_contract import require_result_contract
 
 
 def _require_current_summary_contract(summary: object) -> None:
@@ -28,18 +27,11 @@ def _require_current_summary_contract(summary: object) -> None:
 
     if not isinstance(summary, dict):
         raise ValueError("solution layout summary must contain a JSON object")
-    schema_version = summary.get("schema_version")
-    formulation_id = summary.get("formulation_id")
-    if (
-        type(schema_version) is not int
-        or schema_version != RESULT_SCHEMA_VERSION
-        or not isinstance(formulation_id, str)
-        or formulation_id != RESULT_FORMULATION_ID
-    ):
-        raise ValueError(
-            f"solution layout requires summary schema_version={RESULT_SCHEMA_VERSION} and "
-            f"formulation_id={RESULT_FORMULATION_ID}; legacy results cannot be mixed"
-        )
+    try:
+        require_result_contract(summary, "summary")
+    except ValueError as exc:
+        raise ValueError(f"solution layout requires summary: {exc}") from exc
+
 
 
 @dataclass(frozen=True)

@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.model_contract import FORMULATION_ID as EXPECTED_FORMULATION_ID
+from src.model_contract import (
+    require_result_contract, require_same_result_schema, runtime_contract,
+)
 from src.model_contract import RESULT_SCHEMA_VERSION as EXPECTED_SCHEMA_VERSION
 
 
@@ -54,6 +57,7 @@ _CSV_FIELDS = (
     "scenario",
     "formulation_id",
     "summary_schema_version",
+    "runtime_contract",
     "run_signature_sha256",
     "implementation_sha256",
     "data_source",
@@ -149,22 +153,7 @@ def _load_json_object(path: Path) -> Mapping[str, Any]:
 
 
 def _require_current_contract(payload: Mapping[str, Any], artifact: str) -> None:
-    """Reject legacy or foreign result contracts before reading their fields."""
-
-    schema_version = payload.get("schema_version")
-    formulation_id = payload.get("formulation_id")
-    if (
-        type(schema_version) is not int
-        or schema_version != EXPECTED_SCHEMA_VERSION
-        or not isinstance(formulation_id, str)
-        or formulation_id != EXPECTED_FORMULATION_ID
-    ):
-        raise ValueError(
-            f"legacy/incompatible {artifact}: expected "
-            f"schema_version={EXPECTED_SCHEMA_VERSION} and "
-            f"formulation_id={EXPECTED_FORMULATION_ID!r}; got "
-            f"schema_version={schema_version!r}, formulation_id={formulation_id!r}"
-        )
+    require_result_contract(payload, artifact)
 
 
 def _require_current_summary(summary: Mapping[str, Any]) -> None:
@@ -207,6 +196,7 @@ def _require_result_binding(
 
     _require_current_contract(run_config, "run_config")
     _require_current_summary(summary)
+    require_same_result_schema(run_config, summary, "summary")
     configured_modes = _configured_modes(run_config)
     if expected_mode not in configured_modes:
         raise ValueError(
@@ -403,7 +393,8 @@ def _collect_scenario(
     row: dict[str, object] = {
         "scenario": _scenario_name(root, scenario_dir),
         "formulation_id": EXPECTED_FORMULATION_ID,
-        "summary_schema_version": EXPECTED_SCHEMA_VERSION,
+        "summary_schema_version": summary["schema_version"],
+        "runtime_contract": runtime_contract(summary["schema_version"]),
         "run_signature_sha256": run_signature,
         "implementation_sha256": _implementation_sha256(run_config),
         "data_source": metadata.get("source", summary_instance.get("data_source", "")),
@@ -541,6 +532,8 @@ def collect_parameter_results(results_root: str | Path) -> list[dict[str, object
             rows.append(_collect_scenario(root, scenario_dir, run_config, summary))
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError(f"{scenario}: {exc}") from exc
+    if len({row["summary_schema_version"] for row in rows}) > 1:
+        raise ValueError("inconsistent parameter-sweep runtime contracts; schema 5/6 runs cannot be pooled")
     implementation_hashes = {row["implementation_sha256"] for row in rows}
     if len(implementation_hashes) > 1:
         raise ValueError(
@@ -705,7 +698,7 @@ def _plot_results(
     fig.text(
         0.06,
         0.94,
-        f"{root} | schema {EXPECTED_SCHEMA_VERSION} {EXPECTED_FORMULATION_ID}; "
+        f"{root} | source schemas {sorted({row['summary_schema_version'] for row in rows})} {EXPECTED_FORMULATION_ID}; "
         "savings use each scenario's courier-only baseline",
         ha="left",
         va="top",

@@ -109,7 +109,7 @@ def _write_run(root: Path, name: str, *, complete: bool = True) -> Path:
     (run / "run_config.json").write_text(json.dumps(config), encoding="utf-8")
     (mode_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
     (run / "validation.json").write_text(
-        json.dumps({"valid": True}), encoding="utf-8"
+        json.dumps({"valid": True, "result_schema_version": config["schema_version"], "formulation_id": FORMULATION_ID, "run_signature_sha256": signature}), encoding="utf-8"
     )
     if complete:
         (run / "run_complete.json").write_text(
@@ -168,4 +168,16 @@ def test_rejects_incomplete_run_instead_of_silently_skipping_it(tmp_path: Path) 
     _write_run(root, "interrupted", complete=False)
 
     with pytest.raises(ValueError, match="incomplete run.*run_complete.json"):
+        build_paper_experiment_ledger(root)
+
+
+@pytest.mark.parametrize("target", ["summary", "validation"])
+def test_ledger_rejects_cross_schema_run_parts(tmp_path: Path, target: str) -> None:
+    root = tmp_path / "experiment"
+    run = _write_run(root, "mixed")
+    path = run / ("MX/summary.json" if target == "summary" else "validation.json")
+    payload = json.loads(path.read_text())
+    payload["schema_version" if target == "summary" else "result_schema_version"] = 5
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="disagrees with run_config"):
         build_paper_experiment_ledger(root)

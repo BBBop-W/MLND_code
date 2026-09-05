@@ -239,7 +239,14 @@ class SolverConfig:
     output_flag: int = 1
     seed: int = 42
     network_start_seconds: float = 20.0
+    # Preserve the f884 command-line heuristic allowance independently of the
+    # exact formal B&C parameter below.  A formal profile always supplies
+    # ``no_rel_heur_time`` explicitly; legacy/interactive solves retain this
+    # capped allowance when that exact override is ``None``.
     no_rel_heur_seconds: float = 10.0
+    # The network-start auxiliary may use a different continuous-relaxation
+    # algorithm from the matched main solve.
+    network_start_method: int = 2
     use_valid_inequalities: bool = False
     use_user_cuts: bool = True
     max_root_cut_rounds: int = 3
@@ -248,12 +255,62 @@ class SolverConfig:
     root_cut_passes: int = 2
     max_cuts_per_round: int = 250
     cut_violation_tolerance: float = 1e-6
+    cut_efficacy_tolerance: float = 1e-9
+    fixed_integer_repair_seconds: float = 0.0
     use_local_branching: bool = True
+    local_branching_seconds: float = 5.0
     local_branching_radius: int = 12
+    local_branching_include_y: bool = False
     root_relaxation_method: int = 2
     # Gurobi's mixed-integer QCP strategy. This is distinct from ``Method``,
     # which controls how each continuous relaxation is solved.
     miqcp_method: int = -1
+    # ``auto`` preserves the f884 interactive solve path.  Formal profiles
+    # always use an explicit value so the native baseline has no user start.
+    start_mode: str = "auto"
+    # Development-only lightweight objective-aware partial starts.  These
+    # controls remain outside the formal A--E profile contract pending
+    # promotion and are mutually exclusive with every legacy start budget.
+    use_objective_partial_start: bool = False
+    objective_partial_start_seconds: float | None = None
+    objective_partial_start_max_candidates: int = 3
+    # Explicit values make the native and proposed profiles comparable.  None
+    # retains f884's incumbent-oriented interactive defaults.
+    mip_focus: int | None = None
+    heuristics: float | None = None
+    no_rel_heur_time: float | None = None
+    presolve: int = -1
+    cuts: int = -1
+    numeric_focus: int = 0
+    feasibility_tol: float = 1e-6
+    optimality_tol: float = 1e-6
+    integer_feasibility_tol: float = 1e-5
+    # Static strengthening families.
+    static_source_level: bool = True
+    static_virtual_level_lower: bool = True
+    static_lo_choice_corridor: bool = True
+    static_lo_choice_capacity: bool = True
+    static_queue_perspective: bool = True
+    # Development-only families; all are default-off and excluded from formal
+    # A--E profiles until a registered ablation supports promotion.
+    static_nearest_display_suffix: bool = False
+    static_chi_vub_top_k_per_corridor: int = 0
+    # Root user-cut families.
+    cut_chi_vub: bool = True
+    cut_chi_facility_vub: bool = False
+    cut_route_swap_station_vub: bool = False
+    cut_route_swap_leg_vub: bool = False
+    cut_queue_perspective: bool = True
+    cut_lo_choice_corridor: bool = True
+    cut_lo_choice_capacity: bool = True
+    cut_directed_return: bool = True
+    # Development-only OD-disaggregated return-connectivity cuts.  This is an
+    # independent, default-off family and does not change aggregate
+    # ``cut_directed_return`` semantics.
+    cut_od_disaggregated_return: bool = False
+    # Read-only progress telemetry is matched across formal profiles.
+    collect_progress: bool = False
+    progress_interval_seconds: float = 0.5
 
     def validate(self) -> None:
         if not math.isfinite(self.time_limit) or self.time_limit <= 0:
@@ -273,6 +330,8 @@ class SolverConfig:
             raise ValueError("network_start_seconds must be finite and nonnegative")
         if not math.isfinite(self.no_rel_heur_seconds) or self.no_rel_heur_seconds < 0:
             raise ValueError("no_rel_heur_seconds must be finite and nonnegative")
+        if self.network_start_method not in {-1, 0, 1, 2, 3, 4, 5}:
+            raise ValueError("network_start_method must be a valid Gurobi Method value")
         if self.max_root_cut_rounds < 0:
             raise ValueError("max_root_cut_rounds must be nonnegative")
         if self.root_cut_passes < -1:
@@ -280,10 +339,44 @@ class SolverConfig:
         if self.max_cuts_per_round < 0:
             raise ValueError("max_cuts_per_round must be nonnegative")
         if (
+            isinstance(self.static_chi_vub_top_k_per_corridor, bool)
+            or not isinstance(self.static_chi_vub_top_k_per_corridor, int)
+            or self.static_chi_vub_top_k_per_corridor < 0
+        ):
+            raise ValueError(
+                "static_chi_vub_top_k_per_corridor must be a nonnegative integer"
+            )
+        for name in (
+            "static_nearest_display_suffix",
+            "cut_chi_facility_vub",
+            "cut_route_swap_station_vub",
+            "cut_route_swap_leg_vub",
+            "cut_od_disaggregated_return",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+        if (
             not math.isfinite(self.cut_violation_tolerance)
             or self.cut_violation_tolerance <= 0
         ):
             raise ValueError("cut_violation_tolerance must be positive and finite")
+        if (
+            not math.isfinite(self.cut_efficacy_tolerance)
+            or self.cut_efficacy_tolerance < 0
+        ):
+            raise ValueError("cut_efficacy_tolerance must be finite and nonnegative")
+        if (
+            not math.isfinite(self.fixed_integer_repair_seconds)
+            or self.fixed_integer_repair_seconds < 0
+        ):
+            raise ValueError(
+                "fixed_integer_repair_seconds must be finite and nonnegative"
+            )
+        if (
+            not math.isfinite(self.local_branching_seconds)
+            or self.local_branching_seconds < 0
+        ):
+            raise ValueError("local_branching_seconds must be finite and nonnegative")
         if self.local_branching_radius < 1:
             raise ValueError("local_branching_radius must be positive")
         if self.root_relaxation_method not in {-1, 0, 1, 2, 3, 4, 5}:
@@ -292,6 +385,80 @@ class SolverConfig:
             )
         if self.miqcp_method not in {-1, 0, 1}:
             raise ValueError("miqcp_method must be -1, 0, or 1")
+        if self.start_mode not in {
+            "auto",
+            "none",
+            "courier",
+            "network",
+            "network_and_courier",
+        }:
+            raise ValueError(
+                "start_mode must be one of auto, none, courier, network, "
+                "network_and_courier"
+            )
+        if not isinstance(self.use_objective_partial_start, bool):
+            raise ValueError("use_objective_partial_start must be a boolean")
+        if self.objective_partial_start_seconds is not None and (
+            not math.isfinite(self.objective_partial_start_seconds)
+            or self.objective_partial_start_seconds < 0.0
+        ):
+            raise ValueError(
+                "objective_partial_start_seconds must be finite and nonnegative or None"
+            )
+        if (
+            isinstance(self.objective_partial_start_max_candidates, bool)
+            or not isinstance(self.objective_partial_start_max_candidates, int)
+            or not 1 <= self.objective_partial_start_max_candidates <= 16
+        ):
+            raise ValueError(
+                "objective_partial_start_max_candidates must be an integer in [1, 16]"
+            )
+        if self.use_objective_partial_start:
+            legacy_start_is_active = (
+                self.start_mode != "none"
+                or self.network_start_seconds != 0.0
+                or self.fixed_integer_repair_seconds != 0.0
+                or self.use_local_branching
+                or self.local_branching_seconds != 0.0
+            )
+            if legacy_start_is_active:
+                raise ValueError(
+                    "objective partial starts require start_mode=none and zero "
+                    "network, repair, and local-branching budgets"
+                )
+        if self.mip_focus is not None and self.mip_focus not in {0, 1, 2, 3}:
+            raise ValueError("mip_focus must be one of 0, 1, 2, 3 or None")
+        if self.heuristics is not None and (
+            not math.isfinite(self.heuristics) or not 0 <= self.heuristics <= 1
+        ):
+            raise ValueError("heuristics must be in [0, 1] or None")
+        if self.no_rel_heur_time is not None and (
+            not math.isfinite(self.no_rel_heur_time) or self.no_rel_heur_time < 0
+        ):
+            raise ValueError("no_rel_heur_time must be finite and nonnegative or None")
+        if self.presolve not in {-1, 0, 1, 2}:
+            raise ValueError("presolve must be one of -1, 0, 1, 2")
+        if self.cuts not in {-1, 0, 1, 2, 3}:
+            raise ValueError("cuts must be one of -1, 0, 1, 2, 3")
+        if self.numeric_focus not in {0, 1, 2, 3}:
+            raise ValueError("numeric_focus must be one of 0, 1, 2, 3")
+        tolerance_bounds = {
+            "feasibility_tol": (self.feasibility_tol, 1e-9, 1e-2),
+            "optimality_tol": (self.optimality_tol, 1e-9, 1e-2),
+            "integer_feasibility_tol": (
+                self.integer_feasibility_tol,
+                1e-9,
+                1e-1,
+            ),
+        }
+        for name, (value, lower, upper) in tolerance_bounds.items():
+            if not math.isfinite(value) or not lower <= value <= upper:
+                raise ValueError(f"{name} must be in [{lower}, {upper}]")
+        if (
+            not math.isfinite(self.progress_interval_seconds)
+            or self.progress_interval_seconds <= 0
+        ):
+            raise ValueError("progress_interval_seconds must be positive and finite")
 
 
 def _window_hours(start: int, end: int) -> int:

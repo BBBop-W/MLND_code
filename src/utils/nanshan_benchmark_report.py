@@ -1,6 +1,6 @@
 """Publication-style comparison figures for one Nanshan MLND benchmark.
 
-The report consumes only canonical instance files and current schema-5 result
+The report consumes only canonical instance files and current result-schema
 artifacts.  It deliberately refuses legacy summaries so a visually polished
 figure cannot accidentally mix formulations.
 """
@@ -26,7 +26,11 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
 
-from src.model_contract import FORMULATION_ID, RESULT_SCHEMA_VERSION
+from src.model_contract import FORMULATION_ID as FORMULATION_ID
+from src.model_contract import (
+    require_result_contract, require_same_result_schema,
+    runtime_contract,
+)
 from src.utils.instance_plotter import StudyLayout, load_study_layout
 
 
@@ -113,18 +117,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _require_current_contract(payload: Mapping[str, Any], path: Path) -> None:
-    schema_version = payload.get("schema_version")
-    formulation_id = payload.get("formulation_id")
-    if (
-        type(schema_version) is not int
-        or schema_version != RESULT_SCHEMA_VERSION
-        or not isinstance(formulation_id, str)
-        or formulation_id != FORMULATION_ID
-    ):
-        raise ValueError(
-            f"legacy/incompatible result {path}: expected schema "
-            f"{RESULT_SCHEMA_VERSION} and {FORMULATION_ID!r}"
-        )
+    require_result_contract(payload, f"result {path}")
 
 
 def _required_mapping(
@@ -777,7 +770,7 @@ def _energy_metrics(summary: Mapping[str, Any], context: str) -> dict[str, float
 
 
 def _solution_metrics(summary: Mapping[str, Any]) -> dict[str, float | int | bool]:
-    """Extract comparable design and service metrics from a schema-5 summary."""
+    """Extract comparable design and service metrics from a current summary."""
 
     mode = str(summary.get("mode", "unknown"))
     context = f"{mode} summary"
@@ -915,12 +908,37 @@ def _solution_metrics(summary: Mapping[str, Any]) -> dict[str, float | int | boo
     }
 
 
+def _validate_runtime_accounting(summary: Mapping[str, Any], context: str) -> None:
+    version = require_result_contract(summary, context)
+    solver = _required_mapping(summary, "solver", context)
+    total = _required_number(summary, "runtime_seconds", context)
+    phases = {
+        key: _required_number(solver, key, f"{context} solver")
+        for key in ("network_start_runtime_seconds", "main_solve_runtime_seconds")
+    }
+    if version == 6:
+        # Preparation and network subphases can overlap. They are not an
+        # additive partition of algorithm wall time and must not be summed.
+        for key in ("algorithm_prepare_runtime_seconds", "start_preparation_runtime_seconds", "network_construction_runtime_seconds"):
+            if key in solver:
+                phases[key] = _required_number(solver, key, f"{context} solver")
+    if total < 0 or any(value < 0 for value in phases.values()):
+        raise ValueError(f"{context} has negative runtime")
+    if version == 5:
+        _require_close(sum(phases.values()), total, f"{context} runtime phases")
+    elif any(value > total + max(0.05, total * 1e-5) for value in phases.values()):
+        raise ValueError(f"{context} runtime phase exceeds algorithm wall time")
+
+
 def _validate_summary_fields(
     mode: str,
     summary: Mapping[str, Any],
     run_config: Mapping[str, Any] | None = None,
 ) -> None:
     context = f"{mode} summary"
+    require_result_contract(summary, context)
+    if run_config is not None:
+        require_same_result_schema(run_config, summary, context)
     status = _required_integer(summary, "status", context, minimum=1)
     status_name = summary.get("status_name")
     if not isinstance(status_name, str) or not status_name:
@@ -929,7 +947,7 @@ def _validate_summary_fields(
     bound = _required_number(summary, "objective_bound", context)
     gap = _required_number(summary, "mip_gap", context)
     requested_gap = _required_number(summary, "requested_mip_gap", context)
-    runtime = _required_number(summary, "runtime_seconds", context)
+    _required_number(summary, "runtime_seconds", context)
     if objective < 0.0 or bound > objective + _ABS_TOL or gap < 0.0:
         raise ValueError(f"{context} has invalid minimization certificate")
     computed_gap = abs(objective - bound) / max(abs(objective), _ABS_TOL)
@@ -954,17 +972,7 @@ def _validate_summary_fields(
             _required_number(solver, nested_key, f"{context} solver"),
             f"{context} {top_key}",
         )
-    start_runtime = _required_number(
-        solver,
-        "network_start_runtime_seconds",
-        f"{context} solver",
-    )
-    main_runtime = _required_number(
-        solver,
-        "main_solve_runtime_seconds",
-        f"{context} solver",
-    )
-    _require_close(start_runtime + main_runtime, runtime, f"{context} runtime phases")
+    _validate_runtime_accounting(summary, context)
 
     instance = _required_mapping(summary, "instance", context)
     summary_screening = _required_bool(summary, "screening_is_exact", context)
@@ -1037,7 +1045,7 @@ def _validate_benchmark_consistency(
     run_config: Mapping[str, Any],
     summaries: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    """Validate every cross-mode invariant exposed by schema-5 artifacts.
+    """Validate every cross-mode invariant exposed by current artifacts.
 
     The shared signature binds each summary to the declared run configuration.
     It is the strongest available boundary without a separate completion
@@ -1058,6 +1066,7 @@ def _validate_benchmark_consistency(
         "run_config",
     )
     for mode in MODES:
+        require_same_result_schema(run_config, summaries[mode], f"{mode} summary")
         summary_signature = _required_sha256(
             summaries[mode],
             "run_signature_sha256",
@@ -1556,6 +1565,8 @@ def _write_mode_summary(
         raise ValueError("explicit candidate-locker count disagrees with summaries")
     fields = (
         "mode",
+        "result_schema_version",
+        "runtime_contract",
         "run_signature_sha256",
         "candidate_bases",
         "candidate_lockers",
@@ -1619,6 +1630,8 @@ def _write_mode_summary(
         rows.append(
             {
                 "mode": mode,
+                "result_schema_version": summary["schema_version"],
+                "runtime_contract": runtime_contract(summary["schema_version"]),
                 "run_signature_sha256": summary["run_signature_sha256"],
                 "candidate_bases": candidate_counts["bases"],
                 "candidate_lockers": candidate_count,
@@ -2066,13 +2079,19 @@ def _plot_solver_certificate(
     bound_axis.set_axisbelow(True)
     bound_axis.spines[["top", "right", "left"]].set_visible(False)
 
-    starts = [
-        float(_mapping(summaries[mode]["solver"])["network_start_runtime_seconds"])
-        for mode in MODES
-    ]
+    source_versions = {require_result_contract(summaries[mode], f"{mode} summary") for mode in MODES}
+    if len(source_versions) != 1:
+        raise ValueError("runtime comparison requires one source schema")
+    source_version = next(iter(source_versions))
     main_times = [
         float(_mapping(summaries[mode]["solver"])["main_solve_runtime_seconds"])
         for mode in MODES
+    ]
+    starts = [
+        float(_mapping(summaries[mode]["solver"])["network_start_runtime_seconds"])
+        if source_version == 5
+        else max(0.0, float(summaries[mode]["runtime_seconds"]) - main_time)
+        for mode, main_time in zip(MODES, main_times)
     ]
     x_positions = list(range(len(MODES)))
     runtime_axis.bar(
@@ -2082,7 +2101,7 @@ def _plot_solver_certificate(
         color="#BFDBFE",
         edgecolor="#1D4ED8",
         linewidth=0.8,
-        label="Network-start phase",
+        label="Network-start phase" if source_version == 5 else "Preparation and other wall time",
     )
     runtime_axis.bar(
         x_positions,
@@ -2105,7 +2124,7 @@ def _plot_solver_certificate(
             color="#334155",
         )
     runtime_axis.set_xticks(x_positions, MODES)
-    runtime_axis.set_ylabel("Algorithm wall-clock time (seconds)")
+    runtime_axis.set_ylabel("Network + main solver time (seconds)" if source_version == 5 else "Algorithm wall-clock time (seconds)")
     runtime_axis.set_title("Runtime composition", loc="left", fontsize=11)
     runtime_axis.set_ylim(0.0, 1.20 * max(s + m for s, m in zip(starts, main_times)))
     runtime_axis.grid(axis="y", color="#E2E8F0", linewidth=0.7)

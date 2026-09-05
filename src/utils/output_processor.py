@@ -47,6 +47,17 @@ _STATUS_NAMES = {
 }
 
 
+def _json_safe_mapping(value: object) -> dict[str, Any]:
+    """Return a detached JSON-safe copy of model telemetry."""
+
+    if not isinstance(value, dict):
+        return {}
+    payload = json.loads(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
 class ResultProcessor:
     """Extract, print, and persist one incumbent from :class:`MLNDModel`."""
 
@@ -723,6 +734,10 @@ class ResultProcessor:
             if state in self.rho_by_idle
         }
         solver_config = getattr(self.wrapper, "solver_config", None)
+        objective_partial_start = _json_safe_mapping(
+            getattr(self.wrapper, "objective_partial_start_telemetry", {})
+        )
+        configured_start_mode = getattr(solver_config, "start_mode", "auto")
 
         max_service_error = max(
             (abs(row["service_conservation_error"]) for row in self.od_rows),
@@ -811,9 +826,41 @@ class ResultProcessor:
                 getattr(self.wrapper, "static_cut_counts", {})
             ),
             "root_user_cut_counts": dict(getattr(self.wrapper, "user_cut_counts", {})),
+            "root_user_cut_candidate_counts": dict(
+                getattr(self.wrapper, "user_cut_candidate_counts", {})
+            ),
+            "root_user_cut_duplicate_counts": dict(
+                getattr(self.wrapper, "user_cut_duplicate_counts", {})
+            ),
+            "root_user_cut_rejection_counts": dict(
+                getattr(self.wrapper, "user_cut_rejection_counts", {})
+            ),
+            "root_user_cut_separation_seconds": dict(
+                getattr(self.wrapper, "user_cut_separation_seconds", {})
+            ),
+            "route_bundle_index_counts": dict(
+                getattr(self.wrapper, "route_bundle_index_counts", {})
+            ),
             "root_cut_rounds": int(getattr(self.wrapper, "root_cut_rounds", 0)),
+            "root_bound_before_cuts": getattr(
+                self.wrapper, "root_bound_before_cuts", None
+            ),
+            "root_bound_after_cuts": getattr(
+                self.wrapper, "root_bound_after_cuts", None
+            ),
             "native_root_cut_passes": getattr(solver_config, "root_cut_passes", None),
+            "applied_native_root_cut_passes": getattr(
+                getattr(self.model, "Params", None), "CutPasses", None
+            ),
             "no_rel_heur_seconds": getattr(solver_config, "no_rel_heur_seconds", None),
+            "no_rel_heur_time": getattr(solver_config, "no_rel_heur_time", None),
+            "applied_no_rel_heur_time": getattr(
+                getattr(self.model, "Params", None), "NoRelHeurTime", None
+            ),
+            "callback_runtime_seconds": float(
+                getattr(self.wrapper, "callback_runtime", 0.0)
+            ),
+            "objective_partial_start": objective_partial_start,
             "local_branching_runtime_seconds": float(
                 getattr(self.wrapper, "local_branching_runtime", 0.0)
             ),
@@ -832,21 +879,35 @@ class ResultProcessor:
             "local_branching_hamming_distance": getattr(
                 self.wrapper, "local_branching_hamming_distance", None
             ),
-            "installed_mip_start_count": (
-                1
-                + int(bool(getattr(self.wrapper, "network_start_used", False)))
-                + int(
-                    bool(
-                        getattr(
-                            self.wrapper,
-                            "network_partial_start_installed",
-                            False,
-                        )
-                    )
-                )
-                + int(bool(getattr(self.wrapper, "external_start_installed", False)))
+            "fixed_integer_repair_runtime_seconds": float(
+                getattr(self.wrapper, "fixed_integer_repair_runtime", 0.0)
             ),
-            "all_courier_start_installed": True,
+            "fixed_integer_repair_found": bool(
+                getattr(self.wrapper, "fixed_integer_repair_found", False)
+            ),
+            "fixed_integer_repair_objective": getattr(
+                self.wrapper, "fixed_integer_repair_objective", None
+            ),
+            "fixed_integer_repair_status": getattr(
+                self.wrapper, "fixed_integer_repair_status", None
+            ),
+            "fixed_integer_repair_solution_count": int(
+                getattr(self.wrapper, "fixed_integer_repair_solution_count", 0)
+            ),
+            "fixed_integer_repair_fixed_count": int(
+                getattr(self.wrapper, "fixed_integer_repair_fixed_count", 0)
+            ),
+            "installed_mip_start_count": int(getattr(self.model, "NumStart", 0)),
+            "all_courier_start_installed": (
+                int(objective_partial_start.get("safety_start_count", 0)) > 0
+                if bool(objective_partial_start.get("enabled", False))
+                else configured_start_mode
+                in {
+                    "auto",
+                    "courier",
+                    "network_and_courier",
+                }
+            ),
             "network_start_required_nodes": list(
                 getattr(self.wrapper, "network_start_required_nodes", ())
             ),
@@ -945,7 +1006,23 @@ class ResultProcessor:
                 "requested_mip_gap": self.requested_mip_gap,
                 "runtime_seconds": self.runtime,
                 "main_solve_runtime_seconds": self.main_runtime,
+                "algorithm_prepare_runtime_seconds": float(
+                    getattr(self.wrapper, "algorithm_prepare_runtime", 0.0)
+                ),
+                "start_preparation_runtime_seconds": float(
+                    getattr(self.wrapper, "start_preparation_runtime", 0.0)
+                ),
+                "node_count": float(self.model.NodeCount),
+                "first_incumbent_time_seconds": getattr(
+                    self.wrapper, "first_incumbent_time", None
+                ),
+                "first_incumbent_objective": getattr(
+                    self.wrapper, "first_incumbent_objective", None
+                ),
                 "network_start_runtime_seconds": self.network_start_runtime,
+                "network_construction_runtime_seconds": float(
+                    getattr(self.wrapper, "network_construction_runtime", 0.0)
+                ),
                 "network_start_found": bool(
                     getattr(self.wrapper, "network_start_found", False)
                 ),

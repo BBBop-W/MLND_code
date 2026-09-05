@@ -42,7 +42,10 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Polygon
 from PIL import Image, ImageEnhance
 
-from src.model_contract import FORMULATION_ID, RESULT_SCHEMA_VERSION
+from src.model_contract import (
+    require_result_contract, require_same_result_schema,
+    result_contract_metadata,
+)
 from src.utils.instance_plotter import StudyLayout, load_study_layout
 
 
@@ -129,16 +132,7 @@ def _sha256(path: Path) -> str:
 
 
 def _require_current_contract(payload: Mapping[str, Any], path: Path) -> None:
-    if payload.get("schema_version") != RESULT_SCHEMA_VERSION:
-        raise ValueError(
-            f"{path} has schema {payload.get('schema_version')!r}; "
-            f"expected {RESULT_SCHEMA_VERSION}"
-        )
-    if payload.get("formulation_id") != FORMULATION_ID:
-        raise ValueError(
-            f"{path} has formulation {payload.get('formulation_id')!r}; "
-            f"expected {FORMULATION_ID!r}"
-        )
+    require_result_contract(payload, path)
 
 
 def _mapping(value: Any, context: str) -> Mapping[str, Any]:
@@ -425,6 +419,7 @@ def _load_case(
         summary_path = result_dir / mode / "summary.json"
         summary = _read_json(summary_path)
         _require_current_contract(summary, summary_path)
+        require_same_result_schema(run_config, summary, summary_path)
         if summary.get("mode") != mode:
             raise ValueError(f"{summary_path} reports mode {summary.get('mode')!r}")
         if summary.get("run_signature_sha256") != run_config.get(
@@ -1680,11 +1675,11 @@ def _write_mcp_artifact(
                 "engine": "DuckDB",
                 "sql": "SELECT * FROM read_json_auto('results/nanshan_current_report_schema5/report_manifest.json')",
                 "language": "sql",
-                "description": "由当前 schema-5 参数、实例、summary.json 与 CSV 汇总生成。",
+                "description": "由来源契约已核验的 参数、实例、summary.json 与 CSV 汇总生成。",
                 "tables_used": [
                     "results/nanshan_current_report_schema5/report_manifest.json"
                 ],
-                "filters": ["仅使用当前 schema-5 正式结果"],
+                "filters": ["仅使用来源契约已核验的 正式结果"],
                 "metric_definitions": [
                     "所有读者可见数字均来自本报告 bounded snapshot。"
                 ],
@@ -2033,7 +2028,7 @@ def _write_mcp_artifact(
             "version": 1,
             "surface": "report",
             "title": "当前 MLND 参数、规模结果与南山地图汇总",
-            "description": "当前 schema-5 南山算例的参数、规模求解能力、正式 H120 结果与地图口径。",
+            "description": "来源契约已核验的 南山算例的参数、规模求解能力、正式 H120 结果与地图口径。",
             "generatedAt": generated_at,
             "blocks": blocks,
             "cards": cards,
@@ -2106,6 +2101,8 @@ def write_nanshan_geographic_report(
     cases = _load_scale_cases(instance_root, scale_results)
     full_instance = cases[-1].instance_dir
     formal_case = _load_case(120, full_instance, formal_results, FORMAL_MODES)
+    if len({case.run_config["schema_version"] for case in [*cases, formal_case]}) > 1:
+        raise ValueError("geographic comparison requires one source runtime contract; schema 5/6 runs cannot be pooled")
     scale_config = cases[0].run_config
     formal_model = formal_case.run_config.get("model")
     if formal_model != scale_config.get("model"):
@@ -2172,10 +2169,9 @@ def write_nanshan_geographic_report(
         "schema_version": 1,
         "generated_at": generated_at,
         "git_head": _git_head(repo_root),
-        "result_contract": {
-            "schema_version": RESULT_SCHEMA_VERSION,
-            "formulation_id": FORMULATION_ID,
-        },
+        "result_contract": result_contract_metadata(
+            case.run_config["schema_version"] for case in [*cases, formal_case]
+        ),
         "inputs": {
             "instance_root": str(instance_root),
             "scale_results": str(scale_results),

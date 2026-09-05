@@ -197,7 +197,7 @@ def test_reports_reject_incompatible_summary_and_run_config_contracts(
     validator(current, "run_config")
 
     with pytest.raises(ValueError, match="legacy/incompatible summary"):
-        validator({**current, "schema_version": RESULT_SCHEMA_VERSION - 1}, "summary")
+        validator({**current, "schema_version": 4}, "summary")
     with pytest.raises(ValueError, match="legacy/incompatible summary"):
         validator({**current, "schema_version": float(RESULT_SCHEMA_VERSION)}, "summary")
     with pytest.raises(ValueError, match="legacy/incompatible summary"):
@@ -1034,6 +1034,150 @@ def test_branch_and_cut_preserves_the_certified_small_instance_optimum(
     assert all(count >= 0 for count in strengthened_model.user_cut_counts.values())
 
 
+def test_od_facility_incident_star_vub_aggregates_inbound_and_outbound(
+    tmp_path: Path,
+) -> None:
+    instance = DataLoader().load_instance_dir(
+        str(_write_canonical_instance(tmp_path / "facility_vub_incident_star")),
+        model_config=_exact_model_config(),
+    )
+    wrapper = MLNDModel(instance, "MX").build()
+    o, d, facility = next(
+        index
+        for index, keys in wrapper.chi_by_market_incident.items()
+        if any(key[3] == index[2] and key[2] != index[2] for key in keys)
+        and any(key[2] == index[2] and key[3] != index[2] for key in keys)
+    )
+    incident_keys = tuple(wrapper.chi_by_market_incident[o, d, facility])
+    assert len(incident_keys) == len(set(incident_keys))
+    incoming = next(
+        key for key in incident_keys if key[3] == facility and key[2] != facility
+    )
+    outgoing = next(
+        key for key in incident_keys if key[2] == facility and key[3] != facility
+    )
+    demand = instance.h_od[o, d]
+    relaxation = {
+        wrapper.vars["x"][facility].VarName: 0.60,
+        wrapper.vars["chi"][incoming].VarName: 0.35 * demand,
+        wrapper.vars["chi"][outgoing].VarName: 0.35 * demand,
+    }
+    for candidate in instance.H:
+        relaxation.setdefault(wrapper.vars["x"][candidate].VarName, 1.0)
+
+    class CallbackProbe:
+        def __init__(self) -> None:
+            self.cuts: list[object] = []
+
+        def cbGetNodeRel(self, variables: list[object]) -> list[float]:
+            return [relaxation.get(variable.VarName, 0.0) for variable in variables]
+
+        def cbCut(self, cut: object) -> None:
+            self.cuts.append(cut)
+
+    solver = SolverConfig(
+        use_user_cuts=True,
+        cut_chi_vub=False,
+        cut_chi_facility_vub=True,
+        cut_route_swap_station_vub=False,
+        cut_route_swap_leg_vub=False,
+        cut_queue_perspective=False,
+        cut_lo_choice_corridor=False,
+        cut_lo_choice_capacity=False,
+        cut_directed_return=False,
+        max_cuts_per_round=10,
+    )
+    callback = CallbackProbe()
+
+    assert wrapper._add_root_user_cuts(callback, solver) == 1
+    assert wrapper.user_cut_counts == {"chi_od_incident_star_vub": 1}
+    assert len(callback.cuts) == 1
+    constraint = wrapper.model.addConstr(callback.cuts[0], name="incident_star_probe")
+    wrapper.model.update()
+    row = wrapper.model.getRow(constraint)
+    coefficients = {
+        row.getVar(index).VarName: row.getCoeff(index) for index in range(row.size())
+    }
+    assert constraint.Sense == "<"
+    assert constraint.RHS == pytest.approx(0.0)
+    assert coefficients[wrapper.vars["x"][facility].VarName] == pytest.approx(-demand)
+    assert {
+        variable_name
+        for variable_name, coefficient in coefficients.items()
+        if coefficient == pytest.approx(1.0)
+    } == {wrapper.vars["chi"][key].VarName for key in incident_keys}
+
+    assert wrapper._add_root_user_cuts(callback, solver) == 0
+    assert len(callback.cuts) == 1
+    assert wrapper.user_cut_duplicate_counts == {"chi_od_incident_star_vub": 1}
+
+
+def test_lo_facility_vub_uses_full_demand_for_incident_and_share_for_head(
+    tmp_path: Path,
+) -> None:
+    instance = DataLoader().load_instance_dir(
+        str(_write_canonical_instance(tmp_path / "lo_facility_vub_coefficients")),
+        model_config=_exact_model_config(),
+    )
+    wrapper = MLNDModel(instance, "LO")
+    o, d, facility = next(iter(wrapper.chi_by_market_j))
+
+    assert set(wrapper.chi_by_market_j[o, d, facility]).issubset(
+        wrapper.chi_by_market_incident[o, d, facility]
+    )
+    assert wrapper._chi_od_facility_vub_coefficient(
+        o, d, facility, head=False
+    ) == pytest.approx(instance.h_od[o, d])
+    assert wrapper._chi_od_facility_vub_coefficient(
+        o, d, facility, head=True
+    ) == pytest.approx(
+        instance.h_od[o, d] * instance.choice_share[o, d, facility]
+    )
+
+
+@pytest.mark.parametrize("mode", ["MX", "HD", "LO"])
+def test_facility_vub_only_preserves_certified_small_instance_optimum(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    instance_dir = _write_canonical_instance(
+        tmp_path / f"facility_vub_equivalence_{mode.lower()}"
+    )
+    objectives: list[float] = []
+    for enabled in (False, True):
+        instance = DataLoader().load_instance_dir(
+            str(instance_dir), model_config=_exact_model_config()
+        )
+        wrapper = MLNDModel(instance, mode)
+        solved = wrapper.solve(
+            SolverConfig(
+                time_limit=20.0,
+                mip_gap=0.0,
+                threads=1,
+                output_flag=0,
+                start_mode="none",
+                network_start_seconds=0.0,
+                use_valid_inequalities=False,
+                use_user_cuts=enabled,
+                cut_chi_vub=False,
+                cut_chi_facility_vub=enabled,
+                cut_route_swap_station_vub=False,
+                cut_route_swap_leg_vub=False,
+                cut_queue_perspective=False,
+                cut_lo_choice_corridor=False,
+                cut_lo_choice_capacity=False,
+                cut_directed_return=False,
+                use_local_branching=False,
+                max_root_cut_rounds=3,
+                max_cuts_per_round=100,
+            )
+        )
+        assert solved and wrapper.model.Status == GRB.OPTIMAL
+        objectives.append(float(wrapper.model.ObjVal))
+
+    assert objectives[1] == pytest.approx(objectives[0], abs=2e-6)
+
+
 @pytest.mark.parametrize("mode", ["MX", "HD"])
 def test_default_algorithm_path_runs_with_energy_constraints(
     tmp_path: Path,
@@ -1528,6 +1672,7 @@ def test_run_config_uses_current_schema_source_and_implementation_hash(
 
     instance_dir = _write_canonical_instance(tmp_path / "run_config_instance")
     results_dir = tmp_path / "run_config_results"
+    model_events: list[tuple[str, str]] = []
 
     class FakeModel:
         def __init__(self, _instance: object, mode: str):
@@ -1546,11 +1691,21 @@ def test_run_config_uses_current_schema_source_and_implementation_hash(
                 },
             )()
 
-        def prepare_algorithm(self, _solver: SolverConfig) -> "FakeModel":
+        def build(self) -> "FakeModel":
+            model_events.append((self.mode, "build"))
             return self
 
+        def prepare_algorithm(self, _solver: SolverConfig) -> "FakeModel":
+            raise AssertionError("CLI must leave timed preparation to solve()")
+
         def solve(self, _solver: SolverConfig, **_kwargs: object) -> bool:
+            model_events.append((self.mode, "solve"))
             return True
+
+        def write_model(self, path: str) -> None:
+            assert model_events[-1] == (self.mode, "solve")
+            model_events.append((self.mode, "write_lp"))
+            Path(path).write_text("mock strengthened model", encoding="utf-8")
 
         def export_incumbent_start(self) -> dict[str, float]:
             return {"gamma": 0.0}
@@ -1596,6 +1751,8 @@ def test_run_config_uses_current_schema_source_and_implementation_hash(
             "all",
             "--locker-pickup-cost",
             "0.47",
+            "--no-directed-return-cuts",
+            "--write-lp",
             "--quiet",
         ]
     )
@@ -1603,6 +1760,11 @@ def test_run_config_uses_current_schema_source_and_implementation_hash(
     payload = json.loads((results_dir / "run_config.json").read_text())
 
     assert [summary["mode"] for summary in summaries] == ["HD", "MX", "LO"]
+    assert model_events == [
+        (mode, event)
+        for mode in ("HD", "MX", "LO")
+        for event in ("build", "solve", "write_lp")
+    ]
     assert payload["modes"] == ["HD", "MX", "LO"]
     assert payload["schema_version"] == RESULT_SCHEMA_VERSION
     assert payload["formulation_id"] == FORMULATION_ID
@@ -1623,6 +1785,7 @@ def test_run_config_uses_current_schema_source_and_implementation_hash(
     assert payload["model"]["general_corridor_choices"] is None
     assert payload["model"]["choice"]["max_walk_km"] == pytest.approx(1.5)
     assert payload["model"]["locker_pickup_cost_per_order"] == pytest.approx(0.47)
+    assert payload["solver"]["cut_directed_return"] is False
     assert payload["model_derived"]["drone_speed_kmph"] == pytest.approx(72.0)
     assert payload["solver"]["miqcp_method"] == -1
     assert payload["git"]["head"]

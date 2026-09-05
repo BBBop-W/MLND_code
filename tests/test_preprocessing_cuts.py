@@ -4,7 +4,7 @@ import pytest
 
 from src.config import ModelConfig
 from src.data_processor.instance import DIRECT_ROUTE, Instance
-from src.model.gurobi_model import MLNDModel
+from src.model.gurobi_model import MLNDModel, _aggregate_raw_offer_bounds
 
 
 def _single_locker_route_instance(
@@ -119,6 +119,41 @@ def test_physical_flow_bound_uses_demand_and_capacity_minimum(
 def test_capacity_levels_that_cannot_meet_qos_are_rejected() -> None:
     with pytest.raises(ValueError, match="mu >= 1 / max_locker_time_hours"):
         _bounded_flow_instance(100.0, service_rates=(9.0,))
+
+
+@pytest.mark.parametrize("mode", ["MX", "HD", "LO"])
+def test_raw_offer_bounds_accumulate_once_per_retained_market_corridor(
+    mode: str,
+) -> None:
+    market_corridors = {
+        ("O1", "D1"): (("H1", "H2"), ("H2", "H3")),
+        ("O2", "D2"): (("H1", "H2"),),
+    }
+    h_od = {("O1", "D1"): 7.0, ("O2", "D2"): 11.0}
+    choice_share = {
+        ("O1", "D1", "H2"): 0.25,
+        ("O1", "D1", "H3"): 0.50,
+        ("O2", "D2", "H2"): 0.75,
+    }
+
+    bounds = _aggregate_raw_offer_bounds(
+        market_corridors,
+        h_od,
+        choice_share,
+        mode,
+    )
+
+    if mode == "LO":
+        assert bounds == pytest.approx(
+            {
+                ("H1", "H2"): 7.0 * 0.25 + 11.0 * 0.75,
+                ("H2", "H3"): 7.0 * 0.50,
+            }
+        )
+    else:
+        assert bounds == pytest.approx(
+            {("H1", "H2"): 18.0, ("H2", "H3"): 7.0}
+        )
 
 
 @pytest.mark.parametrize("mode", ["MX", "HD", "LO"])

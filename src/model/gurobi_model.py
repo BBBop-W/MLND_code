@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import time
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import gurobipy as gp
 from gurobipy import GRB
@@ -16,17 +17,37 @@ from src.data_processor.instance import DIRECT_ROUTE, Arc, Instance, Market
 from src.model_contract import FORMULATION_ID
 from src.model.primal_heuristic import (
     DEFAULT_STRUCTURE_GROUPS,
+    OBJECTIVE_START_PROXY_ENERGY_REL_TOLERANCE,
+    OBJECTIVE_START_PROXY_QOS_ABS_TOLERANCE,
+    OBJECTIVE_START_PROXY_SEARCH_REL_TOLERANCE,
+    CapacityOption,
+    FixedIntegerRepairConfig,
     LocalBranchingConfig,
+    ObjectiveAwareOpportunity,
+    ObjectiveAwarePlanningConfig,
     PrimalSeed,
+    build_all_courier_partial_assignment,
+    build_candidate_partial_assignment,
     capture_incumbent,
+    effective_objective_start_budget,
     improve_mip_start,
+    install_partial_mip_starts,
+    plan_objective_aware_partial_starts,
+    repair_fixed_integer_design_start,
 )
 from src.model.valid_inequalities import (
     ChoiceCorridorCoverData,
+    RouteAggregateVUBBound,
     build_choice_corridor_cover_data,
+    build_nearest_display_suffix_rows,
+    build_swap_route_bundles,
+    evaluate_route_bundle_vub,
     queue_perspective_intercept,
+    route_swap_leg_vub_bound,
+    route_swap_station_vub_bound,
     separate_choice_capacity_covers,
     separate_directed_return_cuts,
+    separate_od_disaggregated_directed_return_cuts,
     separate_queue_perspective_cut,
     stable_arrival_capacity,
 )
@@ -34,15 +55,41 @@ from src.model.valid_inequalities import (
 ChiKey = tuple[str, str, str, str, int]  # (o, d, i, j, r)
 EpsilonKey = tuple[str, str, str]  # (o, d, j)
 WKey = tuple[str, str, str, int]  # (idle, i, j, r)
+VarphiKey = tuple[str, str, str]  # (physical tail, physical head, route option)
 
 _MAX_LO_NETWORK_START_ATTEMPTS = 5
+_OBJECTIVE_PARTIAL_START_MODES = frozenset({"HD", "MX"})
 _NETWORK_START_PARAMETER_NAMES = (
     "TimeLimit",
     "MIPGap",
     "MIPFocus",
     "Heuristics",
     "NoRelHeurTime",
+    "Method",
+    "MIQCPMethod",
 )
+
+
+def _aggregate_raw_offer_bounds(
+    market_corridors: Mapping[Market, tuple[Arc, ...]],
+    h_od: Mapping[Market, float],
+    choice_share: Mapping[tuple[str, str, str], float],
+    mode: str,
+) -> dict[Arc, float]:
+    """Accumulate the exact demand-side offer bound in retained-index time."""
+
+    bounds: dict[Arc, float] = defaultdict(float)
+    for (origin, destination), corridors in market_corridors.items():
+        demand = h_od[origin, destination]
+        for corridor in corridors:
+            coefficient = demand
+            if mode == "LO":
+                coefficient *= choice_share.get(
+                    (origin, destination, corridor[1]),
+                    1.0,
+                )
+            bounds[corridor] += coefficient
+    return dict(bounds)
 
 
 @dataclass(frozen=True)
@@ -79,18 +126,29 @@ class MLNDModel:
     FORMULATION_ID = FORMULATION_ID
     MODES = {"MX", "HD", "LO"}
 
-    def __init__(self, instance: Instance, mode: str = "MX"):
+    def __init__(
+        self,
+        instance: Instance,
+        mode: str = "MX",
+        *,
+        environment: gp.Env | None = None,
+    ):
         self.inst = instance
         self.mode = mode.upper()
         if self.mode not in self.MODES:
             raise ValueError(f"mode must be one of {sorted(self.MODES)}")
-        self.model = gp.Model(f"MLND_{self.mode}_CHI_EPSILON_ENERGY")
+        model_name = f"MLND_{self.mode}_CHI_EPSILON_ENERGY"
+        if environment is None:
+            self.model = gp.Model(model_name)
+        else:
+            self.model = gp.Model(model_name, env=environment)
         self.solver_config: SolverConfig | None = None
         self.vars: dict[str, object] = {}
         self.cost_expressions: dict[str, gp.LinExpr] = {}
         self.paper_objective_expressions: dict[str, gp.LinExpr] = {}
         self.courier_only_baseline = 0.0
         self.network_start_runtime = 0.0
+        self.network_construction_runtime = 0.0
         self.network_start_found = False
         self.network_start_used = False
         self.network_start_key: tuple[str, str] | None = None
@@ -109,22 +167,87 @@ class MLNDModel:
         self.external_start_installed = False
         self.external_start_source: str | None = None
         self.external_start_matched_variables = 0
+        self.network_start_open_h_count = 0
+        self.network_start_open_facility_count = 0
+        self.network_start_service_per_hour = 0.0
+        self.network_start_relevant_chi_count = 0
+        self.start_preparation_runtime = 0.0
+        self.objective_partial_start_telemetry = self._empty_objective_start_telemetry()
         self.main_solve_runtime = 0.0
+        self.main_solve_started = False
+        self.optimize_called = False
         self.total_runtime = 0.0
+        self.budget_exhausted_before_main_solve = False
+        self.algorithm_prepare_runtime = 0.0
         self.static_cut_counts: dict[str, int] = {}
         self.user_cut_counts: dict[str, int] = {}
+        self.user_cut_candidate_counts: dict[str, int] = {}
+        self.user_cut_duplicate_counts: dict[str, int] = {}
+        self.user_cut_rejection_counts: dict[str, int] = {}
+        self.user_cut_separation_seconds: dict[str, float] = {}
         self.root_cut_rounds = 0
+        self.root_bound_before_cuts: float | None = None
+        self.root_bound_after_cuts: float | None = None
+        self.root_round_events: list[dict[str, object]] = []
+        self.progress_events: list[dict[str, object]] = []
+        self.callback_runtime = 0.0
+        self.first_incumbent_time: float | None = None
+        self.first_incumbent_objective: float | None = None
+        self._last_progress_time = -math.inf
+        self._last_progress_incumbent: float | None = None
+        self._last_progress_bound: float | None = None
         self.local_branching_runtime = 0.0
         self.local_branching_improved = False
         self.local_branching_objective: float | None = None
         self.local_branching_status: int | None = None
         self.local_branching_solution_count = 0
         self.local_branching_hamming_distance: int | None = None
+        self.fixed_integer_repair_runtime = 0.0
+        self.fixed_integer_repair_found = False
+        self.fixed_integer_repair_objective: float | None = None
+        self.fixed_integer_repair_status: int | None = None
+        self.fixed_integer_repair_solution_count = 0
+        self.fixed_integer_repair_fixed_count = 0
         self._valid_inequalities_added = False
         self._user_cut_signatures: set[tuple[object, ...]] = set()
+        self._static_user_cut_signatures: set[tuple[object, ...]] = set()
         self._choice_cover_data: tuple[ChoiceCorridorCoverData, ...] = ()
         self._built = False
         self._prepare_indices()
+
+    @staticmethod
+    def _empty_objective_start_telemetry() -> dict[str, object]:
+        return {
+            "policy_version": "objective_partial_v3_system_energy",
+            "proxy_only": True,
+            "proxy_feasibility_tolerances": {
+                "qos_arrival_absolute": (
+                    OBJECTIVE_START_PROXY_QOS_ABS_TOLERANCE
+                ),
+                "system_energy_relative": (
+                    OBJECTIVE_START_PROXY_ENERGY_REL_TOLERANCE
+                ),
+                "construction_search_relative": (
+                    OBJECTIVE_START_PROXY_SEARCH_REL_TOLERANCE
+                ),
+                "solver_feasibility_tolerance_linked": False,
+            },
+            "enabled": False,
+            "used": False,
+            "budget_seconds": 0.0,
+            "preparation_seconds": 0.0,
+            "opportunity_count": 0,
+            "singleton_support_count": 0,
+            "evaluated_support_count": 0,
+            "network_candidate_count": 0,
+            "heuristic_candidate_count": 0,
+            "safety_start_count": 0,
+            "installed_start_count": 0,
+            "candidate_supports": [],
+            "rejection_reasons": [],
+            "fallback_reason": None,
+            "timed_out": False,
+        }
 
     def _prepare_indices(self) -> None:
         """Build the sparse OD-corridor-reliability index sets for one mode."""
@@ -133,21 +256,25 @@ class MLNDModel:
         self.market_corridors: dict[Market, tuple[Arc, ...]] = {}
         chi_keys: list[ChiKey] = []
         self.chi_by_market: dict[Market, list[ChiKey]] = defaultdict(list)
+        self.chi_by_market_i: dict[EpsilonKey, list[ChiKey]] = defaultdict(list)
         self.chi_by_market_j: dict[EpsilonKey, list[ChiKey]] = defaultdict(list)
-        self.chi_by_corridor: dict[Arc, list[ChiKey]] = defaultdict(list)
-        self.chi_by_corridor_level: dict[tuple[str, str, int], list[ChiKey]] = (
-            defaultdict(list)
+        self.chi_by_market_incident: dict[EpsilonKey, list[ChiKey]] = defaultdict(
+            list
         )
+        self.chi_by_destination_locker: dict[
+            tuple[str, str], list[ChiKey]
+        ] = defaultdict(list)
+        self.chi_by_od_corridor: dict[
+            tuple[str, str, str, str], list[ChiKey]
+        ] = defaultdict(list)
+        self.chi_by_corridor: dict[Arc, list[ChiKey]] = defaultdict(list)
+        self.chi_by_corridor_level: dict[tuple[str, str, int], list[ChiKey]] = defaultdict(list)
 
         for market in self.inst.markets:
-            corridors = tuple(
-                dict.fromkeys(self.inst.corridors_for_mode(self.mode, market))
-            )
+            corridors = tuple(dict.fromkeys(self.inst.corridors_for_mode(self.mode, market)))
             invalid = [arc for arc in corridors if arc not in self.inst.A_HH]
             if invalid:
-                raise ValueError(
-                    f"mode corridor set contains non-HH arcs: {invalid[:3]}"
-                )
+                raise ValueError(f"mode corridor set contains non-HH arcs: {invalid[:3]}")
             self.market_corridors[market] = corridors
             o, d = market
             for i, j in corridors:
@@ -155,7 +282,13 @@ class MLNDModel:
                     key = (o, d, i, j, r)
                     chi_keys.append(key)
                     self.chi_by_market[market].append(key)
+                    self.chi_by_market_i[o, d, i].append(key)
                     self.chi_by_market_j[o, d, j].append(key)
+                    self.chi_by_market_incident[o, d, i].append(key)
+                    if j != i:
+                        self.chi_by_market_incident[o, d, j].append(key)
+                    self.chi_by_destination_locker[d, j].append(key)
+                    self.chi_by_od_corridor[o, d, i, j].append(key)
                     self.chi_by_corridor[i, j].append(key)
                     self.chi_by_corridor_level[i, j, r].append(key)
         self.chi_keys = tuple(chi_keys)
@@ -177,24 +310,22 @@ class MLNDModel:
             )
 
         rho_min = min(self.inst.config.availability_levels)
+        raw_offer_bound_by_corridor = _aggregate_raw_offer_bounds(
+            self.market_corridors,
+            self.inst.h_od,
+            self.inst.choice_share,
+            self.mode,
+        )
         self.M_offer: dict[Arc, float] = {}
         for arc in self.corridors:
-            raw_bound = 0.0
-            for o, d in self.inst.markets:
-                if arc not in self.market_corridors[o, d]:
-                    continue
-                if self.mode == "LO":
-                    raw_bound += self.inst.h_od[o, d] * self.inst.choice_share.get(
-                        (o, d, arc[1]),
-                        1.0,
-                    )
-                else:
-                    raw_bound += self.inst.h_od[o, d]
             realized_bound = self.inst.M_psi.get(
                 arc,
                 max(self.inst.M_psi.values(), default=0.0),
             )
-            self.M_offer[arc] = max(0.0, min(raw_bound, realized_bound / rho_min))
+            self.M_offer[arc] = max(
+                0.0,
+                min(raw_offer_bound_by_corridor[arc], realized_bound / rho_min),
+            )
 
         self.w_keys: tuple[WKey, ...] = tuple(
             (idle, i, j, r)
@@ -204,20 +335,101 @@ class MLNDModel:
         )
         self.w_by_source: dict[tuple[str, str], list[WKey]] = defaultdict(list)
         self.w_by_corridor: dict[Arc, list[WKey]] = defaultdict(list)
-        self.w_by_corridor_level: dict[tuple[str, str, int], list[WKey]] = defaultdict(
-            list
-        )
+        self.w_by_corridor_level: dict[tuple[str, str, int], list[WKey]] = defaultdict(list)
         for key in self.w_keys:
             idle, i, j, r = key
             self.w_by_source[idle, i].append(key)
             self.w_by_corridor[i, j].append(key)
             self.w_by_corridor_level[i, j, r].append(key)
 
-        self.varphi_keys = tuple(
+        self.varphi_keys: tuple[VarphiKey, ...] = tuple(
             (u, v, option)
             for u, v in sorted(self.inst.A_F)
             for option in self.inst.route_options[u, v]
         )
+        self.swap_varphi_by_leg: dict[Arc, tuple[VarphiKey, ...]] = {}
+        self.swap_varphi_by_station: dict[str, tuple[VarphiKey, ...]] = {}
+        self.swap_route_leg_vub_bounds: dict[
+            Arc, RouteAggregateVUBBound
+        ] = {}
+        self.swap_route_station_vub_bounds: dict[
+            str, RouteAggregateVUBBound
+        ] = {}
+        self.route_bundle_index_counts: dict[str, int] = {}
+        self._route_bundle_indices_prepared = False
+
+    def _prepare_route_bundle_indices(self) -> None:
+        """Build development-only route bundles inside the algorithm budget."""
+
+        if self._route_bundle_indices_prepared:
+            return
+        (
+            self.swap_varphi_by_leg,
+            self.swap_varphi_by_station,
+        ) = build_swap_route_bundles(
+            self.inst.route_options,
+            direct_option=DIRECT_ROUTE,
+        )
+        realized_demand_upper = (
+            max(self.inst.config.availability_levels) * self.inst.total_demand
+        )
+        self.swap_route_leg_vub_bounds: dict[
+            Arc, RouteAggregateVUBBound
+        ] = {}
+        for leg, keys in self.swap_varphi_by_leg.items():
+            if leg[0] in self.inst.E:
+                endpoint = leg[1]
+            elif leg[1] in self.inst.E:
+                endpoint = leg[0]
+            else:  # pragma: no cover - guarded by the route-option builder
+                raise ValueError(f"swap leg {leg!r} has no swap-station endpoint")
+            if endpoint in self.inst.L:
+                endpoint_kind = "base"
+            elif endpoint in self.inst.H:
+                endpoint_kind = "locker"
+            else:  # pragma: no cover - input node sets are validated as disjoint
+                raise ValueError(f"swap leg {leg!r} has an unknown physical endpoint")
+            self.swap_route_leg_vub_bounds[leg] = route_swap_leg_vub_bound(
+                keys,
+                self.inst.M_psi,
+                endpoint_kind=endpoint_kind,
+                realized_demand_upper=realized_demand_upper,
+                locker_service_rates=self.inst.config.locker_service_rates,
+                max_locker_time=self.inst.config.max_locker_time_hours,
+            )
+
+        arc_categories = {
+            **{arc: "LH" for arc in self.inst.A_LH},
+            **{arc: "HH" for arc in self.inst.A_HH},
+            **{arc: "HL" for arc in self.inst.A_HL},
+        }
+        self.swap_route_station_vub_bounds: dict[
+            str, RouteAggregateVUBBound
+        ] = {
+            station: route_swap_station_vub_bound(
+                keys,
+                self.inst.M_psi,
+                arc_categories,
+                realized_demand_upper=realized_demand_upper,
+            )
+            for station, keys in self.swap_varphi_by_station.items()
+        }
+        self.route_bundle_index_counts = {
+            "swap_route_options": sum(
+                len(keys) for keys in self.swap_varphi_by_station.values()
+            ),
+            "swap_leg_bundles": len(self.swap_varphi_by_leg),
+            "swap_station_bundles": len(self.swap_varphi_by_station),
+            "strengthening_swap_leg_bundles": sum(
+                bound.strictly_strengthens()
+                for bound in self.swap_route_leg_vub_bounds.values()
+            ),
+            "strengthening_swap_station_bundles": sum(
+                bound.strictly_strengthens()
+                for bound in self.swap_route_station_vub_bounds.values()
+            ),
+        }
+        self._route_bundle_indices_prepared = True
 
     def _successful_market_expression(
         self,
@@ -225,9 +437,7 @@ class MLNDModel:
         market: Market,
     ) -> gp.LinExpr:
         levels = self.inst.config.availability_levels
-        return gp.quicksum(
-            levels[key[4]] * chi[key] for key in self.chi_by_market[market]
-        )
+        return gp.quicksum(levels[key[4]] * chi[key] for key in self.chi_by_market[market])
 
     def _successful_market_locker_expression(
         self,
@@ -235,9 +445,7 @@ class MLNDModel:
         key: EpsilonKey,
     ) -> gp.LinExpr:
         levels = self.inst.config.availability_levels
-        return gp.quicksum(
-            levels[item[4]] * chi[item] for item in self.chi_by_market_j[key]
-        )
+        return gp.quicksum(levels[item[4]] * chi[item] for item in self.chi_by_market_j[key])
 
     def build(self) -> "MLNDModel":
         if self._built:
@@ -385,9 +593,7 @@ class MLNDModel:
             "realized_drone_adjustment": realized_adjustment,
             "locker_pickup_adjustment": locker_adjustment,
         }
-        self.model.setObjective(
-            gp.quicksum(self.cost_expressions.values()), GRB.MINIMIZE
-        )
+        self.model.setObjective(gp.quicksum(self.cost_expressions.values()), GRB.MINIMIZE)
 
         for i in self.inst.H:
             self.model.addConstr(
@@ -441,8 +647,12 @@ class MLNDModel:
         for i, j in self.corridors:
             for r in levels:
                 self.model.addConstr(
-                    gp.quicksum(chi[key] for key in self.chi_by_corridor_level[i, j, r])
-                    == gp.quicksum(w[key] for key in self.w_by_corridor_level[i, j, r]),
+                    gp.quicksum(
+                        chi[key] for key in self.chi_by_corridor_level[i, j, r]
+                    )
+                    == gp.quicksum(
+                        w[key] for key in self.w_by_corridor_level[i, j, r]
+                    ),
                     name=f"od_reliability_match[{i},{j},{r}]",
                 )
             self.model.addConstr(
@@ -566,7 +776,8 @@ class MLNDModel:
                 queue_v1[i]
                 == 2.0
                 * gp.quicksum(
-                    math.sqrt(cfg.locker_service_rates[c]) * z[i, c] for c in capacities
+                    math.sqrt(cfg.locker_service_rates[c]) * z[i, c]
+                    for c in capacities
                 ),
                 name=f"queue_v1_definition[{i}]",
             )
@@ -660,7 +871,13 @@ class MLNDModel:
         self.build()
         solver = solver or SolverConfig()
         solver.validate()
-        if self.mode == "LO" and self.alpha_keys and not self._choice_cover_data:
+        prepare_started = time.perf_counter()
+        did_work = False
+        # f884's LO network-start search ranks up to five exact display
+        # candidates from this same data.  Build it for every LO model, even
+        # when static and dynamic choice-cut families are both disabled.
+        needs_choice_data = self.mode == "LO" and bool(self.alpha_keys)
+        if needs_choice_data and not self._choice_cover_data:
             cover_alpha_keys = {
                 (destination, locker)
                 for destination, locker in self.alpha_keys
@@ -683,17 +900,29 @@ class MLNDModel:
                     if (key[1], key[2]) in cover_alpha_keys
                 },
             )
+            did_work = True
+        needs_route_bundle_data = solver.use_user_cuts and (
+            solver.cut_route_swap_leg_vub
+            or solver.cut_route_swap_station_vub
+        )
+        if needs_route_bundle_data and not self._route_bundle_indices_prepared:
+            self._prepare_route_bundle_indices()
+            did_work = True
         if solver.use_valid_inequalities and not self._valid_inequalities_added:
-            self._add_static_valid_inequalities()
+            self._add_static_valid_inequalities(solver)
             self._valid_inequalities_added = True
             self.model.update()
+            did_work = True
+        if did_work:
+            self.algorithm_prepare_runtime += time.perf_counter() - prepare_started
         return self
 
-    def _add_static_valid_inequalities(self) -> None:
+    def _add_static_valid_inequalities(self, solver: SolverConfig) -> None:
         """Add compact projections that remain valid for the selected mode."""
 
         cfg = self.inst.config
         z = self.vars["z"]
+        x = self.vars["x"]
         y = self.vars["y"]
         delta = self.vars["delta"]
         alpha = self.vars["alpha"]
@@ -714,28 +943,63 @@ class MLNDModel:
             ),
         )
 
-        for locker in self.inst.H:
-            for idle in self.inst.eligible_idle[locker]:
-                source_keys = self.w_by_source.get((idle, locker), ())
-                for r, rho in enumerate(cfg.availability_levels):
-                    offered = gp.quicksum(w[key] for key in source_keys if key[3] == r)
+        if solver.static_nearest_display_suffix:
+            # Access the key even when the family has no nonredundant rows so
+            # cut telemetry distinguishes "enabled but degenerate" from off.
+            counts["nearest_display_suffix"] += 0
+            if self.alpha_keys:
+                for row in build_nearest_display_suffix_rows(
+                    self.inst.display_lockers,
+                    self.inst.closer_lockers,
+                ):
                     self.model.addConstr(
-                        rho * offered <= max_locker_flow * delta[idle, r],
-                        name=f"vi_source_level_upper[{idle},{locker},{r}]",
-                    )
-                    counts["source_level_upper"] += 1
-                    if idle in self.inst.S:
-                        lower = 1.0 / ((1.0 - rho) * cfg.max_virtual_wait_hours)
-                        self.model.addConstr(
-                            offered >= lower * delta[idle, r],
-                            name=f"vi_virtual_level_lower[{idle},{r}]",
+                        gp.quicksum(
+                            alpha[row.destination, locker]
+                            for locker in row.farther_lockers
                         )
-                        counts["virtual_level_lower"] += 1
+                        <= 1.0 - x[row.anchor_locker],
+                        name=(
+                            "vi_nearest_display_suffix"
+                            f"[{row.destination},{row.anchor_locker}]"
+                        ),
+                    )
+                    counts["nearest_display_suffix"] += 1
+
+        if solver.static_source_level or solver.static_virtual_level_lower:
+            for locker in self.inst.H:
+                for idle in self.inst.eligible_idle[locker]:
+                    source_keys = self.w_by_source.get((idle, locker), ())
+                    for r, rho in enumerate(cfg.availability_levels):
+                        offered = gp.quicksum(
+                            w[key] for key in source_keys if key[3] == r
+                        )
+                        if solver.static_source_level:
+                            self.model.addConstr(
+                                rho * offered
+                                <= max_locker_flow * delta[idle, r],
+                                name=(
+                                    "vi_source_level_upper"
+                                    f"[{idle},{locker},{r}]"
+                                ),
+                            )
+                            counts["source_level_upper"] += 1
+                        if solver.static_virtual_level_lower and idle in self.inst.S:
+                            lower = 1.0 / (
+                                (1.0 - rho) * cfg.max_virtual_wait_hours
+                            )
+                            self.model.addConstr(
+                                offered >= lower * delta[idle, r],
+                                name=f"vi_virtual_level_lower[{idle},{r}]",
+                            )
+                            counts["virtual_level_lower"] += 1
 
         capacity_slack = tuple(
-            rate - 1.0 / cfg.max_locker_time_hours for rate in cfg.locker_service_rates
+            rate - 1.0 / cfg.max_locker_time_hours
+            for rate in cfg.locker_service_rates
         )
-        if self.mode == "LO":
+        if self.mode == "LO" and (
+            solver.static_lo_choice_corridor or solver.static_lo_choice_capacity
+        ):
             display_volume: dict[tuple[str, str], float] = {}
             display_arcs: dict[tuple[str, str], set[Arc]] = defaultdict(set)
             for destination, locker in self.alpha_keys:
@@ -758,32 +1022,37 @@ class MLNDModel:
                 display_volume[destination, locker] = volume
                 if volume <= 0.0:
                     continue
-                self.model.addConstr(
-                    gp.quicksum(
-                        min(self.M_offer[arc], volume) * y[arc]
-                        for arc in display_arcs[destination, locker]
+                if solver.static_lo_choice_corridor:
+                    self.model.addConstr(
+                        gp.quicksum(
+                            min(self.M_offer[arc], volume) * y[arc]
+                            for arc in display_arcs[destination, locker]
+                        )
+                        >= volume * alpha[destination, locker],
+                        name=(
+                            "vi_lo_choice_corridor_cover"
+                            f"[{destination},{locker}]"
+                        ),
                     )
-                    >= volume * alpha[destination, locker],
-                    name=f"vi_lo_choice_corridor_cover[{destination},{locker}]",
-                )
-                counts["lo_choice_corridor_cover"] += 1
+                    counts["lo_choice_corridor_cover"] += 1
 
-            for locker in self.inst.H:
-                forced = gp.quicksum(
-                    display_volume[destination, candidate]
-                    * alpha[destination, candidate]
-                    for destination, candidate in self.alpha_keys
-                    if candidate == locker
-                )
-                self.model.addConstr(
-                    rho_min * forced
-                    <= gp.quicksum(
-                        capacity_slack[c] * z[locker, c]
-                        for c in range(len(capacity_slack))
-                    ),
-                    name=f"vi_lo_choice_capacity[{locker}]",
-                )
-                counts["lo_choice_capacity_projection"] += 1
+            if solver.static_lo_choice_capacity:
+                for locker in self.inst.H:
+                    forced = gp.quicksum(
+                        display_volume[destination, candidate]
+                        * alpha[destination, candidate]
+                        for destination, candidate in self.alpha_keys
+                        if candidate == locker
+                    )
+                    self.model.addConstr(
+                        rho_min * forced
+                        <= gp.quicksum(
+                            capacity_slack[c] * z[locker, c]
+                            for c in range(len(capacity_slack))
+                        ),
+                        name=f"vi_lo_choice_capacity[{locker}]",
+                    )
+                    counts["lo_choice_capacity_projection"] += 1
 
         queue_slopes = sorted(
             {
@@ -796,28 +1065,105 @@ class MLNDModel:
                 if slope > 0.0 and math.isfinite(slope)
             }
         )
-        for locker in self.inst.H:
-            incoming = gp.quicksum(psi[u, v] for u, v in self.inst.A if v == locker)
-            for slope_index, slope in enumerate(queue_slopes):
-                intercepts = tuple(
-                    queue_perspective_intercept(
-                        rate,
-                        stable_arrival_capacity(rate, cfg.max_locker_time_hours),
-                        slope,
+        if solver.static_queue_perspective:
+            for locker in self.inst.H:
+                incoming = gp.quicksum(
+                    psi[u, v] for u, v in self.inst.A if v == locker
+                )
+                for slope_index, slope in enumerate(queue_slopes):
+                    intercepts = tuple(
+                        queue_perspective_intercept(
+                            rate,
+                            stable_arrival_capacity(
+                                rate, cfg.max_locker_time_hours
+                            ),
+                            slope,
+                        )
+                        for rate in cfg.locker_service_rates
                     )
-                    for rate in cfg.locker_service_rates
-                )
-                self.model.addConstr(
-                    xi[locker]
-                    >= slope * incoming
-                    + gp.quicksum(
-                        intercepts[c] * z[locker, c] for c in range(len(intercepts))
+                    self.model.addConstr(
+                        xi[locker]
+                        >= slope * incoming
+                        + gp.quicksum(
+                            intercepts[c] * z[locker, c]
+                            for c in range(len(intercepts))
+                        ),
+                        name=f"vi_queue_perspective[{locker},{slope_index}]",
+                    )
+                    counts["queue_perspective_support"] += 1
+
+        if solver.static_chi_vub_top_k_per_corridor:
+            chi = self.vars["chi"]
+            groups_by_corridor: dict[Arc, list[tuple[str, str]]] = defaultdict(list)
+            for o, d, i, j in self.chi_by_od_corridor:
+                groups_by_corridor[i, j].append((o, d))
+
+            top_k = solver.static_chi_vub_top_k_per_corridor
+            for i, j in sorted(groups_by_corridor):
+                ranked = sorted(
+                    groups_by_corridor[i, j],
+                    key=lambda market: (
+                        -self.inst.h_od[market],
+                        market[0],
+                        market[1],
                     ),
-                    name=f"vi_queue_perspective[{locker},{slope_index}]",
                 )
-                counts["queue_perspective_support"] += 1
+                for o, d in ranked[:top_k]:
+                    keys, coefficient, corridor = self._chi_od_corridor_vub_data(
+                        o, d, i, j
+                    )
+                    self.model.addConstr(
+                        gp.quicksum(chi[key] for key in keys)
+                        <= coefficient * y[corridor],
+                        name=f"vi_chi_od_corridor_vub[{o},{d},{i},{j}]",
+                    )
+                    signature = ("chi_od_corridor_vub", o, d, i, j)
+                    self._static_user_cut_signatures.add(signature)
+                    self._user_cut_signatures.add(signature)
+                    counts["chi_od_corridor_vub_top_k"] += 1
 
         self.static_cut_counts = dict(sorted(counts.items()))
+
+    def _chi_od_corridor_vub_data(
+        self,
+        o: str,
+        d: str,
+        i: str,
+        j: str,
+    ) -> tuple[tuple[ChiKey, ...], float, Arc]:
+        """Return the shared static/dynamic payload for one exact VUB."""
+
+        coefficient = self.inst.h_od[o, d]
+        if self.mode == "LO":
+            coefficient *= self.inst.choice_share[o, d, j]
+        return tuple(self.chi_by_od_corridor[o, d, i, j]), coefficient, (i, j)
+
+    def _chi_od_facility_vub_coefficient(
+        self,
+        o: str,
+        d: str,
+        facility: str,
+        *,
+        head: bool,
+    ) -> float:
+        """Return the valid OD bound for one incident open-facility link."""
+
+        coefficient = self.inst.h_od[o, d]
+        if head and self.mode == "LO":
+            coefficient *= self.inst.choice_share[o, d, facility]
+        return coefficient
+
+    def _od_disaggregated_return_upper_bound(
+        self,
+        o: str,
+        d: str,
+        i: str,
+        j: str,
+    ) -> float:
+        """Return the tight valid OD/corridor coefficient for a return cut."""
+
+        _, od_bound, corridor = self._chi_od_corridor_vub_data(o, d, i, j)
+        return min(od_bound, self.M_offer[corridor])
 
     @staticmethod
     def _callback_values(
@@ -837,66 +1183,208 @@ class MLNDModel:
         callback_model: gp.Model,
         solver: SolverConfig,
     ) -> int:
-        """Separate one bounded round of globally valid root-node cuts."""
+        """Separate one globally ranked, bounded round of valid root cuts."""
 
         tolerance = solver.cut_violation_tolerance
         budget = solver.max_cuts_per_round
         if budget <= 0:
             return 0
+        if (
+            solver.cut_route_swap_leg_vub
+            or solver.cut_route_swap_station_vub
+        ) and not self._route_bundle_indices_prepared:
+            raise RuntimeError(
+                "route bundle indices must be prepared before root separation"
+            )
 
         cfg = self.inst.config
         chi = self.vars["chi"]
         alpha = self.vars["alpha"]
-        w = self.vars["w"]
         psi = self.vars["psi"]
+        x = self.vars["x"]
         y = self.vars["y"]
         z = self.vars["z"]
         xi = self.vars["xi"]
+        varphi = self.vars["varphi"]
 
-        y_values = self._callback_values(callback_model, y)
-        counts: dict[str, int] = defaultdict(int)
-        added = 0
+        relaxation_cache: dict[str, dict[object, float]] = {}
 
-        chi_values = self._callback_values(callback_model, chi)
-        vub_candidates: list[
-            tuple[float, tuple[object, ...], gp.Var, float, gp.Var]
-        ] = []
-        for key, value in chi_values.items():
-            o, d, i, j, _r = key
-            coefficient = self.inst.h_od[o, d]
-            if self.mode == "LO":
-                coefficient *= self.inst.choice_share[o, d, j]
-            violation = value - coefficient * y_values[i, j]
-            signature = ("chi_od_vub", key)
-            if violation > tolerance and signature not in self._user_cut_signatures:
-                vub_candidates.append(
-                    (violation, signature, chi[key], coefficient, y[i, j])
+        def relaxation_values(name: str, container: gp.tupledict) -> dict[object, float]:
+            if name not in relaxation_cache:
+                relaxation_cache[name] = self._callback_values(
+                    callback_model, container
                 )
-        vub_candidates.sort(key=lambda item: (-item[0], item[1]))
-        vub_quota = max(1, budget // 2)
-        for _, signature, offer, coefficient, corridor_open in vub_candidates[
-            :vub_quota
-        ]:
-            callback_model.cbCut(offer <= coefficient * corridor_open)
-            self._user_cut_signatures.add(signature)
-            counts["chi_od_vub"] += 1
-            added += 1
+            return relaxation_cache[name]
 
-        remaining = budget - added
-        queue_quota = min(remaining, max(1, budget // 6))
-        queue_added = 0
-        if queue_quota > 0:
-            psi_values = self._callback_values(callback_model, psi)
-            xi_values = self._callback_values(callback_model, xi)
-            z_values = self._callback_values(callback_model, z)
+        candidates: list[dict[str, object]] = []
+        candidate_counts: dict[str, int] = defaultdict(int)
+        duplicate_counts: dict[str, int] = defaultdict(int)
+        rejection_counts: dict[str, int] = defaultdict(int)
+        separation_seconds: dict[str, float] = defaultdict(float)
+
+        def retain(
+            family: str,
+            signature: tuple[object, ...],
+            violation: float,
+            scale: float,
+            payload: object,
+        ) -> None:
+            if violation <= tolerance:
+                return
+            candidate_counts[family] += 1
+            if signature in self._user_cut_signatures:
+                duplicate_counts[family] += 1
+                return
+            efficacy = violation / max(1.0, abs(scale))
+            if efficacy < solver.cut_efficacy_tolerance:
+                rejection_counts[family] += 1
+                return
+            candidates.append(
+                {
+                    "efficacy": efficacy,
+                    "violation": violation,
+                    "family": family,
+                    "signature": signature,
+                    "payload": payload,
+                }
+            )
+
+        if solver.cut_chi_vub:
+            family_started = time.perf_counter()
+            y_values = relaxation_values("y", y)
+            chi_values = relaxation_values("chi", chi)
+            for o, d, i, j in self.chi_by_od_corridor:
+                keys, coefficient, corridor = self._chi_od_corridor_vub_data(
+                    o, d, i, j
+                )
+                offered_value = sum(chi_values[key] for key in keys)
+                violation = offered_value - coefficient * y_values[corridor]
+                retain(
+                    "chi_od_corridor_vub",
+                    ("chi_od_corridor_vub", o, d, i, j),
+                    violation,
+                    coefficient,
+                    (keys, coefficient, corridor),
+                )
+            separation_seconds["chi_od_corridor_vub"] += (
+                time.perf_counter() - family_started
+            )
+
+        if solver.cut_chi_facility_vub:
+            family_started = time.perf_counter()
+            x_values = relaxation_values("x", x)
+            chi_values = relaxation_values("chi", chi)
+            for o, d, facility in sorted(self.chi_by_market_incident):
+                keys = self.chi_by_market_incident[o, d, facility]
+                coefficient = self._chi_od_facility_vub_coefficient(
+                    o, d, facility, head=False
+                )
+                offered_value = sum(chi_values[key] for key in keys)
+                violation = offered_value - coefficient * x_values[facility]
+                retain(
+                    "chi_od_incident_star_vub",
+                    ("chi_od_incident_star_vub", o, d, facility),
+                    violation,
+                    coefficient,
+                    (tuple(keys), coefficient, facility),
+                )
+            separation_seconds["chi_od_incident_star_vub"] += (
+                time.perf_counter() - family_started
+            )
+            if self.mode == "LO":
+                family_started = time.perf_counter()
+                for o, d, facility in sorted(self.chi_by_market_j):
+                    keys = self.chi_by_market_j[o, d, facility]
+                    coefficient = self._chi_od_facility_vub_coefficient(
+                        o, d, facility, head=True
+                    )
+                    offered_value = sum(chi_values[key] for key in keys)
+                    violation = offered_value - coefficient * x_values[facility]
+                    retain(
+                        "chi_od_head_facility_vub",
+                        ("chi_od_head_facility_vub", o, d, facility),
+                        violation,
+                        coefficient,
+                        (tuple(keys), coefficient, facility),
+                    )
+                separation_seconds["chi_od_head_facility_vub"] += (
+                    time.perf_counter() - family_started
+                )
+
+        if solver.cut_route_swap_leg_vub:
+            family_started = time.perf_counter()
+            y_values = relaxation_values("y", y)
+            varphi_values = relaxation_values("varphi", varphi)
+            for leg in sorted(self.swap_varphi_by_leg):
+                bound = self.swap_route_leg_vub_bounds[leg]
+                if not bound.strictly_strengthens():
+                    continue
+                keys = self.swap_varphi_by_leg[leg]
+                evaluated = evaluate_route_bundle_vub(
+                    keys,
+                    varphi_values,
+                    activation_value=y_values[leg],
+                    coefficient=bound.coefficient,
+                    feasibility_tolerance=max(1e-9, 10.0 * tolerance),
+                )
+                retain(
+                    "route_swap_leg_bundle_vub",
+                    ("route_swap_leg_bundle_vub", *leg),
+                    evaluated.violation,
+                    max(
+                        bound.coefficient,
+                        evaluated.lhs_value,
+                        evaluated.rhs_value,
+                    ),
+                    (keys, bound.coefficient, leg),
+                )
+            separation_seconds["route_swap_leg_bundle_vub"] += (
+                time.perf_counter() - family_started
+            )
+
+        if solver.cut_route_swap_station_vub:
+            family_started = time.perf_counter()
+            x_values = relaxation_values("x", x)
+            varphi_values = relaxation_values("varphi", varphi)
+            for station in sorted(self.swap_varphi_by_station):
+                bound = self.swap_route_station_vub_bounds[station]
+                if not bound.strictly_strengthens():
+                    continue
+                keys = self.swap_varphi_by_station[station]
+                evaluated = evaluate_route_bundle_vub(
+                    keys,
+                    varphi_values,
+                    activation_value=x_values[station],
+                    coefficient=bound.coefficient,
+                    feasibility_tolerance=max(1e-9, 10.0 * tolerance),
+                )
+                retain(
+                    "route_swap_station_throughput_vub",
+                    ("route_swap_station_throughput_vub", station),
+                    evaluated.violation,
+                    max(
+                        bound.coefficient,
+                        evaluated.lhs_value,
+                        evaluated.rhs_value,
+                    ),
+                    (keys, bound.coefficient, station),
+                )
+            separation_seconds["route_swap_station_throughput_vub"] += (
+                time.perf_counter() - family_started
+            )
+
+        if solver.cut_queue_perspective:
+            family_started = time.perf_counter()
+            psi_values = relaxation_values("psi", psi)
+            xi_values = relaxation_values("xi", xi)
+            z_values = relaxation_values("z", z)
             for locker in self.inst.H:
-                if queue_added >= queue_quota:
-                    break
                 arrival_value = sum(
                     psi_values[u, v] for u, v in self.inst.A if v == locker
                 )
                 capacity_values = tuple(
-                    z_values[locker, c] for c in range(len(cfg.locker_service_rates))
+                    z_values[locker, c]
+                    for c in range(len(cfg.locker_service_rates))
                 )
                 weighted_capacity = sum(
                     stable_arrival_capacity(rate, cfg.max_locker_time_hours)
@@ -916,26 +1404,61 @@ class MLNDModel:
                 )
                 if cut is None:
                     continue
-                signature = ("queue", locker, *cut.signature())
-                if signature in self._user_cut_signatures:
-                    continue
-                incoming = gp.quicksum(psi[u, v] for u, v in self.inst.A if v == locker)
-                callback_model.cbCut(
-                    xi[locker]
-                    >= cut.lambda_coefficient * incoming
-                    + gp.quicksum(
-                        cut.z_coefficients[c] * z[locker, c]
-                        for c in range(len(cut.z_coefficients))
-                    )
+                retain(
+                    "queue_perspective",
+                    ("queue", locker, *cut.signature()),
+                    cut.violation,
+                    max(1.0, abs(cut.rhs_at_point), abs(xi_values[locker])),
+                    (locker, cut),
                 )
-                self._user_cut_signatures.add(signature)
-                counts["queue_perspective"] += 1
-                added += 1
-                queue_added += 1
+            separation_seconds["queue_perspective"] += (
+                time.perf_counter() - family_started
+            )
 
-        if self.mode == "LO" and added < budget and self._choice_cover_data:
-            alpha_values = self._callback_values(callback_model, alpha)
-            z_values = self._callback_values(callback_model, z)
+        alpha_values: dict[object, float] = {}
+        z_values: dict[object, float] = {}
+        if self.mode == "LO" and self._choice_cover_data and (
+            solver.cut_lo_choice_corridor or solver.cut_lo_choice_capacity
+        ):
+            alpha_values = relaxation_values("alpha", alpha)
+            if solver.cut_lo_choice_capacity:
+                z_values = relaxation_values("z", z)
+
+        if (
+            self.mode == "LO"
+            and solver.cut_lo_choice_corridor
+            and self._choice_cover_data
+        ):
+            family_started = time.perf_counter()
+            y_values = relaxation_values("y", y)
+            for item in self._choice_cover_data:
+                lhs_value = item.offered_demand * alpha_values[item.alpha_key]
+                corridor_coefficients = tuple(
+                    (arc, min(self.M_offer.get(arc, 0.0), item.offered_demand))
+                    for arc in item.incoming_corridors
+                    if arc in y_values and self.M_offer.get(arc, 0.0) > 0.0
+                )
+                rhs_value = sum(
+                    coefficient * y_values[arc]
+                    for arc, coefficient in corridor_coefficients
+                )
+                retain(
+                    "lo_choice_corridor",
+                    ("lo_choice_corridor", item.destination, item.locker),
+                    lhs_value - rhs_value,
+                    item.offered_demand,
+                    (item, corridor_coefficients),
+                )
+            separation_seconds["lo_choice_corridor"] += (
+                time.perf_counter() - family_started
+            )
+
+        if (
+            self.mode == "LO"
+            and solver.cut_lo_choice_capacity
+            and self._choice_cover_data
+        ):
+            family_started = time.perf_counter()
             cover_cuts = separate_choice_capacity_covers(
                 self._choice_cover_data,
                 tuple(
@@ -948,26 +1471,26 @@ class MLNDModel:
                 violation_tolerance=tolerance,
                 feasibility_tolerance=max(1e-8, 10.0 * tolerance),
                 max_cuts_per_locker=2,
-                seen_signatures=self._user_cut_signatures,
+                seen_signatures=None,
             )
-            cover_quota = min(budget - added, max(1, budget // 5))
-            for cut in cover_cuts[:cover_quota]:
-                callback_model.cbCut(
-                    gp.quicksum(alpha[d, cut.locker] for d in cut.destinations)
-                    <= len(cut.destinations)
-                    - 1
-                    + gp.quicksum(
-                        z[cut.locker, c] for c in cut.adequate_capacity_indices
-                    )
+            for cut in cover_cuts:
+                retain(
+                    "lo_choice_capacity_cover",
+                    cut.signature(),
+                    cut.violation,
+                    len(cut.destinations),
+                    cut,
                 )
-                self._user_cut_signatures.add(cut.signature())
-                counts["lo_choice_capacity_cover"] += 1
-                added += 1
+            separation_seconds["lo_choice_capacity_cover"] += (
+                time.perf_counter() - family_started
+            )
 
-        if added < budget:
-            w_values = self._callback_values(callback_model, w)
+        if solver.cut_directed_return:
+            family_started = time.perf_counter()
+            y_values = relaxation_values("y", y)
+            chi_values = relaxation_values("chi", chi)
             offered_values = {
-                arc: sum(w_values[key] for key in self.w_by_corridor[arc])
+                arc: sum(chi_values[key] for key in self.chi_by_corridor[arc])
                 for arc in self.corridors
                 if self.M_offer[arc] > 0.0
             }
@@ -980,36 +1503,301 @@ class MLNDModel:
                 violation_tolerance=tolerance,
                 feasibility_tolerance=max(1e-8, 10.0 * tolerance),
                 max_candidates=min(100, len(offered_values)),
-                max_cuts=budget - added,
-                seen_signatures=self._user_cut_signatures,
+                max_cuts=None,
+                seen_signatures=None,
             )
             for cut in return_cuts:
-                callback_model.cbCut(
-                    gp.quicksum(w[key] for key in self.w_by_corridor[cut.corridor])
-                    <= cut.big_m * gp.quicksum(y[arc] for arc in cut.crossing_arcs)
+                retain(
+                    "directed_return",
+                    cut.signature(),
+                    cut.violation,
+                    max(1.0, cut.offered_value, cut.big_m),
+                    cut,
                 )
-                self._user_cut_signatures.add(cut.signature())
-                counts["directed_return"] += 1
-                added += 1
+            separation_seconds["directed_return"] += (
+                time.perf_counter() - family_started
+            )
+
+        if solver.cut_od_disaggregated_return:
+            family_started = time.perf_counter()
+            y_values = relaxation_values("y", y)
+            chi_values = relaxation_values("chi", chi)
+            offered_values: dict[tuple[str, str, str, str], float] = {}
+            upper_bounds: dict[tuple[str, str, str, str], float] = {}
+            for od_corridor in sorted(self.chi_by_od_corridor):
+                o, d, i, j = od_corridor
+                upper = self._od_disaggregated_return_upper_bound(o, d, i, j)
+                if upper <= 0.0:
+                    continue
+                offered_values[od_corridor] = sum(
+                    chi_values[key]
+                    for key in self.chi_by_od_corridor[od_corridor]
+                )
+                upper_bounds[od_corridor] = upper
+            od_return_cuts = separate_od_disaggregated_directed_return_cuts(
+                self.inst.A_F,
+                {arc: y_values[arc] for arc in self.inst.A_F},
+                offered_values,
+                upper_bounds,
+                contraction=self.inst.s_to_h,
+                violation_tolerance=tolerance,
+                feasibility_tolerance=max(1e-8, 10.0 * tolerance),
+                max_corridors=min(100, len(self.corridors)),
+                max_cuts=None,
+                seen_signatures=None,
+            )
+            for cut in od_return_cuts:
+                retain(
+                    "od_disaggregated_directed_return",
+                    cut.signature(),
+                    cut.violation,
+                    max(1.0, cut.offered_value, cut.upper_bound),
+                    cut,
+                )
+            separation_seconds["od_disaggregated_directed_return"] += (
+                time.perf_counter() - family_started
+            )
+
+        candidates.sort(
+            key=lambda item: (
+                -float(item["efficacy"]),
+                -float(item["violation"]),
+                str(item["family"]),
+                repr(item["signature"]),
+            )
+        )
+        counts: dict[str, int] = defaultdict(int)
+        for candidate in candidates[:budget]:
+            family = str(candidate["family"])
+            signature = candidate["signature"]
+            payload = candidate["payload"]
+            if family == "chi_od_corridor_vub":
+                keys, coefficient, arc = payload
+                callback_model.cbCut(
+                    gp.quicksum(chi[key] for key in keys)
+                    <= coefficient * y[arc]
+                )
+            elif family in {
+                "chi_od_incident_star_vub",
+                "chi_od_head_facility_vub",
+            }:
+                keys, coefficient, facility = payload
+                callback_model.cbCut(
+                    gp.quicksum(chi[key] for key in keys)
+                    <= coefficient * x[facility]
+                )
+            elif family == "route_swap_leg_bundle_vub":
+                keys, coefficient, leg = payload
+                callback_model.cbCut(
+                    gp.quicksum(varphi[key] for key in keys)
+                    <= coefficient * y[leg]
+                )
+            elif family == "route_swap_station_throughput_vub":
+                keys, coefficient, station = payload
+                callback_model.cbCut(
+                    gp.quicksum(varphi[key] for key in keys)
+                    <= coefficient * x[station]
+                )
+            elif family == "queue_perspective":
+                locker, cut = payload
+                incoming = gp.quicksum(
+                    psi[u, v] for u, v in self.inst.A if v == locker
+                )
+                callback_model.cbCut(
+                    xi[locker]
+                    >= cut.lambda_coefficient * incoming
+                    + gp.quicksum(
+                        cut.z_coefficients[c] * z[locker, c]
+                        for c in range(len(cut.z_coefficients))
+                    )
+                )
+            elif family == "lo_choice_corridor":
+                item, corridor_coefficients = payload
+                callback_model.cbCut(
+                    item.offered_demand * alpha[item.alpha_key]
+                    <= gp.quicksum(
+                        coefficient * y[arc]
+                        for arc, coefficient in corridor_coefficients
+                    )
+                )
+            elif family == "lo_choice_capacity_cover":
+                cut = payload
+                callback_model.cbCut(
+                    gp.quicksum(
+                        alpha[d, cut.locker] for d in cut.destinations
+                    )
+                    <= len(cut.destinations)
+                    - 1
+                    + gp.quicksum(
+                        z[cut.locker, c]
+                        for c in cut.adequate_capacity_indices
+                    )
+                )
+            elif family == "directed_return":
+                cut = payload
+                callback_model.cbCut(
+                    gp.quicksum(
+                        chi[key] for key in self.chi_by_corridor[cut.corridor]
+                    )
+                    <= cut.big_m
+                        * gp.quicksum(y[arc] for arc in cut.crossing_arcs)
+                )
+            elif family == "od_disaggregated_directed_return":
+                cut = payload
+                callback_model.cbCut(
+                    gp.quicksum(
+                        chi[key]
+                        for key in self.chi_by_od_corridor[cut.od_corridor]
+                    )
+                    <= cut.upper_bound
+                    * gp.quicksum(y[arc] for arc in cut.crossing_arcs)
+                )
+            else:  # pragma: no cover - guarded by construction above
+                raise RuntimeError(f"unknown cut family {family!r}")
+            self._user_cut_signatures.add(signature)
+            counts[family] += 1
 
         for family, count in counts.items():
             self.user_cut_counts[family] = self.user_cut_counts.get(family, 0) + count
-        return added
+        for family, count in candidate_counts.items():
+            self.user_cut_candidate_counts[family] = (
+                self.user_cut_candidate_counts.get(family, 0) + count
+            )
+        for family, count in duplicate_counts.items():
+            self.user_cut_duplicate_counts[family] = (
+                self.user_cut_duplicate_counts.get(family, 0) + count
+            )
+        for family, count in rejection_counts.items():
+            self.user_cut_rejection_counts[family] = (
+                self.user_cut_rejection_counts.get(family, 0) + count
+            )
+        for family, seconds in separation_seconds.items():
+            self.user_cut_separation_seconds[family] = (
+                self.user_cut_separation_seconds.get(family, 0.0) + seconds
+            )
+        return sum(counts.values())
 
-    def _root_user_cut_callback(self, solver: SolverConfig):
-        """Create the root-only callback used by the branch-and-cut solve."""
+    @staticmethod
+    def _finite_callback_value(value: object) -> float | None:
+        number = float(value)
+        if not math.isfinite(number) or abs(number) >= 0.99 * GRB.INFINITY:
+            return None
+        return number
+
+    @staticmethod
+    def _relative_gap(incumbent: float | None, bound: float | None) -> float | None:
+        if incumbent is None or bound is None:
+            return None
+        return abs(incumbent - bound) / max(1e-10, abs(incumbent))
+
+    def _record_mip_progress(self, callback_model: gp.Model, solver: SolverConfig) -> None:
+        runtime = float(callback_model.cbGet(GRB.Callback.RUNTIME))
+        incumbent = self._finite_callback_value(
+            callback_model.cbGet(GRB.Callback.MIP_OBJBST)
+        )
+        bound = self._finite_callback_value(callback_model.cbGet(GRB.Callback.MIP_OBJBND))
+        materially_changed = (
+            incumbent != self._last_progress_incumbent
+            or bound != self._last_progress_bound
+        )
+        if (
+            runtime - self._last_progress_time < solver.progress_interval_seconds
+            and not materially_changed
+        ):
+            return
+        self.progress_events.append(
+            {
+                "event": "mip_progress",
+                "runtime_seconds": runtime,
+                "incumbent": incumbent,
+                "bound": bound,
+                "relative_gap": self._relative_gap(incumbent, bound),
+                "node_count": float(
+                    callback_model.cbGet(GRB.Callback.MIP_NODCNT)
+                ),
+                "solution_count": int(
+                    callback_model.cbGet(GRB.Callback.MIP_SOLCNT)
+                ),
+            }
+        )
+        self._last_progress_time = runtime
+        self._last_progress_incumbent = incumbent
+        self._last_progress_bound = bound
+
+    def _solver_callback(self, solver: SolverConfig):
+        """Create the matched telemetry callback with optional root separation."""
+
+        cuts_enabled = (
+            solver.use_user_cuts
+            and solver.max_root_cut_rounds > 0
+            and solver.max_cuts_per_round > 0
+        )
 
         def callback(callback_model: gp.Model, where: int) -> None:
-            if where != GRB.Callback.MIPNODE:
-                return
-            if self.root_cut_rounds >= solver.max_root_cut_rounds:
-                return
-            if callback_model.cbGet(GRB.Callback.MIPNODE_STATUS) != GRB.OPTIMAL:
-                return
-            if callback_model.cbGet(GRB.Callback.MIPNODE_NODCNT) > 0.5:
-                return
-            self.root_cut_rounds += 1
-            self._add_root_user_cuts(callback_model, solver)
+            callback_started = time.perf_counter()
+            try:
+                if where == GRB.Callback.MIP and solver.collect_progress:
+                    self._record_mip_progress(callback_model, solver)
+                    return
+                if where == GRB.Callback.MIPSOL and solver.collect_progress:
+                    runtime = float(callback_model.cbGet(GRB.Callback.RUNTIME))
+                    objective = self._finite_callback_value(
+                        callback_model.cbGet(GRB.Callback.MIPSOL_OBJ)
+                    )
+                    bound = self._finite_callback_value(
+                        callback_model.cbGet(GRB.Callback.MIPSOL_OBJBND)
+                    )
+                    if self.first_incumbent_time is None:
+                        self.first_incumbent_time = runtime
+                        self.first_incumbent_objective = objective
+                    self.progress_events.append(
+                        {
+                            "event": "incumbent",
+                            "runtime_seconds": runtime,
+                            "incumbent": objective,
+                            "bound": bound,
+                            "relative_gap": self._relative_gap(objective, bound),
+                        }
+                    )
+                    return
+                if where != GRB.Callback.MIPNODE:
+                    return
+                if callback_model.cbGet(GRB.Callback.MIPNODE_STATUS) != GRB.OPTIMAL:
+                    return
+                node_count = float(
+                    callback_model.cbGet(GRB.Callback.MIPNODE_NODCNT)
+                )
+                if node_count > 0.5:
+                    return
+                bound = self._finite_callback_value(
+                    callback_model.cbGet(GRB.Callback.MIPNODE_OBJBND)
+                )
+                if self.root_bound_before_cuts is None:
+                    self.root_bound_before_cuts = bound
+                self.root_bound_after_cuts = bound
+                if not cuts_enabled or self.root_cut_rounds >= solver.max_root_cut_rounds:
+                    return
+                self.root_cut_rounds += 1
+                before_counts = dict(self.user_cut_counts)
+                added = self._add_root_user_cuts(callback_model, solver)
+                added_by_family = {
+                    family: count - before_counts.get(family, 0)
+                    for family, count in self.user_cut_counts.items()
+                    if count - before_counts.get(family, 0) > 0
+                }
+                self.root_round_events.append(
+                    {
+                        "round": self.root_cut_rounds,
+                        "runtime_seconds": float(
+                            callback_model.cbGet(GRB.Callback.RUNTIME)
+                        ),
+                        "root_bound_before_round": bound,
+                        "cuts_added": added,
+                        "cuts_added_by_family": added_by_family,
+                    }
+                )
+            finally:
+                self.callback_runtime += time.perf_counter() - callback_started
 
         return callback
 
@@ -1021,9 +1809,17 @@ class MLNDModel:
         external_start_source: str | None = None,
     ) -> bool:
         solver = solver or SolverConfig()
+        solver.validate()
         self.solver_config = solver
-        self.prepare_algorithm(solver)
+        # Model/index construction is common to every matched profile and is
+        # deliberately outside the solver budget.  Static strengthening,
+        # start preparation, callbacks, and the main optimization are inside.
+        self.build()
+        budget_wall_start = time.perf_counter()
+        algorithm_deadline = budget_wall_start + solver.time_limit
+        self.algorithm_prepare_runtime = 0.0
         self.network_start_runtime = 0.0
+        self.network_construction_runtime = 0.0
         self.network_start_found = False
         self.network_start_used = False
         self.network_start_key = None
@@ -1041,68 +1837,249 @@ class MLNDModel:
         self.external_start_installed = False
         self.external_start_source = None
         self.external_start_matched_variables = 0
+        self.network_start_open_h_count = 0
+        self.network_start_open_facility_count = 0
+        self.network_start_service_per_hour = 0.0
+        self.network_start_relevant_chi_count = 0
+        self.start_preparation_runtime = 0.0
+        self.objective_partial_start_telemetry = self._empty_objective_start_telemetry()
         self.local_branching_runtime = 0.0
         self.local_branching_improved = False
         self.local_branching_objective = None
         self.local_branching_status = None
         self.local_branching_solution_count = 0
         self.local_branching_hamming_distance = None
+        self.fixed_integer_repair_runtime = 0.0
+        self.fixed_integer_repair_found = False
+        self.fixed_integer_repair_objective = None
+        self.fixed_integer_repair_status = None
+        self.fixed_integer_repair_solution_count = 0
+        self.fixed_integer_repair_fixed_count = 0
         self.main_solve_runtime = 0.0
+        self.main_solve_started = False
+        self.optimize_called = False
         self.total_runtime = 0.0
+        self.budget_exhausted_before_main_solve = False
         self.user_cut_counts = {}
+        self.user_cut_candidate_counts = {}
+        self.user_cut_duplicate_counts = {}
+        self.user_cut_rejection_counts = {}
+        self.user_cut_separation_seconds = {}
         self.root_cut_rounds = 0
-        self._user_cut_signatures.clear()
-        self.model.Params.TimeLimit = solver.time_limit
-        self.model.Params.MIPGap = solver.mip_gap
-        self.model.Params.Threads = solver.threads
-        self.model.Params.OutputFlag = solver.output_flag
-        self.model.Params.Seed = solver.seed
-        self.model.Params.Method = solver.root_relaxation_method
-        self.model.Params.MIQCPMethod = solver.miqcp_method
-        start_budget = min(solver.network_start_seconds, 0.20 * solver.time_limit)
-        if start_budget > 1e-9 and self.chi_keys:
-            self._construct_network_start(start_budget, solver)
-        else:
-            self._set_courier_only_start()
-        if external_start is not None:
-            self._append_external_start(external_start, external_start_source)
-        remaining = max(0.1, solver.time_limit - self.network_start_runtime)
-        self.model.Params.TimeLimit = remaining
-        self.model.Params.MIPGap = solver.mip_gap
-        # Limit native root cut passes only for the full solve.  The compact
-        # auxiliary network-start model benefits from Gurobi's automatic cut
-        # policy and should not inherit this large-model time safeguard.
-        self.model.Params.CutPasses = solver.root_cut_passes
-        if self.network_start_used:
-            self.model.Params.MIPFocus = 1
-            self.model.Params.Heuristics = 0.5
-            self.model.Params.NoRelHeurTime = min(
-                solver.no_rel_heur_seconds,
-                0.05 * remaining,
+        self.root_bound_before_cuts = None
+        self.root_bound_after_cuts = None
+        self.root_round_events = []
+        self.progress_events = []
+        self.callback_runtime = 0.0
+        self.first_incumbent_time = None
+        self.first_incumbent_objective = None
+        self._last_progress_time = -math.inf
+        self._last_progress_incumbent = None
+        self._last_progress_bound = None
+        self._user_cut_signatures = set(
+            getattr(self, "_static_user_cut_signatures", ())
+        )
+        try:
+            self.prepare_algorithm(solver)
+            self.model.Params.TimeLimit = solver.time_limit
+            self.model.Params.MIPGap = solver.mip_gap
+            self.model.Params.Threads = solver.threads
+            self.model.Params.OutputFlag = solver.output_flag
+            self.model.Params.Seed = solver.seed
+            self.model.Params.Method = solver.root_relaxation_method
+            self.model.Params.Presolve = solver.presolve
+            self.model.Params.Cuts = solver.cuts
+            self.model.Params.NumericFocus = solver.numeric_focus
+            self.model.Params.FeasibilityTol = solver.feasibility_tol
+            self.model.Params.OptimalityTol = solver.optimality_tol
+            self.model.Params.IntFeasTol = solver.integer_feasibility_tol
+            self.model.Params.MIQCPMethod = solver.miqcp_method
+
+            remaining_before_start = algorithm_deadline - time.perf_counter()
+            if remaining_before_start <= 0.0:
+                self.budget_exhausted_before_main_solve = True
+            else:
+                if solver.use_objective_partial_start:
+                    start_preparation_started = time.perf_counter()
+                    objective_budget = min(
+                        effective_objective_start_budget(
+                            solver.time_limit,
+                            solver.objective_partial_start_seconds,
+                        ),
+                        remaining_before_start,
+                    )
+                    self._construct_objective_partial_starts(
+                        objective_budget,
+                        solver,
+                    )
+                    self.start_preparation_runtime = (
+                        time.perf_counter() - start_preparation_started
+                    )
+                else:
+                    maximum_start_budget = min(
+                        0.20 * solver.time_limit,
+                        remaining_before_start,
+                    )
+                    network_budget = min(
+                        solver.network_start_seconds,
+                        maximum_start_budget,
+                    )
+                    local_budget = (
+                        solver.local_branching_seconds
+                        if solver.use_local_branching
+                        else 0.0
+                    )
+                    repair_budget = solver.fixed_integer_repair_seconds
+                    no_start_fast_path = (
+                        solver.start_mode == "none" and int(self.model.NumStart) == 0
+                    )
+                    if not no_start_fast_path:
+                        start_preparation_started = time.perf_counter()
+                        if solver.start_mode == "none":
+                            self._clear_mip_starts()
+                        elif solver.start_mode == "courier":
+                            self._set_courier_only_start()
+                        elif solver.start_mode in {"network", "network_and_courier"}:
+                            include_courier = solver.start_mode == "network_and_courier"
+                            if network_budget > 1e-9 and self.chi_keys:
+                                self._construct_network_start_with_budgets(
+                                    network_budget,
+                                    repair_budget,
+                                    local_budget,
+                                    maximum_start_budget,
+                                    solver,
+                                    include_courier_start=include_courier,
+                                )
+                            elif include_courier:
+                                self._set_courier_only_start()
+                            else:
+                                self._clear_mip_starts()
+                        elif network_budget > 1e-9 and self.chi_keys:
+                            self._construct_network_start_with_budgets(
+                                network_budget,
+                                repair_budget,
+                                local_budget,
+                                maximum_start_budget,
+                                solver,
+                                include_courier_start=True,
+                            )
+                        else:
+                            self._set_courier_only_start()
+                        self.start_preparation_runtime = (
+                            time.perf_counter() - start_preparation_started
+                        )
+
+            if external_start is not None:
+                external_started = time.perf_counter()
+                self._append_external_start(
+                    external_start,
+                    external_start_source,
+                )
+                self.start_preparation_runtime += (
+                    time.perf_counter() - external_started
+                )
+
+            # Auxiliary solves restore these transactionally.  Set the full
+            # matched A--E parameter contract again at the main-solve boundary,
+            # even when no budget remains and optimize must be skipped.
+            self.model.Params.MIPGap = solver.mip_gap
+            self.model.Params.Method = solver.root_relaxation_method
+            self.model.Params.MIQCPMethod = solver.miqcp_method
+            self.model.Params.CutPasses = solver.root_cut_passes
+            legacy_heuristics = 0.5 if self.network_start_used else 0.25
+            self.model.Params.MIPFocus = (
+                1 if solver.mip_focus is None else solver.mip_focus
             )
-        else:
-            # Failure of the short auxiliary search is evidence that primal
-            # discovery is difficult, not a reason to switch the main solve
-            # to a proof-oriented default.  Keep an incumbent-focused search
-            # so the large screened instances still have a realistic chance
-            # to improve on the always-feasible all-courier start.
-            self.model.Params.MIPFocus = 1
-            self.model.Params.Heuristics = 0.25
-            self.model.Params.NoRelHeurTime = min(
-                solver.no_rel_heur_seconds,
-                0.05 * remaining,
+            self.model.Params.Heuristics = (
+                legacy_heuristics if solver.heuristics is None else solver.heuristics
             )
-        if (
-            solver.use_user_cuts
-            and solver.max_root_cut_rounds > 0
-            and solver.max_cuts_per_round > 0
-        ):
-            self.model.Params.PreCrush = 1
-            self.model.optimize(self._root_user_cut_callback(solver))
-        else:
-            self.model.optimize()
-        self.main_solve_runtime = float(self.model.Runtime)
-        self.total_runtime = self.network_start_runtime + self.main_solve_runtime
+            self.model.Params.NoRelHeurTime = (
+                min(
+                    solver.no_rel_heur_seconds,
+                    0.05
+                    * max(
+                        0.1,
+                        solver.time_limit - self.network_start_runtime,
+                    ),
+                )
+                if solver.no_rel_heur_time is None
+                else solver.no_rel_heur_time
+            )
+            cuts_enabled = (
+                solver.use_user_cuts
+                and solver.max_root_cut_rounds > 0
+                and solver.max_cuts_per_round > 0
+            )
+            if cuts_enabled:
+                self.model.Params.PreCrush = 1
+
+            remaining = algorithm_deadline - time.perf_counter()
+            if remaining <= 0.0:
+                self.budget_exhausted_before_main_solve = True
+                self.model.Params.TimeLimit = 0.0
+            else:
+                self.model.Params.TimeLimit = remaining
+                main_solve_wall_started = time.perf_counter()
+                self.main_solve_started = True
+                self.optimize_called = True
+                try:
+                    if cuts_enabled or solver.collect_progress:
+                        self.model.optimize(self._solver_callback(solver))
+                    else:
+                        self.model.optimize()
+                finally:
+                    try:
+                        self.main_solve_runtime = float(self.model.Runtime)
+                    except MemoryError:
+                        raise
+                    except Exception:
+                        self.main_solve_runtime = max(
+                            0.0,
+                            time.perf_counter() - main_solve_wall_started,
+                        )
+        finally:
+            self.total_runtime = time.perf_counter() - budget_wall_start
+
+        if solver.collect_progress:
+            if self.optimize_called:
+                solution_count = int(self.model.SolCount)
+                incumbent = (
+                    self._finite_callback_value(self.model.ObjVal)
+                    if solution_count > 0
+                    else None
+                )
+                bound = self._finite_callback_value(self.model.ObjBound)
+                node_count = float(self.model.NodeCount)
+                status = int(self.model.Status)
+            else:
+                solution_count = 0
+                incumbent = None
+                bound = None
+                node_count = 0.0
+                status = int(GRB.LOADED)
+            if self.first_incumbent_time is None and incumbent is not None:
+                self.first_incumbent_time = self.main_solve_runtime
+                self.first_incumbent_objective = incumbent
+            self.progress_events.append(
+                {
+                    "event": "final",
+                    "runtime_seconds": self.main_solve_runtime,
+                    "total_algorithm_runtime_seconds": self.total_runtime,
+                    "budget_exhausted_before_main_solve": (
+                        self.budget_exhausted_before_main_solve
+                    ),
+                    "main_solve_started": self.main_solve_started,
+                    "optimize_called": self.optimize_called,
+                    "incumbent": incumbent,
+                    "bound": bound,
+                    "relative_gap": self._relative_gap(incumbent, bound),
+                    "node_count": node_count,
+                    "solution_count": solution_count,
+                    "status": status,
+                }
+            )
+        if not self.optimize_called:
+            return False
         return self.model.SolCount > 0
 
     def export_incumbent_start(self) -> dict[str, float]:
@@ -1150,6 +2127,487 @@ class MLNDModel:
         self.external_start_installed = True
         self.external_start_source = source
         self.external_start_matched_variables = matched
+
+    def _objective_start_cycle_support(
+        self,
+        corridor: Arc,
+        *,
+        deadline: float | None = None,
+    ) -> tuple[
+        tuple[str, ...],
+        tuple[Arc, ...],
+        str,
+        float,
+        float,
+        tuple[str, ...],
+        tuple[tuple[str, float], ...],
+        float,
+        float,
+    ] | None:
+        """Return the cheapest cycle valid for f884's system-wide energy pool."""
+
+        i, j = corridor
+        cfg = self.inst.config
+        usable_time = cfg.usable_battery_time_hours
+        candidates: list[
+            tuple[
+                tuple[float, float, float, str, tuple[str, ...]],
+                tuple[str, ...],
+                tuple[Arc, ...],
+                str,
+                float,
+                float,
+                tuple[str, ...],
+                tuple[tuple[str, float], ...],
+                float,
+                float,
+            ]
+        ] = []
+        for base in sorted(self.inst.L):
+            if deadline is not None and time.perf_counter() > deadline:
+                raise TimeoutError("objective partial-start preparation timed out")
+            cycle_arcs = ((base, i), (i, j), (j, base))
+            if any(arc not in self.inst.A_F for arc in cycle_arcs):
+                continue
+            option_sets = tuple(
+                tuple(sorted(self.inst.route_options[arc]))
+                for arc in cycle_arcs
+            )
+            if any(not options for options in option_sets):
+                continue
+            for selected_options in itertools.product(*option_sets):
+                if deadline is not None and time.perf_counter() > deadline:
+                    raise TimeoutError(
+                        "objective partial-start preparation timed out"
+                    )
+                facilities = {base, i, j}
+                active_connections: set[Arc] = set(cycle_arcs)
+                route_distance = 0.0
+                route_time = 0.0
+                incoming_h: set[str] = set()
+                outgoing_route_time_by_h: dict[str, float] = {}
+                swap_events = 0.0
+                feasible = True
+                for (u, v), option in zip(cycle_arcs, selected_options):
+                    if deadline is not None and time.perf_counter() > deadline:
+                        raise TimeoutError(
+                            "objective partial-start preparation timed out"
+                        )
+                    if option != DIRECT_ROUTE:
+                        if (
+                            (u, option) not in self.inst.A_Y
+                            or (option, v) not in self.inst.A_Y
+                        ):
+                            feasible = False
+                            break
+                        facilities.add(option)
+                        active_connections.update(((u, option), (option, v)))
+                        swap_events += 1.0
+                    route_distance += self.inst.route_distance[u, v, option]
+                    selected_route_time = self.inst.route_time[u, v, option]
+                    route_time += selected_route_time
+                    if v in self.inst.H:
+                        incoming_h.add(v)
+                    if u in self.inst.H:
+                        outgoing_route_time_by_h[u] = selected_route_time
+                if not feasible:
+                    continue
+                base_departures = float(
+                    sum(u in self.inst.L for u, _v in cycle_arcs)
+                )
+                # Queue population is nonnegative, so a route that already
+                # exceeds the exact system pool cannot become feasible later.
+                if (
+                    route_time
+                    > usable_time * (base_departures + swap_events) + 1e-9
+                ):
+                    continue
+                energy_reserve = (
+                    usable_time * (base_departures + swap_events) - route_time
+                )
+                fixed_proxy = math.fsum(
+                    self.inst.facility_cost(node) for node in facilities
+                ) + math.fsum(
+                    self.inst.arc_activation_cost[arc]
+                    for arc in active_connections
+                )
+                variable_proxy = (
+                    cfg.flight_cost_per_km * route_distance
+                    + cfg.drone_cost_per_hour * route_time
+                )
+                # Prefer the cheapest route once it reserves a modest quarter
+                # battery-hour fraction for queue population.  If no option
+                # reaches that reserve, retain the energy-richest route.  The
+                # exact aggregate gate in evaluate_objective_support remains
+                # authoritative, so this ranking never certifies feasibility.
+                candidates.append(
+                    (
+                        (
+                            float(energy_reserve + 1e-9 < 0.25 * usable_time),
+                            (
+                                fixed_proxy + variable_proxy
+                                if energy_reserve + 1e-9 >= 0.25 * usable_time
+                                else -energy_reserve
+                            ),
+                            fixed_proxy + variable_proxy,
+                            base,
+                            tuple(selected_options),
+                        ),
+                        tuple(sorted(facilities)),
+                        tuple(sorted(active_connections)),
+                        base,
+                        route_distance,
+                        route_time,
+                        tuple(sorted(incoming_h)),
+                        tuple(sorted(outgoing_route_time_by_h.items())),
+                        base_departures,
+                        swap_events,
+                    )
+                )
+        if not candidates:
+            return None
+        (
+            _,
+            facilities,
+            active_connections,
+            base,
+            distance,
+            route_time,
+            incoming_h,
+            outgoing_route_times,
+            base_departures,
+            swap_events,
+        ) = min(candidates)
+        return (
+            facilities,
+            active_connections,
+            base,
+            distance,
+            route_time,
+            incoming_h,
+            outgoing_route_times,
+            base_departures,
+            swap_events,
+        )
+
+    def _objective_start_market_costs(
+        self,
+        market: Market,
+        corridor: Arc,
+    ) -> tuple[float, float, float, float, float]:
+        """Return offered demand and rider/pickup costs for one proxy option."""
+
+        origin, destination = market
+        i, j = corridor
+        demand = self.inst.h_od[market]
+        first = self.inst.feeder_rider_cost(origin, i)
+        direct = self.inst.direct_rider_cost(origin, destination)
+        if self.mode == "LO":
+            offered = demand * self.inst.choice_share.get((origin, destination, j), 0.0)
+            return offered, direct, first, 0.0, self.inst.locker_pickup_cost(j)
+        last = self.inst.feeder_rider_cost(j, destination)
+        # MX alpha remains undefined.  Conservatively charge the full last-mile
+        # rider cost instead of crediting mutually incompatible display lockers
+        # independently across OD markets.
+        return demand, direct, first, last, 0.0
+
+    def _build_objective_start_opportunities(
+        self,
+        *,
+        deadline: float,
+        max_candidates: int,
+    ) -> tuple[list[ObjectiveAwareOpportunity], dict[str, int]]:
+        """Create a deterministic short list without solving an auxiliary model."""
+
+        cfg = self.inst.config
+
+        def check_budget() -> None:
+            if time.perf_counter() > deadline:
+                raise TimeoutError("objective partial-start preparation timed out")
+
+        rough: list[tuple[float, float, Arc]] = []
+        for corridor in self.corridors:
+            check_budget()
+            i, j = corridor
+            markets = sorted({(key[0], key[1]) for key in self.chi_by_corridor[corridor]})
+            saving = 0.0
+            volume = 0.0
+            for market in markets:
+                offered, direct, first, last, pickup = self._objective_start_market_costs(
+                    market, corridor
+                )
+                if offered <= 0.0:
+                    continue
+                flight_lower = cfg.flight_cost_per_km * self.inst.distance(i, j)
+                saving += offered * max(
+                    0.0,
+                    direct - first - last - pickup - flight_lower,
+                )
+                volume += offered
+            rough.append((saving, volume, corridor))
+        rough.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        # The downstream planner can retain at most ``max_candidates`` starts.
+        # A deterministic three-to-one corridor pool leaves room for alternate
+        # supports without spending the five-percent budget materializing OD
+        # opportunities that cannot reach the installed start pool.
+        shortlist_size = min(len(rough), max(6, 3 * max_candidates))
+        shortlisted = rough[:shortlist_size]
+
+        opportunities: list[ObjectiveAwareOpportunity] = []
+        supported_cycles = 0
+        for _, _, corridor in shortlisted:
+            check_budget()
+            support = self._objective_start_cycle_support(
+                corridor,
+                deadline=deadline,
+            )
+            if support is None:
+                continue
+            supported_cycles += 1
+            (
+                facilities,
+                active_connections,
+                base,
+                route_distance,
+                route_time,
+                incoming_h,
+                outgoing_route_times,
+                base_departures,
+                swap_events,
+            ) = support
+            facility_costs = tuple(
+                (node, self.inst.facility_cost(node)) for node in facilities
+            )
+            connection_costs = tuple(
+                (arc, self.inst.arc_activation_cost[arc])
+                for arc in active_connections
+            )
+            markets = sorted({(key[0], key[1]) for key in self.chi_by_corridor[corridor]})
+            for reliability_index, reliability in enumerate(cfg.availability_levels):
+                for market in markets:
+                    check_budget()
+                    offered, direct, first, last, pickup = (
+                        self._objective_start_market_costs(market, corridor)
+                    )
+                    if offered <= 0.0:
+                        continue
+                    opportunities.append(
+                        ObjectiveAwareOpportunity(
+                            market=market,
+                            corridor=corridor,
+                            reliability_index=reliability_index,
+                            reliability=reliability,
+                            offered_demand=offered,
+                            support_facilities=facilities,
+                            open_h=tuple(sorted(corridor)),
+                            active_connections=active_connections,
+                            facility_costs=facility_costs,
+                            connection_costs=connection_costs,
+                            idle_state=base,
+                            incoming_h=incoming_h,
+                            outgoing_route_time_hours=outgoing_route_times,
+                            display_locker=j if self.mode == "LO" else None,
+                            display_blockers=(
+                                tuple(self.inst.closer_lockers[market[1], j])
+                                if self.mode == "LO"
+                                else ()
+                            ),
+                            direct_unit_cost=direct,
+                            first_mile_unit_cost=first,
+                            last_mile_unit_cost=last,
+                            mx_pickup_unit_cost=pickup,
+                            flight_unit_cost=cfg.flight_cost_per_km * route_distance,
+                            route_time_hours=route_time,
+                            base_departures_per_unit=base_departures,
+                            swap_events_per_unit=swap_events,
+                        )
+                    )
+        return opportunities, {
+            "eligible_corridor_count": len(rough),
+            "shortlisted_corridor_count": len(shortlisted),
+            "supported_cycle_count": supported_cycles,
+            "mx_alpha_key_count": len(self.alpha_keys),
+        }
+
+    def _construct_objective_partial_starts(
+        self,
+        budget_seconds: float,
+        solver: SolverConfig,
+    ) -> None:
+        """Install bounded objective-aware partial starts without optimizing."""
+
+        if self.mode not in _OBJECTIVE_PARTIAL_START_MODES:
+            supported = ", ".join(sorted(_OBJECTIVE_PARTIAL_START_MODES))
+            raise ValueError(
+                "objective-partial start is supported only for modes "
+                f"{supported}; got {self.mode!r}"
+            )
+
+        started = time.perf_counter()
+        telemetry = self._empty_objective_start_telemetry()
+        telemetry.update(
+            {
+                "enabled": True,
+                "budget_seconds": budget_seconds,
+                "legacy_start_mode_ignored": solver.start_mode,
+            }
+        )
+        self.objective_partial_start_telemetry = telemetry
+        if budget_seconds <= 0.0:
+            self._clear_mip_starts()
+            telemetry["timed_out"] = True
+            telemetry["fallback_reason"] = "zero_preparation_budget"
+            telemetry["rejection_reasons"] = ["budget_exhausted"]
+            telemetry["preparation_seconds"] = time.perf_counter() - started
+            return
+
+        deadline = started + budget_seconds
+        try:
+            opportunities, construction_counts = (
+                self._build_objective_start_opportunities(
+                    deadline=deadline,
+                    max_candidates=solver.objective_partial_start_max_candidates,
+                )
+            )
+            telemetry.update(construction_counts)
+            remaining = max(0.0, deadline - time.perf_counter())
+            direct_baseline = max(self.courier_only_baseline, 0.0)
+            planning_config = ObjectiveAwarePlanningConfig(
+                candidate_lockers=tuple(sorted(self.inst.H)),
+                capacity_options=tuple(
+                    CapacityOption(index, rate, cfg_cost)
+                    for index, (rate, cfg_cost) in enumerate(
+                        zip(
+                            self.inst.config.locker_service_rates,
+                            self.inst.config.locker_capacity_costs,
+                        )
+                    )
+                ),
+                max_locker_time_hours=self.inst.config.max_locker_time_hours,
+                usable_battery_time_hours=(
+                    self.inst.config.usable_battery_time_hours
+                ),
+                drone_cost_per_hour=self.inst.config.drone_cost_per_hour,
+                max_candidates=solver.objective_partial_start_max_candidates,
+                min_open_h=2,
+                min_service=max(1e-6, 0.01 * self.inst.total_demand),
+                min_savings=max(1e-6, 1e-4 * direct_baseline),
+            )
+            plan = plan_objective_aware_partial_starts(
+                opportunities,
+                planning_config,
+                budget_seconds=remaining,
+            )
+            telemetry.update(
+                {
+                    "opportunity_count": plan.opportunity_count,
+                    "singleton_support_count": plan.singleton_support_count,
+                    "evaluated_support_count": plan.evaluated_support_count,
+                    "network_candidate_count": len(plan.candidates),
+                    "heuristic_candidate_count": len(plan.candidates),
+                    "rejection_reasons": list(plan.rejection_reasons),
+                    "timed_out": plan.timed_out,
+                }
+            )
+            if plan.timed_out or not plan.candidates:
+                self._clear_mip_starts()
+                telemetry["fallback_reason"] = (
+                    "budget_exhausted" if plan.timed_out else "no_reliable_network_candidate"
+                )
+                return
+
+            assignments = [
+                build_candidate_partial_assignment(
+                    candidate,
+                    self.vars,
+                    mode=self.mode,
+                )
+                for candidate in plan.candidates
+            ]
+            # Network hints occupy the first start slots.  The all-courier
+            # completion is a last-resort safety start, and exists only because
+            # at least one material network candidate passed every gate above.
+            assignments.append(build_all_courier_partial_assignment(self.vars))
+            install_partial_mip_starts(self.model, assignments)
+            elapsed = time.perf_counter() - started
+            if elapsed > budget_seconds + 1e-9:
+                self._clear_mip_starts()
+                telemetry["timed_out"] = True
+                telemetry["fallback_reason"] = "budget_exhausted_after_install"
+                telemetry["rejection_reasons"] = list(
+                    dict.fromkeys(
+                        [*telemetry["rejection_reasons"], "budget_exhausted"]
+                    )
+                )
+                return
+            telemetry.update(
+                {
+                    "used": True,
+                    "safety_start_count": 1,
+                    "installed_start_count": len(assignments),
+                    "candidate_supports": [
+                        {
+                            "candidate_id": candidate.candidate_id,
+                            "move": candidate.move,
+                            "selected_supports": [
+                                list(item) for item in candidate.selected_supports
+                            ],
+                            "open_h": list(candidate.open_h),
+                            "open_facilities": list(candidate.open_facilities),
+                            "active_connections": [
+                                list(item) for item in candidate.active_connections
+                            ],
+                            "capacity_levels": [
+                                list(item) for item in candidate.capacity_levels
+                            ],
+                            "forced_closed_h": list(candidate.forced_closed_h),
+                            "forced_off_connections": [
+                                list(item)
+                                for item in candidate.forced_off_connections
+                            ],
+                            "estimated_service": candidate.estimated_service,
+                            "estimated_service_fraction": (
+                                candidate.service_fraction
+                            ),
+                            "fraction_basis_service": (
+                                candidate.estimated_service
+                                / candidate.service_fraction
+                            ),
+                            "proxy_only": True,
+                            "score": candidate.score,
+                            "objective_breakdown": asdict(candidate.objective),
+                            "energy_proxy": {
+                                "system_energy_use": candidate.system_energy_use,
+                                "system_energy_supply": candidate.system_energy_supply,
+                                "base_departure_population": (
+                                    candidate.base_departure_population
+                                ),
+                                "swap_event_population": (
+                                    candidate.swap_event_population
+                                ),
+                            },
+                            "assigned_variable_count": len(assignments[index]),
+                        }
+                        for index, candidate in enumerate(plan.candidates)
+                    ],
+                }
+            )
+        except MemoryError:
+            raise
+        except TimeoutError:
+            self._clear_mip_starts()
+            telemetry["timed_out"] = True
+            telemetry["fallback_reason"] = "budget_exhausted"
+            telemetry["rejection_reasons"] = ["budget_exhausted"]
+        except Exception as exc:
+            # This development heuristic must never jeopardize the exact solve.
+            # The exception type is enough to audit the fail-closed fallback;
+            # instance contents and environment details are deliberately omitted.
+            self._clear_mip_starts()
+            telemetry["fallback_reason"] = f"unreliable_{type(exc).__name__}"
+            telemetry["rejection_reasons"] = ["unreliable_preparation"]
+        finally:
+            telemetry["preparation_seconds"] = time.perf_counter() - started
 
     def _rank_lo_network_start_candidates(
         self, solver: SolverConfig
@@ -1269,6 +2727,7 @@ class MLNDModel:
         *,
         time_limit: float,
         alpha_target: tuple[str, str] | None,
+        solver: SolverConfig | None = None,
         required_physical_nodes: frozenset[str] | None = None,
         allowed_physical_nodes: frozenset[str] | None = None,
         positive_chi_keys: tuple[ChiKey, ...] = (),
@@ -1280,6 +2739,7 @@ class MLNDModel:
             raise ValueError("network-start attempt time_limit must be positive")
         if positive_offer < 0.0 or not math.isfinite(positive_offer):
             raise ValueError("positive_offer must be finite and nonnegative")
+        active_solver = solver or SolverConfig()
 
         x = self.vars["x"]
         alpha = self.vars["alpha"]
@@ -1339,13 +2799,19 @@ class MLNDModel:
             self.model.Params.MIPFocus = 1
             self.model.Params.Heuristics = 0.5
             self.model.Params.NoRelHeurTime = min(5.0, 0.25 * time_limit)
+            self.model.Params.Method = active_solver.network_start_method
+            self.model.Params.MIQCPMethod = active_solver.miqcp_method
             self.model.update()
             self.model.optimize()
             if self.model.SolCount > 0:
                 objective = float(self.model.ObjVal)
                 values = {variable: float(variable.X) for variable in model_variables}
                 attempt = _NetworkStartAttempt(
-                    seed=capture_incumbent(self.model, self.vars),
+                    seed=capture_incumbent(
+                        self.model,
+                        self.vars,
+                        include_y=active_solver.local_branching_include_y,
+                    ),
                     objective=objective,
                     values=values,
                 )
@@ -1361,12 +2827,29 @@ class MLNDModel:
                 setattr(self.model.Params, name, value)
         return attempt
 
-    def _construct_network_start(self, time_limit: float, solver: SolverConfig) -> None:
-        """Construct a nontrivial mode-valid start within one wall-clock budget."""
+    def _construct_network_start_with_budgets(
+        self,
+        network_time_limit: float,
+        fixed_integer_repair_time_limit: float,
+        local_branching_time_limit: float,
+        maximum_start_budget: float,
+        solver: SolverConfig,
+        *,
+        include_courier_start: bool,
+    ) -> None:
+        """Construct an f884 network start inside one absolute preparation budget."""
 
         start_wall_time = time.perf_counter()
-        deadline = start_wall_time + time_limit
+        network_deadline = start_wall_time + network_time_limit
+        overall_deadline = start_wall_time + maximum_start_budget
         attempt: _NetworkStartAttempt | None = None
+        relevant: tuple[ChiKey, ...] = ()
+
+        def install_fallback_start() -> None:
+            if include_courier_start:
+                self._set_courier_only_start()
+            else:
+                self._clear_mip_starts()
 
         if self.mode == "LO":
             selection_started = time.perf_counter()
@@ -1381,7 +2864,7 @@ class MLNDModel:
             shortlisted = candidates[:_MAX_LO_NETWORK_START_ATTEMPTS]
             attempted_keys: list[tuple[str, str]] = []
             for index, candidate in enumerate(shortlisted):
-                remaining = deadline - time.perf_counter()
+                remaining = network_deadline - time.perf_counter()
                 attempts_left = len(shortlisted) - index
                 attempt_time = remaining / attempts_left
                 if remaining < 0.1 or attempt_time < 0.1:
@@ -1389,17 +2872,25 @@ class MLNDModel:
                 attempted_keys.append(candidate.alpha_key)
                 self.network_start_attempted_keys = tuple(attempted_keys)
                 self.network_start_key = candidate.alpha_key
+                relevant_by_destination = getattr(
+                    self,
+                    "chi_by_destination_locker",
+                    {},
+                )
+                relevant = tuple(
+                    relevant_by_destination.get(candidate.alpha_key, ())
+                )
                 attempt = self._solve_network_start_attempt(
                     time_limit=attempt_time,
+                    solver=solver,
                     alpha_target=candidate.alpha_key,
                 )
                 if attempt is not None:
                     break
         else:
-            # MX and HD can first be seeded by a home-delivery corridor.  This
-            # avoids fixing a customer display in MX, whose nearest-open-locker
-            # implications can otherwise suppress an economically useful part
-            # of the physical network.  HD has no alpha variables at all.
+            # MX and HD retain the f884 exact auxiliary: one profitable H-H
+            # corridor, one required physical cycle, and a broad but bounded H
+            # support.  Only the temporary auxiliary bounds are restricted.
             def corridor_score(arc: Arc) -> tuple[float, float, Arc]:
                 i, j = arc
                 saving = 0.0
@@ -1412,7 +2903,8 @@ class MLNDModel:
                         self.inst.direct_rider_cost(origin, destination)
                         - self.inst.feeder_rider_cost(origin, i)
                         - self.inst.feeder_rider_cost(j, destination)
-                        - self.inst.config.flight_cost_per_km * self.inst.distance(i, j)
+                        - self.inst.config.flight_cost_per_km
+                        * self.inst.distance(i, j)
                     )
                     saving += amount * max(0.0, unit_saving)
                     volume += amount
@@ -1488,14 +2980,15 @@ class MLNDModel:
                     self.inst.h_od[market] for market in accessible_markets
                 )
                 positive_offer = min(1.0, 0.01 * market_mass)
-                remaining = deadline - time.perf_counter()
+                remaining = network_deadline - time.perf_counter()
                 auxiliary_time = min(
                     remaining,
-                    max(10.0, 0.75 * time_limit),
+                    max(10.0, 0.75 * network_time_limit),
                 )
                 if auxiliary_time >= 0.1:
                     attempt = self._solve_network_start_attempt(
                         time_limit=auxiliary_time,
+                        solver=solver,
                         alpha_target=None,
                         required_physical_nodes=required_physical_nodes,
                         allowed_physical_nodes=allowed_physical_nodes,
@@ -1503,11 +2996,10 @@ class MLNDModel:
                         positive_offer=positive_offer,
                     )
 
-        start_values: Mapping[gp.Var, float] = {}
+        self.network_construction_runtime = time.perf_counter() - start_wall_time
         seed: PrimalSeed | None = None
         if attempt is not None:
             seed = attempt.seed
-            start_values = attempt.values
             self.network_start_found = True
             self.network_start_used = True
             self.network_start_objective = attempt.objective
@@ -1517,8 +3009,61 @@ class MLNDModel:
                 "lockers": sum(seed_x[node] for node in self.inst.H),
                 "swap_stations": sum(seed_x[node] for node in self.inst.E),
             }
+            self.network_start_open_h_count = self.network_start_seed_open_counts[
+                "lockers"
+            ]
+            self.network_start_open_facility_count = sum(
+                self.network_start_seed_open_counts.values()
+            )
+            self.network_start_relevant_chi_count = len(relevant)
+            levels = getattr(
+                getattr(self.inst, "config", None),
+                "availability_levels",
+                (),
+            )
+            chi = self.vars.get("chi")
+            self.network_start_service_per_hour = (
+                math.fsum(
+                    levels[key[4]] * float(attempt.values[chi[key]])
+                    for key in relevant
+                )
+                if relevant and levels and chi is not None
+                else 0.0
+            )
 
-        local_time = max(0.0, deadline - time.perf_counter())
+        remaining_start_budget = max(0.0, overall_deadline - time.perf_counter())
+        repair_time = min(
+            fixed_integer_repair_time_limit,
+            remaining_start_budget,
+        )
+        start_is_installed = False
+        if seed is not None and repair_time >= 0.1:
+            repair = repair_fixed_integer_design_start(
+                self.model,
+                seed,
+                FixedIntegerRepairConfig(
+                    time_limit=repair_time,
+                    mip_gap=min(0.01, solver.mip_gap),
+                    method=solver.network_start_method,
+                    miqcp_method=solver.miqcp_method,
+                    integrality_tolerance=solver.integer_feasibility_tol,
+                    output_flag=solver.output_flag,
+                ),
+            )
+            self.fixed_integer_repair_runtime = repair.runtime
+            self.fixed_integer_repair_found = repair.found_incumbent
+            self.fixed_integer_repair_objective = repair.installed_objective
+            self.fixed_integer_repair_status = repair.status
+            self.fixed_integer_repair_solution_count = repair.solution_count
+            self.fixed_integer_repair_fixed_count = repair.fixed_integer_count
+            self.network_start_objective = repair.installed_objective
+            start_is_installed = True
+
+        remaining_after_repair = max(0.0, overall_deadline - time.perf_counter())
+        local_time = min(
+            local_branching_time_limit if repair_time < 0.1 else 0.0,
+            remaining_after_repair,
+        )
         if seed is not None and solver.use_local_branching and local_time >= 0.1:
             result = improve_mip_start(
                 self.model,
@@ -1528,6 +3073,7 @@ class MLNDModel:
                     radius=solver.local_branching_radius,
                     time_limit=local_time,
                     mip_gap=min(0.01, solver.mip_gap),
+                    include_y=solver.local_branching_include_y,
                     output_flag=solver.output_flag,
                 ),
             )
@@ -1538,22 +3084,56 @@ class MLNDModel:
             self.local_branching_solution_count = result.solution_count
             self.local_branching_hamming_distance = result.hamming_distance
             self.network_start_objective = result.installed_objective
-        elif self.network_start_used:
+            start_is_installed = True
+        elif self.network_start_used and not start_is_installed:
+            if seed is None:
+                raise RuntimeError("network start was marked used without a seed")
+            model_variables = self.model.getVars()
             self.model.NumStart = 1
             self.model.update()
             self.model.Params.StartNumber = 0
-            for variable, value in start_values.items():
-                variable.Start = value
+            self.model.setAttr(
+                GRB.Attr.Start,
+                model_variables,
+                [float(seed.values[variable]) for variable in model_variables],
+            )
             self.model.update()
 
         if self.network_start_used:
-            self._append_network_fallback_starts()
+            if include_courier_start:
+                # Preserve f884's no-keyword helper call so tests and narrow
+                # development hooks that replace the method remain compatible.
+                self._append_network_fallback_starts()
+            else:
+                self._append_network_fallback_starts(
+                    include_courier_start=False
+                )
         else:
-            self._set_courier_only_start()
+            install_fallback_start()
         self.network_start_runtime = time.perf_counter() - start_wall_time
 
-    def _append_network_fallback_starts(self) -> None:
-        """Keep the complete network start and append partial and courier fallbacks.
+    def _construct_network_start(
+        self,
+        time_limit: float,
+        solver: SolverConfig,
+    ) -> None:
+        """f884-compatible wrapper around the explicit-budget implementation."""
+
+        self._construct_network_start_with_budgets(
+            time_limit,
+            solver.fixed_integer_repair_seconds,
+            time_limit if solver.use_local_branching else 0.0,
+            time_limit,
+            solver,
+            include_courier_start=True,
+        )
+
+    def _append_network_fallback_starts(
+        self,
+        *,
+        include_courier_start: bool = True,
+    ) -> None:
+        """Keep the complete start and append structural and optional courier hints.
 
         The partial start fixes only the structural integer design
         ``(x, z, delta, alpha)``.  Every other variable is explicitly left
@@ -1582,7 +3162,7 @@ class MLNDModel:
 
         partial_index = int(self.model.NumStart)
         courier_index = partial_index + 1
-        self.model.NumStart = courier_index + 1
+        self.model.NumStart = partial_index + 1 + int(include_courier_start)
         self.model.update()
 
         self.model.Params.StartNumber = partial_index
@@ -1594,14 +3174,33 @@ class MLNDModel:
         for variable, value in structural_values:
             variable.Start = value
 
-        self.model.Params.StartNumber = courier_index
-        self._set_courier_only_start(reset_start_pool=False)
+        if include_courier_start:
+            self.model.Params.StartNumber = courier_index
+            self._set_courier_only_start(reset_start_pool=False)
         self.model.Params.StartNumber = 0
         self.model.update()
 
         self.network_partial_start_installed = True
         self.network_partial_start_index = partial_index
         self.network_partial_start_variable_count = len(structural_values)
+
+    def _clear_mip_starts(self) -> None:
+        """Remove every user start, including stale per-variable Start values."""
+
+        # A freshly built formal A--C model has no start pool.  Querying
+        # NumStart is constant time; avoid an otherwise million-variable scan
+        # and avoid charging the native baseline for work it does not need.
+        if int(self.model.NumStart) == 0:
+            return
+        self.model.update()
+        for variable in self.model.getVars():
+            variable.Start = GRB.UNDEFINED
+        self.model.update()
+        # Assigning the Start attribute itself creates a start slot in Gurobi,
+        # even when every value is undefined.  Drop that slot last so the
+        # native profile is observably and semantically start-free.
+        self.model.NumStart = 0
+        self.model.update()
 
     def _set_courier_only_start(self, *, reset_start_pool: bool = True) -> None:
         """Seed the always-feasible all-courier counterfactual."""

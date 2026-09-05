@@ -17,6 +17,9 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
 from src.model_contract import FORMULATION_ID as EXPECTED_FORMULATION_ID
+from src.model_contract import (
+    require_result_contract, require_same_result_schema,
+)
 from src.model_contract import RESULT_SCHEMA_VERSION as EXPECTED_SCHEMA_VERSION
 
 
@@ -128,20 +131,7 @@ def _same_number(left: Any, right: Any) -> bool:
 
 
 def _require_current_contract(payload: Mapping[str, Any], artifact: str) -> None:
-    schema_version = payload.get("schema_version")
-    formulation_id = payload.get("formulation_id")
-    if (
-        type(schema_version) is not int
-        or schema_version != EXPECTED_SCHEMA_VERSION
-        or not isinstance(formulation_id, str)
-        or formulation_id != EXPECTED_FORMULATION_ID
-    ):
-        raise ValueError(
-            f"legacy/incompatible {artifact}: expected "
-            f"schema_version={EXPECTED_SCHEMA_VERSION} and "
-            f"formulation_id={EXPECTED_FORMULATION_ID!r}; got "
-            f"schema_version={schema_version!r}, formulation_id={formulation_id!r}"
-        )
+    require_result_contract(payload, artifact)
 
 
 def _require_current_summary(summary: Mapping[str, Any]) -> None:
@@ -520,6 +510,7 @@ def _validate_scale_invariants(
     if len(rows) != len(evidence):
         raise ValueError("internal scale evidence count mismatch")
     invariant_fields = (
+        "summary_schema_version",
         "formulation_source_sha256",
         "implementation_sha256",
         "model_config_sha256",
@@ -696,6 +687,8 @@ def collect_scale_results(results_root: str | Path) -> list[dict[str, object]]:
             _require_current_summary(hd_summary)
             _require_current_summary(summary)
             _require_current_contract(run_config, "run_config")
+            require_same_result_schema(run_config, hd_summary, "HD summary")
+            require_same_result_schema(run_config, summary, "MX summary")
             if run_config.get("modes") != ["HD", "MX"]:
                 raise ValueError(
                     "scale run_config.modes must equal ['HD', 'MX']; "
@@ -960,7 +953,7 @@ def collect_scale_results(results_root: str | Path) -> list[dict[str, object]]:
             rows.append(
                 {
                     "formulation_id": EXPECTED_FORMULATION_ID,
-                    "summary_schema_version": EXPECTED_SCHEMA_VERSION,
+                    "summary_schema_version": summary["schema_version"],
                     "run_signature_sha256": run_signature_sha256,
                     "formulation_source_sha256": formulation_source_sha256,
                     "implementation_sha256": _implementation_sha256(run_config),
@@ -1182,7 +1175,7 @@ def _benchmark_context(rows: list[dict[str, object]]) -> str:
     limit = float(first["configured_time_limit_seconds"])
     target = 100.0 * float(first["target_mip_gap"])
     return (
-        f"Schema {EXPECTED_SCHEMA_VERSION} · {index_label} · {thread_label} · "
+        f"Schema {first['summary_schema_version']} · {index_label} · {thread_label} · "
         f"seed {int(first['solver_seed'])} · {limit:.0f}s configured budget per mode · "
         f"{2.0 * limit:.0f}s configured HD→MX end-to-end budget "
         "(barrier timeout checks may delay wall-clock return) · "

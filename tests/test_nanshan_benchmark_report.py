@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pytest
 
+from src.model_contract import FORMULATION_ID, RESULT_SCHEMA_VERSION
 from src.utils import nanshan_benchmark_report as report
 
 
@@ -35,6 +36,8 @@ def _summary(
     saving = baseline - incumbent
     gap = abs(incumbent - bound) / incumbent
     return {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "formulation_id": FORMULATION_ID,
         "run_signature_sha256": RUN_SIGNATURE_SHA256,
         "mode": mode,
         "status": 9,
@@ -163,6 +166,8 @@ def _summaries(network_modes: set[str]) -> dict[str, dict[str, object]]:
 
 def _run_config(candidate_lockers: int = 120) -> dict[str, object]:
     return {
+        "schema_version": RESULT_SCHEMA_VERSION,
+        "formulation_id": FORMULATION_ID,
         "run_signature_sha256": RUN_SIGNATURE_SHA256,
         "modes": ["HD", "MX", "LO"],
         "cross_mode_start_policy": "HD_to_later_MX_by_variable_name",

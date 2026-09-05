@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from src.model_contract import FORMULATION_ID, RESULT_SCHEMA_VERSION
+from src.model_contract import (
+    require_result_contract, require_same_result_schema,
+    require_validation_binding, runtime_contract,
+)
 
 
 RUN_LEDGER_FIELDS = (
@@ -29,6 +32,7 @@ RUN_LEDGER_FIELDS = (
     "scenario_id",
     "mode",
     "schema_version",
+    "runtime_contract",
     "formulation_id",
     "run_signature_sha256",
     "git_head",
@@ -220,15 +224,7 @@ def _load_object(path: Path) -> Mapping[str, Any]:
 
 
 def _require_contract(payload: Mapping[str, Any], path: Path) -> None:
-    if (
-        type(payload.get("schema_version")) is not int
-        or payload.get("schema_version") != RESULT_SCHEMA_VERSION
-        or payload.get("formulation_id") != FORMULATION_ID
-    ):
-        raise ValueError(
-            f"incompatible artifact {path}: expected schema_version="
-            f"{RESULT_SCHEMA_VERSION} and formulation_id={FORMULATION_ID!r}"
-        )
+    require_result_contract(payload, path)
 
 
 def _required_sha256(value: Any, field: str, path: Path) -> str:
@@ -312,6 +308,7 @@ def _row_for_mode(
 ) -> dict[str, Any]:
     summary = _load_object(summary_path)
     _require_contract(summary, summary_path)
+    require_same_result_schema(run_config, summary, summary_path)
     run_signature = _required_sha256(
         run_config.get("run_signature_sha256"), "run_signature_sha256", run_dir
     )
@@ -340,6 +337,7 @@ def _row_for_mode(
     validation: Mapping[str, Any] = {}
     if validation_path.is_file():
         validation = _load_object(validation_path)
+        require_validation_binding(validation, run_config, validation_path)
 
     relative = run_dir.relative_to(root).as_posix()
     experiment_id = run_config.get("experiment_id")
@@ -361,6 +359,7 @@ def _row_for_mode(
         "scenario_id": scenario_id,
         "mode": mode,
         "schema_version": summary.get("schema_version"),
+        "runtime_contract": runtime_contract(summary["schema_version"]),
         "formulation_id": summary.get("formulation_id"),
         "run_signature_sha256": run_signature,
         "git_head": _nested(run_config, "git", "head"),

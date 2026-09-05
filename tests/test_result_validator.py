@@ -308,11 +308,17 @@ def _make_package(tmp_path: Path) -> Path:
     return root
 
 
-def test_valid_package_writes_validation_artifacts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source_schema", [5, 6])
+def test_valid_package_writes_validation_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_schema: int
+) -> None:
+    monkeypatch.setitem(globals(), "RESULT_SCHEMA_VERSION", source_schema)
     root = _make_package(tmp_path)
     report = validate_run(root)
 
     assert report["valid"] is True
+    assert report["result_schema_version"] == source_schema
+    assert report["validator_id"] == "mlnd-schema5-schema6-independent-validator-v2"
     assert report["check_counts"]["fail"] == 0
     assert report["interpretation_scope"] == "screened_candidate_model"
     assert report["eligible_for_unscreened_exactness_claim"] is False
@@ -363,3 +369,15 @@ def test_hash_tampering_is_rejected(tmp_path: Path) -> None:
     failed = {check["check_id"] for check in report["checks"] if check["status"] == "FAIL"}
     assert "artifact_hashes" in failed
     assert main([str(root)]) == 1
+
+
+def test_resealed_cross_schema_summary_fails_contract_validation(tmp_path: Path) -> None:
+    root = _make_package(tmp_path)
+    path = root / "MX/summary.json"
+    summary = json.loads(path.read_text())
+    summary["schema_version"] = 5
+    path.write_text(json.dumps(summary))
+    _seal(root)
+    report = validate_run(root)
+    assert report["valid"] is False
+    assert any(check["check_id"] == "summary_schema_version" and check["status"] == "FAIL" for check in report["checks"])

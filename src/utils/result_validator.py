@@ -1,4 +1,4 @@
-"""Independent semantic validation for schema-5 MLND result packages.
+"""Independent semantic validation for schema-5/schema-6 MLND result packages.
 
 The solver writes convenient aggregates to ``summary.json``.  Those aggregates
 are useful for reporting, but they are not sufficient evidence on their own.
@@ -28,11 +28,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
-from src.model_contract import FORMULATION_ID, RESULT_SCHEMA_VERSION
+from src.model_contract import FORMULATION_ID, READABLE_RESULT_SCHEMA_VERSIONS, is_readable_result_schema
 
 
 VALIDATION_SCHEMA_VERSION = 1
-VALIDATOR_ID = "mlnd-schema5-independent-validator-v1"
+VALIDATOR_ID = "mlnd-schema5-schema6-independent-validator-v2"
 SUPPORTED_MODES = ("HD", "MX", "LO")
 _VALIDATOR_OUTPUTS = {"validation.json", "validation_checks.csv"}
 _COST_COMPONENTS = (
@@ -253,12 +253,11 @@ def _validate_contract_and_signature(
     run_config: Mapping[str, Any], recorder: _Recorder
 ) -> list[str]:
     recorder.add(
-        type(run_config.get("schema_version")) is int
-        and run_config.get("schema_version") == RESULT_SCHEMA_VERSION,
+        is_readable_result_schema(run_config.get("schema_version")),
         "run_schema_version",
         "contract",
         observed=run_config.get("schema_version"),
-        expected=RESULT_SCHEMA_VERSION,
+        expected=READABLE_RESULT_SCHEMA_VERSIONS,
     )
     recorder.add(
         run_config.get("formulation_id") == FORMULATION_ID,
@@ -480,13 +479,13 @@ def _validate_summary_contract(
     recorder: _Recorder,
 ) -> None:
     recorder.add(
-        type(summary.get("schema_version")) is int
-        and summary.get("schema_version") == RESULT_SCHEMA_VERSION,
+        is_readable_result_schema(summary.get("schema_version"))
+        and summary.get("schema_version") == run_config.get("schema_version"),
         "summary_schema_version",
         "contract",
         mode=mode,
         observed=summary.get("schema_version"),
-        expected=RESULT_SCHEMA_VERSION,
+        expected=run_config.get("schema_version"),
     )
     recorder.add(
         summary.get("formulation_id") == FORMULATION_ID,
@@ -1592,7 +1591,7 @@ def validate_run(
     rel_tol: float = 2e-6,
     flow_abs_tol: float = 3e-5,
 ) -> dict[str, Any]:
-    """Validate one completed schema-5 run and write its evidence package.
+    """Validate one completed schema-5/schema-6 run and write its evidence package.
 
     ``valid`` is false if any required assertion fails.  An unavailable external
     instance directory is recorded as a warning because the completion manifest
@@ -1736,7 +1735,7 @@ def validate_run(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Independently validate one completed schema-5 MLND result package."
+        description="Independently validate one completed schema-5/schema-6 MLND result package."
     )
     parser.add_argument("run_root", type=Path)
     parser.add_argument("--abs-tol", type=float, default=2e-6)
