@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang xml:lang>
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>literature_audit</title>
+  <style>
+
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+
+ul.task-list[class]{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+font-size: inherit;
+width: 0.8em;
+margin: 0 0.8em 0.2em -1.6em;
+vertical-align: middle;
+}
+</style>
+  <style type="text/css">body{max-width:1200px;margin:40px auto;padding:0 28px;color:#24313d;font:16px/1.8 -apple-system,"PingFang SC",sans-serif}h1{font-size:30px}h2{font-size:23px;margin-top:44px;border-top:1px solid #ddd;padding-top:20px}table{border-collapse:collapse;width:100%;font-size:13px;margin:22px 0}td,th{padding:9px;border-bottom:1px solid #ddd;text-align:left}th{background:#edf3f4}tr:nth-child(even){background:#fafbfc}img{max-width:100%}a{color:#216461}code{background:#f1f2f3;padding:2px 5px;font-size:14px}strong{color:#194f4d}@media(max-width:800px){table{display:block;overflow:auto}body{padding:0 15px}}</style>
+</head>
+<body>
+<h1 id="bayram-等2023transportation-science算法核对与-mlnd_path-对照">Bayram
+等（2023，Transportation Science）算法核对与 MLND_Path 对照</h1>
+<p>核对日期：2026-09-14。问题：该文 Benders＋CG
+的计算表现是否主要来自随机场景数 (|S|)，以及哪些结构适合移植。</p>
+<p><strong>结论：场景带来了独立运营子问题，但该文主要实验只有两个场景。其算法设计重点是保留容量信息的主问题、最大流分离，以及不枚举完整路径的图上定价。对我们最有用的启发是主问题保留足够的运营结构，同时让路径子问题更简单。</strong></p>
+<h2 id="已核对的全文及出处">1. 已核对的全文及出处</h2>
+<ul>
+<li>Bayram, V., Yıldız, B., and Farham, M. S. (2023). <em>Hub Network
+Design Problem with Capacity, Congestion, and Stochastic Demand
+Considerations</em>. <strong>Transportation Science</strong>, 57(5),
+1276–1295. <a href="https://doi.org/10.1287/trsc.2022.0112">期刊及
+DOI</a>。</li>
+<li>本地期刊全文：<a href="../../docs/paper/Bayram%20et%20al.%20-%202023%20-%20Hub%20Network%20Design%20Problem%20with%20Capacity,%20Congestion,%20and%20Stochastic%20Demand%20Considerations.pdf">PDF</a>。下文正文页码均用期刊印刷页码。</li>
+<li><a href="https://kar.kent.ac.uk/101333/1/TS-2022-0112_Main.pdf">作者接受稿</a>：Kent
+大学作者机构库，含封面 36 页。</li>
+<li><a href="https://pubsonline.informs.org/doi/suppl/10.1287/trsc.2022.0112/suppl_file/trsc.2022.0112.sm1.pdf">官方在线附录</a>：14
+页，附录页码使用 PDF 中的页码。附录 C，表 2、表 3 分别给 TR、AP
+实验。</li>
+</ul>
+<p>正文模型、分解、定价和实验讨论已由本地全文核对。官方附录的表格与定义由在线全文提取核对；在线表格截图请求返回缓存错误，因此以下仅摘录结构清晰的表格行，完整表格以官方
+PDF 为准。</p>
+<h2 id="s-的角色和原文实际实验">2. (s) 的角色和原文实际实验</h2>
+<h3 id="模型结构">2.1 模型结构</h3>
+<p>在第 3 节，p.1281，(sS) 表示需求场景，(w_k(s)) 为场景下 OD 商品 (k)
+的需求率。选址与容量等级 (y_h^a) 在所有场景之间共享；路径比例 (v_p(s))
+和枢纽吞吐 (u_h^a(s)) 随场景调整。这里用 (a)
+转写原文容量等级下标，避免与我们基地 () 混淆。</p>
+<p>由式 (18)–(19)、(36)–(40)，模型具有结构</p>
+<p>[ <em>y{</em>{h,a}f_h<sup>ay_h</sup>a+ _{sS}_s Q_s(y)}. ]</p>
+<p>原文对每个场景设一个 ((s)) 并独立生成最优性割，即场景多割形式。固定
+(y) 后，各 (Q_s) 是互相独立的 SOCP。</p>
+<h3 id="实验中有多少场景">2.2 实验中有多少场景</h3>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>原文设置</th>
+<th>证据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>主随机实验</td>
+<td><strong>2 个需求场景</strong>：正常日与高需求日</td>
+<td>§6.1，p.1287</td>
+</tr>
+<tr>
+<td>场景概率</td>
+<td>高需求日 (1/12)，正常日 (11/12)</td>
+<td>§6.1，p.1287</td>
+</tr>
+<tr>
+<td>确定性对照</td>
+<td><strong>1 个场景</strong>，DLD、DMD、DHD</td>
+<td>§6.2，p.1287；附录 C</td>
+</tr>
+<tr>
+<td>100 个新场景</td>
+<td>用于检验已有网络设计的样本外表现</td>
+<td>pp.1288–1289，图 2</td>
+</tr>
+<tr>
+<td>(</td>
+<td>S</td>
+<td>=1,5,10,50) 梯度实验</td>
+</tr>
+</tbody>
+</table>
+<p>原文 §6.2 的达到最优比例为：TR 数据中单场景
+<strong>87%</strong>、两场景 <strong>68%</strong>；AP 数据中单场景
+<strong>100%</strong>、两场景
+<strong>74%</strong>。它们说明两场景问题增加了计算负担。本文没有用大量场景展示
+Benders 相对整体求解的加速。</p>
+<p>附录 C 表 2（附录 p.5）中，固定 TR、不完全网络、()、(b_h=500)，单场景
+DLD 用时 <strong>853.66 秒</strong>，DHD <strong>4,542.48
+秒</strong>；正常／高峰两场景、HDM=1.5 的行用时 <strong>5,078.52
+秒</strong>。这里需求设定也有变化，适合用于说明实际耗时量级，不是控制其他因素不变的纯场景数消融。</p>
+<p>原文算法限时为 <strong>10 小时</strong>（p.1286），主要 TR 候选枢纽为
+20 个、AP 为 15 个（p.1288）。正文还报告某 TR 实例由 30 个候选枢纽增至
+40 个，用时从 <strong>13,739.62 秒</strong>上升到 <strong>278,269.90
+秒</strong>；后者显然是延长求解的规模试验。我们的 30
+秒实验应在自身相同预算下比较方法。</p>
+<h3 id="场景为何可能有利于分解">2.3 场景为何可能有利于分解</h3>
+<p>以下是由模型结构得到的解释：若每个场景有 (P) 个潜在列，整体模型包含约
+(|S|P) 个运营列变量；分解后可以分别处理 (|S|)
+个运营块，并复用共享选址主问题。独立块适合并行，场景越多时降低单次子问题规模和内存的价值可能越大。</p>
+<p>原文在 p.1286 说明双 Xeon 工作站、Java、CPLEX、lazy constraint
+callback 和
+Bellman–Ford；<strong>没有报告场景并行实现、并行线程配置或并行加速比</strong>。因此本次比较把并行视为可利用的结构，不将它计作原文已测加速来源。</p>
+<h2 id="原文主问题实际上保留了什么">3. 原文主问题实际上保留了什么</h2>
+<h3 id="基本主问题">3.1 基本主问题</h3>
+<p>第 4.2 节，p.1283，式 (36)–(40)：基本 MP 具有设施／容量等级二元变量
+(y_h^a) 和每场景一个运营成本下界变量 ((s))。</p>
+<h3 id="真正用于算法的扩展主问题">3.2 真正用于算法的扩展主问题</h3>
+<p>第 4.3.3 节，pp.1284–1285，作者额外引入连续变量</p>
+<p>[ z_{hi}, <em>iz</em>{hi}=_aq<sup>ay_h</sup>a. ]</p>
+<p>(z_{hi}) 表示枢纽 (h) 预留给目的地 (i)
+对应商品组的容量。它将所有到达同一目的地的 OD
+归为一个商品组，并在主问题中分配容量。</p>
+<p>作者据此构造最大流／最小割分离。命题 1（p.1285）在其 ()-connected
+图假设下刻画容量可行性，式 (44)–(45)
+删去无法满足商品需求的容量设计。算法先通过较便宜的流网络检验处理容量可行性，再进行较贵的
+SOCP 运营优化。</p>
+<p>因此，最终 MP-CUT
+<strong>已经含有连续容量分配变量</strong>。这为我们保留少量连续运营变量于主问题提供了直接的方法设计参照。</p>
+<p>我们当前版本允许全程骑手兜底、没有硬机队上限、没有实际换电吞吐容量，故每个整数设施设计都有可行运营解。原文的大量容量不可行性分离，在当前
+MLND 中没有同样的调用场景。更有针对性的做法是保留 ()、idle 以及 OD
+服务量等关键联系，让主问题直接掌握服务量和机队成本，而将具体路径分配留下来生成。</p>
+<h3 id="整数决策的规模有明显差别">3.3 整数决策的规模有明显差别</h3>
+<p>原文二元变量只有 (y_h^a)：每个候选枢纽选一个容量等级，或不开。原文的
+OD 路由比例 (v_p(s)) 全部连续，见式 (8)、(29)；没有给每个 OD
+配置一组基地对二元变量。</p>
+<p>TR 主要实验为 20 个候选枢纽、3 个容量等级（§6.1，p.1287），故有
+<strong>60 个二元变量</strong>。AP 主要实验为 15
+个候选枢纽（p.1288），也是 3 个容量等级（官方附录 D，p.4），故有
+<strong>45 个二元变量</strong>。其需求节点数可以达到 81／200，很多 OD
+增加的是连续路径规模，并不按 OD 增加二元分配变量。</p>
+<p>我们的二元变量数约为</p>
+<p>[ n_{}n_L^2+n_L+n_H+n_K. ]</p>
+<p>在此前实验中，中型为 <strong>81</strong>、大型为
+<strong>119</strong>、最大档为 <strong>398</strong>。这些变量中的 OD
+基地对选择直接与 (_) 决定的服务量相联系。把具体路径和 ()
+全部移出主问题后，主问题需要同时探索更多整数分配组合，并通过割学习它们的服务收益和闲置成本。</p>
+<p>因此，“200 个需求节点的 TS 实例”和“24 个 OD 的 MLND 实例”不能只按 OD
+数比较算法难度。<strong>TS 的整数设计相对紧凑，而大量连续路由适合图上
+CG；我们则有随 OD 增长的整数基地对分配。</strong>
+这是比场景数更直接的分解结构差异。</p>
+<h2 id="原文的-cg-如何减少路径规模">4. 原文的 CG 如何减少路径规模</h2>
+<p>第 5 节，p.1286，式 (46) 的检验数为</p>
+<p>[ c_p(s)=c_p-<em>k(s) -</em>{hp}w_k(s)_h(s). ]</p>
+<p>它是路径运营费加 OD 与经过枢纽的对偶项。作者对每个 ((k,s)) 在包含 OD
+两端与<strong>所有候选枢纽</strong>的图上求最小检验数路径；没有先枚举所有物理路径。模型规定最多经过
+() 个枢纽，实验取 ()，定价实现采用带跳数约束的 Bellman–Ford。</p>
+<p>初始列包括单枢纽、双枢纽路径及高成本人工路径；为控制初始规模，各端连接按成本选最多
+8
+个候选。这个“8”限制的是<strong>初始列</strong>，完整定价仍覆盖全部候选枢纽。</p>
+<p>需要独立核对的实现细节：原文同时使用 elementary path 和
+hop-constrained shortest path
+术语，并讨论负费用圈。将该程序移植到有电量资源的 MLND
+时，应明确路径重复访问规则、阶段状态、实际换电与资源可行性，并以完整资源标签作最终定价证书。普通
+Bellman–Ford 的跳数处理本身不替代这些约束。</p>
+<p>从数量上看，完全图有 (H) 个候选枢纽、至多 5 次枢纽访问，单个 OD
+的无重复候选路径数上界为</p>
+<p>[ _{r=1}^{5}. ]</p>
+<p>当 (H=20) 时为 <strong>1,984,000 条／OD</strong>，当 (H=15) 时为
+<strong>396,075
+条／OD</strong>。实际不完全图会删去不可达路径，但这种增长说明其图上 CG
+的价值。附录中的 <code>nCols</code>
+定义为子问题<strong>生成的列数</strong>，不等于潜在全集或初始列加新增列的总量。</p>
+<p>当前 MLND 实现预生成完整的整数设计值函数等价列并集，CG
+在集合上扫描。因此，它已经减少连续子问题的活动变量，却尚未获得原文“无需存储候选路径全集”的完整收益。</p>
+<h2 id="对-mlnd-的具体方法选择">5. 对 MLND 的具体方法选择</h2>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>结构</th>
+<th>Bayram 等 TS</th>
+<th>当前 MLND_Path</th>
+<th>下一步实验</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>主问题的二元变量</td>
+<td>枢纽与容量等级</td>
+<td>基地、柜、换电站、OD 基地对</td>
+<td>保持同一整数决策比较</td>
+</tr>
+<tr>
+<td>主问题连续结构</td>
+<td>成本估计与目的地容量预留</td>
+<td>原实现主要为成本估计</td>
+<td>保留 ()、idle 和来源服务量</td>
+</tr>
+<tr>
+<td>运营子问题</td>
+<td>每场景 SOCP</td>
+<td>单个 SOCP</td>
+<td>具体路径运输 LP＋CG</td>
+</tr>
+<tr>
+<td>请求满足</td>
+<td>每个 OD 全部流量必须路由</td>
+<td>实际无人机服务量由可用率决定，剩余骑手兜底</td>
+<td>在主问题保留这条联系</td>
+</tr>
+<tr>
+<td>柜／站点的有限容量</td>
+<td>有，直接造成不可行设计</td>
+<td>目前为开放激活，没有实际拥挤容量</td>
+<td>沿现有业务设定建割</td>
+</tr>
+<tr>
+<td>路径定价</td>
+<td>所有候选点上的图算法</td>
+<td>预生成列池扫描</td>
+<td>阶段＋电量资源标签，按需生成</td>
+</tr>
+<tr>
+<td>场景</td>
+<td>2 场景主实验、1 场景对照</td>
+<td>解析平均运营时间，无场景块</td>
+<td>当前先改善分解边界</td>
+</tr>
+</tbody>
+</table>
+<p>建议本次优先实验部分 Benders：主问题保留来源分配、连续 ()、idle
+锥和必要的服务流量；子问题在已知这些量时做线性路径分配，用 LP
+对偶生成割。这样减少反复求解锥子问题的负担，同时主问题直接理解 ()
+对流量与闲置成本的影响。</p>
+<p>按需资源定价可以作为下一阶段，用于增加 H、换电站或 OD
+后控制列全集内存。它的效率需分别记录初始列数、新增列数、峰值活动列、定价时间和模型求解时间，便于定位收益。</p>
+<h2 id="对原文算法优势的准确读法">6. 对“原文算法优势”的准确读法</h2>
+<p>原文明确提出并实现了容量主问题加强、SOCP 双对偶、场景多割与图上
+CG，报告了 TR／AP 多组实验的可解性和计算统计。其 §6.2 和附录 C
+没有给“完整 MISOCP 直接求解 vs Benders＋CG”的对应耗时表，也没有分别移除
+CG、容量提升或场景分解的消融。</p>
+<p>因此，当前有充分依据移植的是这些<strong>具体算法结构</strong>。它们对
+MLND
+各自贡献多少，可以由我们用同一模型、实例、预算和最优性标准的实验证实。</p>
+<h3 id="复核索引">复核索引</h3>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>待核对结论</th>
+<th>期刊正文位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>场景含义、二阶段决策</td>
+<td>p.1281，式 (2)–(9)</td>
+</tr>
+<tr>
+<td>完整 MISOCP</td>
+<td>p.1282，式 (18)–(19)</td>
+</tr>
+<tr>
+<td>每场景 SOCP 与对偶</td>
+<td>p.1283，式 (20)–(35)</td>
+</tr>
+<tr>
+<td>场景多割主问题</td>
+<td>p.1283，式 (36)–(40)</td>
+</tr>
+<tr>
+<td>连续容量预留变量</td>
+<td>p.1284，式 (42)–(43)</td>
+</tr>
+<tr>
+<td>最大流可行性刻画与分离</td>
+<td>pp.1285–1286，命题 1，式 (44)–(45)</td>
+</tr>
+<tr>
+<td>全候选图定价与检验数</td>
+<td>p.1286，式 (46)</td>
+</tr>
+<tr>
+<td>计算环境、10 小时预算、初始列</td>
+<td>pp.1286–1287</td>
+</tr>
+<tr>
+<td>两场景、概率、()</td>
+<td>p.1287，§6.1</td>
+</tr>
+<tr>
+<td>单／两场景最优求解比例</td>
+<td>p.1287，§6.2</td>
+</tr>
+<tr>
+<td>候选点增大后的耗时、100 新场景</td>
+<td>pp.1288–1289</td>
+</tr>
+<tr>
+<td>逐实例 cuts／columns／time／gap</td>
+<td>官方附录 C，表 2（p.5）、表 3（p.6）</td>
+</tr>
+</tbody>
+</table>
+</body>
+</html>

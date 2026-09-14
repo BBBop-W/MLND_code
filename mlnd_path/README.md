@@ -44,6 +44,10 @@ python -m mlnd_path.benchmark \
 
 ## 求解方法
 
+第二轮实验与 TS 原文对照见 [后续简报](ts_followup_20260914/TS_FOLLOWUP_REPORT.md)。新实现包括：保留可用率与汇总流量的部分 Benders、持久化 LP／增量列生成、按路径组解析多割，以及保持连续可用率的 idle 外逼近。原有模型和第一轮实验记录保持可复算。
+
+第二轮入口为 `python -m mlnd_path.benchmark_followup`；idle 外逼近入口为 `python -m mlnd_path.ts_followup_20260914.run_oa`，可加 `--inject` 向求解器提交已验证的可行方案。
+
 | 名称 | 内容 |
 |---|---|
 | `full` | 完整候选列 MISOCP，Gurobi 直接求解 |
