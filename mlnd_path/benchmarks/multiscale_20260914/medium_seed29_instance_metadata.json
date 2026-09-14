@@ -1,0 +1,137 @@
+{
+  "n_l": 3,
+  "n_h": 5,
+  "n_od": 8,
+  "n_k": 1,
+  "service_columns": 3078,
+  "empty_columns": 6,
+  "synthetic": true,
+  "seed": 29,
+  "coordinates": {
+    "bases": [
+      [
+        4.8,
+        0.0
+      ],
+      [
+        -2.399999999999999,
+        4.156921938165306
+      ],
+      [
+        -2.400000000000002,
+        -4.156921938165304
+      ]
+    ],
+    "hubs": [
+      [
+        5.8940545477520265,
+        1.311049151402134
+      ],
+      [
+        0.5574027600668645,
+        5.766216455207236
+      ],
+      [
+        -5.530910906866372,
+        2.2871150227215913
+      ],
+      [
+        -3.8840290513908804,
+        -4.882916935800651
+      ],
+      [
+        2.8827816320056256,
+        -5.0977415307226295
+      ]
+    ],
+    "remote_swaps": [
+      [
+        0.0,
+        0.0
+      ]
+    ],
+    "merchants": [
+      [
+        5.563823627464723,
+        1.1305290289234171
+      ],
+      [
+        -4.932422774229616,
+        2.0822737807430736
+      ],
+      [
+        3.0121149749953227,
+        -5.194201287489664
+      ]
+    ],
+    "customers": [
+      [
+        -5.663085521174673,
+        2.1032352698810968
+      ],
+      [
+        3.0079945326963458,
+        -5.704938971233168
+      ],
+      [
+        0.15415358985702698,
+        5.789998078905821
+      ],
+      [
+        -4.062520063269339,
+        -4.310690657726617
+      ],
+      [
+        6.398700302254528,
+        1.8245282396386264
+      ],
+      [
+        -5.240590235197699,
+        2.0816885208061606
+      ],
+      [
+        3.437258457828089,
+        -5.8993741774760995
+      ],
+      [
+        0.2918776404263228,
+        5.04444013761205
+      ]
+    ]
+  },
+  "od_merchant": [
+    0,
+    1,
+    2,
+    0,
+    1,
+    2,
+    0,
+    1
+  ],
+  "merchant_ready_means": [
+    0.13113175335492133,
+    0.11130452624258524,
+    0.09193050515175855
+  ],
+  "battery_capacity": 15.0,
+  "battery_reserve": 0.5,
+  "loaded_energy_factor": 1.2,
+  "flight_speed_kmh": 60.0,
+  "swap_time_hours": 0.025,
+  "swap_fee": 0.25,
+  "pickup_distribution": "Exponential; analytic E[max(A, xi + g)]",
+  "n_merchant": 3,
+  "preprocessing": "all swap subsets; exact resource labels; integer-design value preserving union",
+  "preprocessing_scope": "activation gates only; positive fixed fleet price; no hard fleet capacity",
+  "pricing_universe": "fixed preprocessed exact-for-integer-design column union; no open-only pricing",
+  "preserves_fractional_full_route_relaxation": false,
+  "service_columns_using_remote_swap": 1446,
+  "service_columns_using_intermediate_swap": 3046,
+  "route_searches": 2904,
+  "labels_generated": 32377,
+  "labels_expanded": 28012,
+  "generation_seconds": 0.08147237496450543,
+  "c0": 383.9888101924585,
+  "generation_wall": 0.08202141709625721
+}
