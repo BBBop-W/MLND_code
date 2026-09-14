@@ -1,0 +1,299 @@
+{
+  "name": "Nanshan_H120",
+  "method": "integer_benders",
+  "status": 11,
+  "wall": 60.15036579198204,
+  "budget": 60.0,
+  "build_wall": 3.3568359169876203,
+  "master_runtime": 55.15107011795044,
+  "nodes": 1.0,
+  "objective": 48780.75436750525,
+  "bound": 48043.35725549718,
+  "gap": 0.015116558191221343,
+  "oracle_wall": 3.332371374941431,
+  "recourse_wall": 0.744116332847625,
+  "stats": {
+    "oracle_calls": 20,
+    "oracle_cache_hits": 3,
+    "recourse_calls": 21,
+    "benders_cuts": 20,
+    "pooled_cuts": 0,
+    "master_binaries": 731469,
+    "master_continuous": 1,
+    "master_rows": 194260,
+    "cost_cover_cuts": 0,
+    "incumbent_injections": 19,
+    "maximum_recourse_duality_gap": 0.00182765433419263,
+    "incomplete_recourse_certificates": 0
+  },
+  "trace": [
+    {
+      "elapsed": 5.138342791935429,
+      "upper": 48780.75436750525,
+      "lower": 0.0,
+      "recourse_seconds": 0.13145133294165134,
+      "oracle_seconds": 2.579623750061728,
+      "benders_cuts": 2,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 7.243137957993895,
+      "upper": 48780.75436750525,
+      "lower": 0.0,
+      "recourse_seconds": 0.16777183290105313,
+      "oracle_seconds": 2.580499292118475,
+      "benders_cuts": 3,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 40.96418387501035,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.19905745796859264,
+      "oracle_seconds": 2.5816977090435103,
+      "benders_cuts": 4,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 43.16900324996095,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.23757312493398786,
+      "oracle_seconds": 2.582718916935846,
+      "benders_cuts": 5,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 43.7240371669177,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.2672137089539319,
+      "oracle_seconds": 2.5832040009554476,
+      "benders_cuts": 6,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 44.288485375000164,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.30694050097372383,
+      "oracle_seconds": 2.5835760430200025,
+      "benders_cuts": 7,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 44.85090574994683,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.33821941795758903,
+      "oracle_seconds": 2.5843552930746228,
+      "benders_cuts": 8,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 45.41349966695998,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.3663666679058224,
+      "oracle_seconds": 2.5856290840310976,
+      "benders_cuts": 9,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 46.73382187495008,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.3952575008152053,
+      "oracle_seconds": 2.586436833953485,
+      "benders_cuts": 10,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 47.34055891702883,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.4270280838245526,
+      "oracle_seconds": 2.5876622919458896,
+      "benders_cuts": 11,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 47.938200125005096,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.4560970418388024,
+      "oracle_seconds": 2.5887817499460652,
+      "benders_cuts": 12,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 48.53818891698029,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.48744812479708344,
+      "oracle_seconds": 2.589113582856953,
+      "benders_cuts": 13,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 49.129267457989044,
+      "upper": 48780.75436750525,
+      "lower": 48043.16313478737,
+      "recourse_seconds": 0.5209672088967636,
+      "oracle_seconds": 2.5900811249157414,
+      "benders_cuts": 14,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 54.790956582990475,
+      "upper": 48780.75436750525,
+      "lower": 48043.35725549718,
+      "recourse_seconds": 0.5531614999054,
+      "oracle_seconds": 2.59125687496271,
+      "benders_cuts": 15,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 56.327286583022214,
+      "upper": 48780.75436750525,
+      "lower": 48043.35725549718,
+      "recourse_seconds": 0.6003165409201756,
+      "oracle_seconds": 3.3046360419830307,
+      "benders_cuts": 16,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 57.06602587492671,
+      "upper": 48780.75436750525,
+      "lower": 48043.35725549718,
+      "recourse_seconds": 0.6350009578745812,
+      "oracle_seconds": 3.311837082961574,
+      "benders_cuts": 17,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 57.81055504200049,
+      "upper": 48780.75436750525,
+      "lower": 48043.35725549718,
+      "recourse_seconds": 0.669840290909633,
+      "oracle_seconds": 3.318955749971792,
+      "benders_cuts": 18,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 58.58854758297093,
+      "upper": 48780.75436750525,
+      "lower": 48043.35725549718,
+      "recourse_seconds": 0.7052932908991352,
+      "oracle_seconds": 3.325582707882859,
+      "benders_cuts": 19,
+      "pooled_cuts": 0
+    },
+    {
+      "elapsed": 59.40786874992773,
+      "upper": 48780.75436750525,
+      "lower": 48043.35725549718,
+      "recourse_seconds": 0.744116332847625,
+      "oracle_seconds": 3.332371374941431,
+      "benders_cuts": 20,
+      "pooled_cuts": 0
+    }
+  ],
+  "errors": [],
+  "rho": [
+    0.9499999984039387,
+    0.9429585859845999,
+    0.9357118424989436,
+    0.9326113508307066,
+    0.9163390075447413,
+    0.9228096142927428,
+    0.8665318104569079,
+    0.8531087228507153
+  ],
+  "fleet": 2682.260193035134,
+  "served": 7534.951921346486,
+  "primal_residual": 6.352747104407253e-22,
+  "opened": {
+    "L": 8,
+    "H": 120,
+    "E": 0
+  },
+  "n_od": 11427,
+  "demand": 8196.7142858995,
+  "all_ground_cost": 55582.16011236441,
+  "basic_path_combinations": 10443363840,
+  "explicit_path_enumeration": false,
+  "provenance": {
+    "directory": "/Users/songtaowang/Documents/MLND_code/data/instances/nanshan_nested_h120/H120_L08_E13_R10p00",
+    "config": "/Users/songtaowang/Documents/MLND_code/results/nanshan_h120_final_schema5/run_config.json",
+    "sha256": {
+      "od_nodes.csv": "fc849e969628aa3afd57f16358372c496a546c32f9c012c6179ae5a625976113",
+      "od_demand.csv": "696214077b1e85e42cfe7a8cdabfae1939fa845c3cd7bf2b8c4664d42563549e",
+      "periods.csv": "08782e8bb0136f319d1054ea37a24809e7c3c6e0ac01629c1003a683c582c5c1",
+      "sites.csv": "9acfe5efb8244dc33ee736cc086b0de714876fe4907c128504d086554f675b0f"
+    },
+    "orders_sampled": false,
+    "demand_rescaled": false,
+    "screening_is_exact": true,
+    "historical_top_k_screening_used": false,
+    "deterministic_composite_pickup_minutes": 15.3936,
+    "rider_speed_kmh_scenario": 18.0,
+    "kappa_per_hour_scenario": 30.0,
+    "mission_energy": "10 km shared across every stage; station-only reset; same loaded/empty rate",
+    "fixed_corridor_cost": "not charged: new model selects facilities and paths, no corridor binaries",
+    "locker_capacity": "not present in the new delay-node path formulation",
+    "pickup_discount": "paid on self-pickup orders, included in terminal expected cost",
+    "pickup_timing": {
+      "file": "H120.npz",
+      "sha256": "3dc6fa17613d92d149a7873571c75998dd92998737f993e6dcc985cb3bd58261",
+      "file_size_bytes": 216873,
+      "unit": "hour",
+      "crop_half_size_km": 10.0,
+      "canonical_demand_orders": 57377,
+      "canonical_od_count": 11427,
+      "valid_timing_samples": 56722,
+      "excluded_timing_samples": 655,
+      "exclusions": {
+        "invalid_event_order": 655
+      },
+      "demand_business_counts": {
+        "health": 530,
+        "pinhaofan": 2861,
+        "shangou": 2570,
+        "waimai": 51416
+      },
+      "valid_timing_samples_by_day": {
+        "1": 7519,
+        "2": 8145,
+        "3": 7678,
+        "4": 7939,
+        "5": 7477,
+        "6": 9040,
+        "7": 8924
+      },
+      "mean_hours": 0.25656035870855515,
+      "mean_minutes": 15.393621522513309,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004,
+      "prefix_total_hours": 14552.616666669259,
+      "prefix_sum_length": 56723,
+      "raw_file_sha256": "0d8eb1bf6f9f23896ff73dfe88362caf36b1e994a9b36842fca9fcb5c944cbb1",
+      "family_manifest_sha256": "67a1adbcada0e355fcb98a7c2b035e1325a76f1f7ae81e6f24f76553e2f882f1",
+      "cache_manifest": "/Users/songtaowang/Documents/MLND_code/mlnd_path/nanshan_integer_20260914/timing/manifest.json",
+      "timing_rule": "same-day payment < fetch <= delivery; xi=(fetch-payment)/60 hours"
+    },
+    "pickup_expectation": "Exact expectation under the empirical marginal distribution; no optimization scenarios"
+  },
+  "threads": 1,
+  "mip_gap_target": 0.001,
+  "source_sha256": {
+    "data.py": "5db0b8fc886caf446f444f69da513b8f8c229a4eea186bc53536e7ee343a7697",
+    "integer_master_cuts.py": "5d5b35cd4dfc92b9853215cda74c06c090e6aa5138ad2a0a3a29d654fcd86b8c",
+    "integer_recourse.py": "4694982a5fdbf180e055f52ae5ac3d98efd5118658ac8d4f029b13d29cace8d2",
+    "nanshan_integer.py": "55349731ece4a598fa47ff20a35a5e8ac1e4680541f8998e1e588df2602dda41",
+    "nanshan_oracle.py": "866e588912383da9248f3cccfb5175792f9c54a8d5b2ca24f9562b709be78ec0",
+    "nanshan_timing.py": "42a405a03f390abe8bab3c98a9ef8abc1d2204a27d5dfd3a87cdd76aacd41bf8"
+  },
+  "data_loading_wall": 0.027783459052443504
+}

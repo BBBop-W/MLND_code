@@ -1,0 +1,143 @@
+{
+  "name": "Nanshan_H120",
+  "method": "integer_benders_pooled",
+  "status": 11,
+  "wall": 20.17793441703543,
+  "budget": 20.0,
+  "build_wall": 4.272525417036377,
+  "master_runtime": 15.1960608959198,
+  "nodes": 1.0,
+  "objective": 48819.78384670962,
+  "bound": 48252.031764281164,
+  "gap": 0.011629549287050438,
+  "oracle_wall": 2.0781276238849387,
+  "recourse_wall": 0.33740891597699374,
+  "stats": {
+    "oracle_calls": 7,
+    "oracle_cache_hits": 2,
+    "recourse_calls": 8,
+    "benders_cuts": 7,
+    "pooled_cuts": 4,
+    "master_binaries": 731469,
+    "master_continuous": 1,
+    "master_rows": 194261,
+    "incumbent_injections": 7
+  },
+  "trace": [
+    {
+      "elapsed": 5.410703084082343,
+      "upper": 48819.78384670962,
+      "lower": 0.0,
+      "recourse_seconds": 0.12007466598879546,
+      "oracle_seconds": 2.073205125052482,
+      "benders_cuts": 1,
+      "pooled_cuts": 1
+    },
+    {
+      "elapsed": 8.208325208979659,
+      "upper": 48819.78384670962,
+      "lower": 0.0,
+      "recourse_seconds": 0.16528158192522824,
+      "oracle_seconds": 2.074283624999225,
+      "benders_cuts": 2,
+      "pooled_cuts": 1
+    },
+    {
+      "elapsed": 12.008365334011614,
+      "upper": 48819.78384670962,
+      "lower": 48252.031764281164,
+      "recourse_seconds": 0.19496487395372242,
+      "oracle_seconds": 2.075201708008535,
+      "benders_cuts": 3,
+      "pooled_cuts": 2
+    },
+    {
+      "elapsed": 16.8143561250763,
+      "upper": 48819.78384670962,
+      "lower": 48252.031764281164,
+      "recourse_seconds": 0.2279379570391029,
+      "oracle_seconds": 2.0761493740137666,
+      "benders_cuts": 4,
+      "pooled_cuts": 2
+    },
+    {
+      "elapsed": 17.92216995905619,
+      "upper": 48819.78384670962,
+      "lower": 48252.031764281164,
+      "recourse_seconds": 0.26274320704396814,
+      "oracle_seconds": 2.0768471240298823,
+      "benders_cuts": 5,
+      "pooled_cuts": 3
+    },
+    {
+      "elapsed": 19.0291870420333,
+      "upper": 48819.78384670962,
+      "lower": 48252.031764281164,
+      "recourse_seconds": 0.2932825409807265,
+      "oracle_seconds": 2.0771899989340454,
+      "benders_cuts": 6,
+      "pooled_cuts": 4
+    },
+    {
+      "elapsed": 19.974067709059455,
+      "upper": 48819.78384670962,
+      "lower": 48252.031764281164,
+      "recourse_seconds": 0.33740891597699374,
+      "oracle_seconds": 2.0781276238849387,
+      "benders_cuts": 7,
+      "pooled_cuts": 4
+    }
+  ],
+  "errors": [],
+  "rho": [
+    0.9499999997407567,
+    0.9429645939003818,
+    0.9357118365138019,
+    0.9326114443225002,
+    0.9164533795959982,
+    0.9228141742802678,
+    0.8665349437307925,
+    0.8531106936641086
+  ],
+  "fleet": 2682.30927629173,
+  "served": 7535.057873358757,
+  "primal_residual": 2.6469779601696886e-23,
+  "opened": {
+    "L": 8,
+    "H": 120,
+    "E": 13
+  },
+  "n_od": 11427,
+  "demand": 8196.7142858995,
+  "all_ground_cost": 55582.16011236441,
+  "basic_path_combinations": 10443363840,
+  "explicit_path_enumeration": false,
+  "provenance": {
+    "directory": "/Users/songtaowang/Documents/MLND_code/data/instances/nanshan_nested_h120/H120_L08_E13_R10p00",
+    "config": "/Users/songtaowang/Documents/MLND_code/results/nanshan_h120_final_schema5/run_config.json",
+    "sha256": {
+      "od_nodes.csv": "fc849e969628aa3afd57f16358372c496a546c32f9c012c6179ae5a625976113",
+      "od_demand.csv": "696214077b1e85e42cfe7a8cdabfae1939fa845c3cd7bf2b8c4664d42563549e",
+      "periods.csv": "08782e8bb0136f319d1054ea37a24809e7c3c6e0ac01629c1003a683c582c5c1",
+      "sites.csv": "9acfe5efb8244dc33ee736cc086b0de714876fe4907c128504d086554f675b0f"
+    },
+    "orders_sampled": false,
+    "demand_rescaled": false,
+    "screening_is_exact": true,
+    "historical_top_k_screening_used": false,
+    "deterministic_composite_pickup_minutes": 15.3936,
+    "rider_speed_kmh_scenario": 18.0,
+    "kappa_per_hour_scenario": 20.0,
+    "mission_energy": "10 km shared across every stage; station-only reset; same loaded/empty rate",
+    "fixed_corridor_cost": "not charged: new model selects facilities and paths, no corridor binaries",
+    "locker_capacity": "not present in the new delay-node path formulation",
+    "pickup_discount": "paid on self-pickup orders, included in terminal expected cost"
+  },
+  "threads": 1,
+  "mip_gap_target": 0.01,
+  "source_sha256": {
+    "nanshan_integer.py": "b8e8187879f5ca1afe8a9cd69bf79430b34547b8e350261ef2ba7ea1ee346a26",
+    "integer_master_cuts.py": "5d5b35cd4dfc92b9853215cda74c06c090e6aa5138ad2a0a3a29d654fcd86b8c",
+    "integer_recourse.py": "b99485c70380d5133d99a43b0c329cf0adf829cf6bdd18863ad939a7eff4d415"
+  }
+}

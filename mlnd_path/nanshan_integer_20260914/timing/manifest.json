@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "raw_file": "/Users/songtaowang/Documents/MLND_code/Meituan-Shenzhen/深圳市南山区运单抽样_已脱敏.csv",
+  "raw_file_sha256": "0d8eb1bf6f9f23896ff73dfe88362caf36b1e994a9b36842fca9fcb5c944cbb1",
+  "raw_file_size_bytes": 46724305,
+  "raw_file_mtime_ns": 1780838805000000000,
+  "total_raw_rows": 592667,
+  "family_manifest": "/Users/songtaowang/Documents/MLND_code/data/instances/nanshan_nested_h120/scale_manifest.json",
+  "family_manifest_sha256": "67a1adbcada0e355fcb98a7c2b035e1325a76f1f7ae81e6f24f76553e2f882f1",
+  "source_module_sha256": "42a405a03f390abe8bab3c98a9ef8abc1d2204a27d5dfd3a87cdd76aacd41bf8",
+  "selected_days": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7"
+  ],
+  "payment_hour_window": [
+    12,
+    13
+  ],
+  "business_lines": "all canonical business lines",
+  "projection_center_lon": 113.94075,
+  "projection_center_lat": 22.55175,
+  "spatial_rule": "both original endpoints inside the canonical local-km square, inclusive",
+  "timing_rule": "same-day payment < fetch <= delivery; xi=(fetch-payment)/60 hours",
+  "event_meaning": "observed composite payment-to-pickup lead time",
+  "demand_records_removed": false,
+  "distribution": "empirical distribution with equal observation weights",
+  "scenario_flow_variables": false,
+  "levels": {
+    "11": {
+      "file": "H011.npz",
+      "sha256": "116d3b3085b6d03bbec7baf4f67bd67c4102ab4000e9de99aeb03171db6b8399",
+      "file_size_bytes": 65631,
+      "unit": "hour",
+      "crop_half_size_km": 3.0,
+      "canonical_demand_orders": 14803,
+      "canonical_od_count": 2723,
+      "valid_timing_samples": 14626,
+      "excluded_timing_samples": 177,
+      "exclusions": {
+        "invalid_event_order": 177
+      },
+      "demand_business_counts": {
+        "health": 145,
+        "pinhaofan": 722,
+        "shangou": 721,
+        "waimai": 13215
+      },
+      "valid_timing_samples_by_day": {
+        "1": 1932,
+        "2": 2178,
+        "3": 2028,
+        "4": 2080,
+        "5": 1981,
+        "6": 2214,
+        "7": 2213
+      },
+      "mean_hours": 0.2502962760381056,
+      "mean_minutes": 15.017776562286336,
+      "median_minutes": 13.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 30.0,
+      "prefix_total_hours": 3660.833333333259,
+      "prefix_sum_length": 14627
+    },
+    "24": {
+      "file": "H024.npz",
+      "sha256": "5158fd6ab14a4dc30cea242df5c7da14701af48406ef787206bf589b6b22a54f",
+      "file_size_bytes": 142235,
+      "unit": "hour",
+      "crop_half_size_km": 4.5,
+      "canonical_demand_orders": 34348,
+      "canonical_od_count": 6445,
+      "valid_timing_samples": 33939,
+      "excluded_timing_samples": 409,
+      "exclusions": {
+        "invalid_event_order": 409
+      },
+      "demand_business_counts": {
+        "health": 333,
+        "pinhaofan": 1849,
+        "shangou": 1612,
+        "waimai": 30554
+      },
+      "valid_timing_samples_by_day": {
+        "1": 4501,
+        "2": 4860,
+        "3": 4538,
+        "4": 4704,
+        "5": 4463,
+        "6": 5467,
+        "7": 5406
+      },
+      "mean_hours": 0.25356227349067445,
+      "mean_minutes": 15.213736409440466,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 30.0,
+      "prefix_total_hours": 8605.650000000427,
+      "prefix_sum_length": 33940
+    },
+    "43": {
+      "file": "H043.npz",
+      "sha256": "d21bb05ef792ad93c6613ae85847c67090e16092b6c39c168417ae65b6b69ffe",
+      "file_size_bytes": 183720,
+      "unit": "hour",
+      "crop_half_size_km": 6.0,
+      "canonical_demand_orders": 47800,
+      "canonical_od_count": 9162,
+      "valid_timing_samples": 47258,
+      "excluded_timing_samples": 542,
+      "exclusions": {
+        "invalid_event_order": 542
+      },
+      "demand_business_counts": {
+        "health": 442,
+        "pinhaofan": 2510,
+        "shangou": 2136,
+        "waimai": 42712
+      },
+      "valid_timing_samples_by_day": {
+        "1": 6260,
+        "2": 6778,
+        "3": 6357,
+        "4": 6609,
+        "5": 6269,
+        "6": 7535,
+        "7": 7450
+      },
+      "mean_hours": 0.2555927038808244,
+      "mean_minutes": 15.335562232849464,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004,
+      "prefix_total_hours": 12078.799999999585,
+      "prefix_sum_length": 47259
+    },
+    "68": {
+      "file": "H068.npz",
+      "sha256": "968cf581363f035063d7a0ff2e0553ef75d8dbe845ced6aa691b8edce99ce736",
+      "file_size_bytes": 204577,
+      "unit": "hour",
+      "crop_half_size_km": 7.5,
+      "canonical_demand_orders": 54084,
+      "canonical_od_count": 10571,
+      "valid_timing_samples": 53469,
+      "excluded_timing_samples": 615,
+      "exclusions": {
+        "invalid_event_order": 615
+      },
+      "demand_business_counts": {
+        "health": 509,
+        "pinhaofan": 2733,
+        "shangou": 2416,
+        "waimai": 48426
+      },
+      "valid_timing_samples_by_day": {
+        "1": 7070,
+        "2": 7679,
+        "3": 7226,
+        "4": 7491,
+        "5": 7060,
+        "6": 8511,
+        "7": 8432
+      },
+      "mean_hours": 0.2553417244883328,
+      "mean_minutes": 15.320503469299968,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004,
+      "prefix_total_hours": 13652.866666667747,
+      "prefix_sum_length": 53470
+    },
+    "87": {
+      "file": "H087.npz",
+      "sha256": "43a80281e75fc4f4cc045910117651e9462f6a8b6e95c0347d9f4940e839361c",
+      "file_size_bytes": 215208,
+      "unit": "hour",
+      "crop_half_size_km": 8.5,
+      "canonical_demand_orders": 57071,
+      "canonical_od_count": 11293,
+      "valid_timing_samples": 56419,
+      "excluded_timing_samples": 652,
+      "exclusions": {
+        "invalid_event_order": 652
+      },
+      "demand_business_counts": {
+        "health": 527,
+        "pinhaofan": 2849,
+        "shangou": 2551,
+        "waimai": 51144
+      },
+      "valid_timing_samples_by_day": {
+        "1": 7476,
+        "2": 8108,
+        "3": 7636,
+        "4": 7906,
+        "5": 7432,
+        "6": 8990,
+        "7": 8871
+      },
+      "mean_hours": 0.25657845761179743,
+      "mean_minutes": 15.394707456707845,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004,
+      "prefix_total_hours": 14475.90000000253,
+      "prefix_sum_length": 56420
+    },
+    "120": {
+      "file": "H120.npz",
+      "sha256": "3dc6fa17613d92d149a7873571c75998dd92998737f993e6dcc985cb3bd58261",
+      "file_size_bytes": 216873,
+      "unit": "hour",
+      "crop_half_size_km": 10.0,
+      "canonical_demand_orders": 57377,
+      "canonical_od_count": 11427,
+      "valid_timing_samples": 56722,
+      "excluded_timing_samples": 655,
+      "exclusions": {
+        "invalid_event_order": 655
+      },
+      "demand_business_counts": {
+        "health": 530,
+        "pinhaofan": 2861,
+        "shangou": 2570,
+        "waimai": 51416
+      },
+      "valid_timing_samples_by_day": {
+        "1": 7519,
+        "2": 8145,
+        "3": 7678,
+        "4": 7939,
+        "5": 7477,
+        "6": 9040,
+        "7": 8924
+      },
+      "mean_hours": 0.25656035870855515,
+      "mean_minutes": 15.393621522513309,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004,
+      "prefix_total_hours": 14552.616666669259,
+      "prefix_sum_length": 56723
+    }
+  },
+  "total_array_size_bytes": 1028244
+}
