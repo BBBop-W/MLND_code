@@ -1,0 +1,192 @@
+{
+  "unit": "hour",
+  "definition": "payment-to-fetch duration excluded from drone workload",
+  "cases": {
+    "11": {
+      "unit": "hour",
+      "crop_half_size_km": 3.0,
+      "canonical_demand_orders": 14803,
+      "canonical_od_count": 2723,
+      "valid_timing_samples": 14626,
+      "excluded_timing_samples": 177,
+      "exclusions": {
+        "invalid_event_order": 177
+      },
+      "demand_business_counts": {
+        "health": 145,
+        "pinhaofan": 722,
+        "shangou": 721,
+        "waimai": 13215
+      },
+      "valid_timing_samples_by_day": {
+        "1": 1932,
+        "2": 2178,
+        "3": 2028,
+        "4": 2080,
+        "5": 1981,
+        "6": 2214,
+        "7": 2213
+      },
+      "mean_hours": 0.2502962760381056,
+      "mean_minutes": 15.017776562286336,
+      "median_minutes": 13.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 30.0
+    },
+    "24": {
+      "unit": "hour",
+      "crop_half_size_km": 4.5,
+      "canonical_demand_orders": 34348,
+      "canonical_od_count": 6445,
+      "valid_timing_samples": 33939,
+      "excluded_timing_samples": 409,
+      "exclusions": {
+        "invalid_event_order": 409
+      },
+      "demand_business_counts": {
+        "health": 333,
+        "pinhaofan": 1849,
+        "shangou": 1612,
+        "waimai": 30554
+      },
+      "valid_timing_samples_by_day": {
+        "1": 4501,
+        "2": 4860,
+        "3": 4538,
+        "4": 4704,
+        "5": 4463,
+        "6": 5467,
+        "7": 5406
+      },
+      "mean_hours": 0.25356227349067445,
+      "mean_minutes": 15.213736409440466,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 30.0
+    },
+    "43": {
+      "unit": "hour",
+      "crop_half_size_km": 6.0,
+      "canonical_demand_orders": 47800,
+      "canonical_od_count": 9162,
+      "valid_timing_samples": 47258,
+      "excluded_timing_samples": 542,
+      "exclusions": {
+        "invalid_event_order": 542
+      },
+      "demand_business_counts": {
+        "health": 442,
+        "pinhaofan": 2510,
+        "shangou": 2136,
+        "waimai": 42712
+      },
+      "valid_timing_samples_by_day": {
+        "1": 6260,
+        "2": 6778,
+        "3": 6357,
+        "4": 6609,
+        "5": 6269,
+        "6": 7535,
+        "7": 7450
+      },
+      "mean_hours": 0.2555927038808244,
+      "mean_minutes": 15.335562232849464,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004
+    },
+    "68": {
+      "unit": "hour",
+      "crop_half_size_km": 7.5,
+      "canonical_demand_orders": 54084,
+      "canonical_od_count": 10571,
+      "valid_timing_samples": 53469,
+      "excluded_timing_samples": 615,
+      "exclusions": {
+        "invalid_event_order": 615
+      },
+      "demand_business_counts": {
+        "health": 509,
+        "pinhaofan": 2733,
+        "shangou": 2416,
+        "waimai": 48426
+      },
+      "valid_timing_samples_by_day": {
+        "1": 7070,
+        "2": 7679,
+        "3": 7226,
+        "4": 7491,
+        "5": 7060,
+        "6": 8511,
+        "7": 8432
+      },
+      "mean_hours": 0.2553417244883328,
+      "mean_minutes": 15.320503469299968,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004
+    },
+    "87": {
+      "unit": "hour",
+      "crop_half_size_km": 8.5,
+      "canonical_demand_orders": 57071,
+      "canonical_od_count": 11293,
+      "valid_timing_samples": 56419,
+      "excluded_timing_samples": 652,
+      "exclusions": {
+        "invalid_event_order": 652
+      },
+      "demand_business_counts": {
+        "health": 527,
+        "pinhaofan": 2849,
+        "shangou": 2551,
+        "waimai": 51144
+      },
+      "valid_timing_samples_by_day": {
+        "1": 7476,
+        "2": 8108,
+        "3": 7636,
+        "4": 7906,
+        "5": 7432,
+        "6": 8990,
+        "7": 8871
+      },
+      "mean_hours": 0.25657845761179743,
+      "mean_minutes": 15.394707456707845,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004
+    },
+    "120": {
+      "unit": "hour",
+      "crop_half_size_km": 10.0,
+      "canonical_demand_orders": 57377,
+      "canonical_od_count": 11427,
+      "valid_timing_samples": 56722,
+      "excluded_timing_samples": 655,
+      "exclusions": {
+        "invalid_event_order": 655
+      },
+      "demand_business_counts": {
+        "health": 530,
+        "pinhaofan": 2861,
+        "shangou": 2570,
+        "waimai": 51416
+      },
+      "valid_timing_samples_by_day": {
+        "1": 7519,
+        "2": 8145,
+        "3": 7678,
+        "4": 7939,
+        "5": 7477,
+        "6": 9040,
+        "7": 8924
+      },
+      "mean_hours": 0.25656035870855515,
+      "mean_minutes": 15.393621522513309,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.000000000000004
+    }
+  }
+}

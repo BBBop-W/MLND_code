@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "description": "Processed calibration sufficient for the production path model; runtime raw-order files are not required.",
+  "files": {
+    "H011_postfetch_deadlines.csv": "19f9e06af1e2ce7a83756309cb8124e0c9d21e9cb991aa93affae8746c2586cc",
+    "H024_postfetch_deadlines.csv": "a9c96e29486eda2800333e13b703708d6e3c0fdbcb33374b7f2284bd013e4649",
+    "H043_postfetch_deadlines.csv": "76050ca9cb002803bdfc788b57847b986095ca4c9a27d7556a5d20d8de48832c",
+    "H068_postfetch_deadlines.csv": "f44bd4bed14c24a64d1e8ec97a4e72e53ab7f85f720c31f7dda5aea72b360e21",
+    "H087_postfetch_deadlines.csv": "2268a2c52da42ea2c01854811b9f7b84eb8495bed8bf934da9f7698a6d921836",
+    "H120_postfetch_deadlines.csv": "e39d7af4cc12532af61e1ef50b7161de15458c1a82ed73550f02bbeaa9ca083f",
+    "calibration.json": "1aae7271906b85c3b7449340008d65efafbc7e0a5754d7faf3f14b16daa8a5d4",
+    "pre_dispatch_statistics.json": "aa5919fa5d64508abfc06503fb93ca444c260f64cb73a329cd222907d5c6e40a",
+    "rider_time.json": "59df11c9624e126a083873a2ca64102672e8f5b270d270d7c455a2b48c416257"
+  }
+}

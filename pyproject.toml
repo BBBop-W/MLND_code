@@ -1,21 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "mlnd-od-aware"
-version = "0.3.0"
-description = "OD-aware chi-epsilon drone network design with aggregate energy sufficiency"
+name = "mlnd"
+version = "1.0.0"
+description = "Path-based drone delivery network design with closed queueing networks"
 requires-python = ">=3.11"
 dependencies = [
   "gurobipy>=13.0",
-  "matplotlib>=3.8",
   "numpy>=1.26",
+  "scipy>=1.12",
+  "numba>=0.60",
+  "pandas>=2.2",
+  "matplotlib>=3.8",
   "Pillow>=10.0",
   "requests>=2.31",
   "scikit-learn>=1.4",
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "ruff>=0.12"]
+
+[project.scripts]
+mlnd = "src.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["src", "src.*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/current"]
 addopts = "-ra"
 pythonpath = ["."]
