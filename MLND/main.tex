@@ -51,7 +51,7 @@
 
 \begin{frontmatter}
 
-\title{Multi-Type Facility Location and Network Design for Urban Drone Logistics}
+\title{Strategic Design of Urban Drone Delivery Networks: Integrating Multi-Type Facilities, Customer Choice, Congestion, and Fleet Circulation}
 \author{qimy}
 \date{}
 
@@ -364,7 +364,7 @@ This fallback assumption supports strategic cost comparisons but excludes endoge
 
 The infrastructure layer determines where and how the drone network can operate. The platform may open three types of physical facilities: drone bases that store, charge, inspect, and dispatch drones; customer-facing smart lockers that serve as pickup, drop-off, and transfer points; and battery-swapping stations that extend the feasible range of physical movements. The platform also selects smart-locker handling capacities, physical flight connections, and the drone fleet size. Virtual idle states support task chaining after a delivery, but they are bookkeeping states rather than physical facilities and therefore require neither siting nor physical connection decisions.
 
-The operational layer captures the capacity bottlenecks that are material to strategic planning while abstracting from real-time dispatch details. Orders in each origin-destination market are assumed to arrive according to a Poisson process, and drones, rather than parcels, circulate in a closed queueing network. At any time, each drone is idle at a physical base or in a virtual state, undergoing handling at a smart locker, or traveling on a physical movement. Smart-locker handling is represented as a single-server queue, whereas flight movements are represented as infinite-server transit states. Because every drone-served order is processed at an origin and a destination locker, limited locker handling capacity can create congestion. The model therefore constrains average locker-handling and virtual-state waiting times. For tractability, the model uses long-run flow rates and discrete availability levels, \textcolor{blue}{screens each direct flight and each leg of a one-swap route against the usable one-battery range}, and imposes aggregate energy sufficiency instead of tracking the state of charge of each drone.
+The operational layer captures the capacity bottlenecks that are material to strategic planning while abstracting from real-time dispatch details. Orders in each origin-destination market are assumed to arrive according to a Poisson process, and drones, rather than parcels, circulate in a closed queueing network. At any time, each drone is idle at a physical base or in a virtual state, undergoing handling at a smart locker, or traveling on a physical movement. Smart-locker handling is represented as a single-server queue, whereas flight movements are represented as infinite-server transit states. Because every drone-served order is processed at an origin and a destination locker, limited locker handling capacity can create congestion. The model therefore constrains average locker-handling and virtual-state waiting times. For tractability, the model uses long-run flow rates and discrete availability levels, screens each direct or one-swap route for route-level battery feasibility, and imposes aggregate energy sufficiency instead of tracking the state of charge of each drone.
 
 % Previous wording retained for revision history: The planning objective is to identify the least-cost feasible system design and fulfillment plan for each operating mode. The model jointly determines physical facility locations, smart-locker capacities, network connections, fleet size, customer-facing locker service configurations, and the allocation of eligible home-delivery orders to the drone network. The objective accounts for infrastructure, connection, flight, fleet, locker-handling, and courier-fulfillment costs. Because courier fallback ensures that all demand is fulfilled, the model does not require every order to be served by drones. Instead, it determines when drone service is cost-effective while respecting flow-balance, service-quality, and battery-feasibility requirements.
 \color{blue}
@@ -424,705 +424,718 @@ The platform therefore treats drones as a supplementary resource and relies on t
 The joint planning problem coordinates physical drone bases, customer-facing smart lockers, battery-swapping stations, drone availability, and locker congestion under the general formulation and its two restrictions.
 The platform minimizes modeled fulfillment cost, including the represented drone-network, infrastructure, locker-service, and courier-fallback costs, while fulfilling all demand.
 
+\color{black}
+
+
+\section{Model Formulation}
+\label{sec:path_model}
+
+We consider a meal-delivery platform that combines couriers and drones to serve origin--destination (OD) demand.
+The platform jointly selects facilities, locker capacities, and flight links, assigns each OD pair to a departure--return base pair, and determines drone availability and path flows.
+The model integrates these decisions through a closed queueing network and complete drone service routes.
+All demand rates, service times, and costs are expressed in consistent time units.
+
+\subsection{Strategic Network Decisions}
+\label{subsec:path_design}
+
+Let $\mathcal D$ be the set of OD pairs, where $o$ denotes a merchant and $d$ denotes a customer location.
+The potential order rate for $(o,d)$ is $h_{o,d}>0$.
+Let $\mathcal L$, $\mathcal H$, and $\mathcal E$ denote the candidate drone bases, locker locations, and independent battery-swapping stations, respectively.
+The complete facility set is $\mathcal V=\mathcal L\cup\mathcal H\cup\mathcal E$, and batteries can be replaced at nodes in $\mathcal K=\mathcal L\cup\mathcal E$.
+Bases are indexed by $\ell,m$, locker locations by $i,j$, and replenishment nodes by $k$.
+
+The binary variable $x_v$ indicates whether facility $v\in\mathcal V$ is opened.
+Locker capacity is selected from a finite set of installation levels $\mathcal S$.
+The binary variable $z_{i,s}$ equals one if level $s$ is selected at location $i$; this level provides handling capacity $\mu_{i,s}$ and incurs fixed cost $f_{i,s}^{\mathrm{locker}}$.
+Exactly one level is selected at an open locker location.
+For identical cabinets and $\mathcal S=\{1,\ldots,5\}$, level $s$ installs $s$ cabinets and provides $\mu_{i,s}=s\mu_i$, where $\mu_i$ is the handling capacity of one cabinet.
+The fixed costs of a base and an independent swapping station are $f_\ell^{\mathrm{base}}$ and $f_k^{\mathrm{swap}}$, respectively.
+
+The binary variable $\alpha_{o,\ell,m,d}$ assigns OD pair $(o,d)$ to departure base $\ell$ and return base $m$.
+Each OD pair is assigned to at most one pair of open bases, and $\ell=m$ is allowed.
+Orders assigned to a base pair can be split continuously among its feasible service routes.
+Orders without a base assignment are delivered directly by couriers.
+
+Let $\mathcal A$ be the set of candidate directed flight links between facility nodes.
+The binary variable $y_{u,v}$ indicates whether link $(u,v)\in\mathcal A$ is enabled, at fixed cost $f_{u,v}^{\mathrm{link}}$.
+Both endpoint facilities must be open, and the two directions are selected separately.
+When distinct facility functions share a location, their zero-time connections form the subset $\mathcal A^0\subseteq\mathcal A$.
+Such a connection has zero cost and is enabled whenever both endpoint functions are open.
+
+\subsection{Drone Operations}
+\label{subsec:path_operations}
+
+\subsubsection{Queueing Network}
+\label{subsubsec:path_queue}
+
+An order requests a drone when its courier collects the meal from the merchant.
+We assume that these requests form independent stationary Poisson streams with rates $h_{o,d}$.
+If a drone is available at the assigned departure base, the platform selects a service route and dispatches the drone toward its pickup locker.
+Otherwise, the courier delivers the order directly to the customer.
+Meal preparation and the courier's journey to the merchant precede the drone request.
+
+A drone completes its service route at the assigned return base after replenishing its battery.
+At that point, the drone either joins the local idle inventory or is immediately repositioned to another base.
+The same decision is made after an empty repositioning route is completed.
+These routing decisions are independent of instantaneous inventory and use stationary probabilities determined by the planned flows.
+Consequently, repositioning acts on returning drones before they enter an idle queue; a base can forward arriving drones while holding no idle inventory.
+
+The queueing network contains single-server idle nodes at bases and infinite-server activities for complete service and repositioning routes.
+Idle service completions correspond to order requests acquiring drones, while route activities hold drones until their return and replenishment are complete.
+Returning activities can feed either an idle node or a subsequent repositioning activity.
+Following the fixed-population-mean (FPM) planning approach of \citet{heServiceRegion2017M&SOM} and Wang et al.~\citeyearpar{wangVertiportPlanning2022M&SOM}, we use $\rho_\ell$ for the availability of a drone at base $\ell$.
+
+Let $\mathcal P_{o,\ell,m,d}$ be the set of feasible service paths for OD pair $(o,d)$ and base pair $(\ell,m)$.
+The actual order rate on path $p\in\mathcal P_{o,\ell,m,d}$ is $\psi_{\ell,m}^{p}\ge0$.
+Each path retains its OD identity through its path set.
+The successful service rate therefore satisfies
+\begin{equation}
+ \sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ =h_{o,d}\alpha_{o,\ell,m,d}\rho_\ell.
+ \label{eq:path_product}
+\end{equation}
+Because $\alpha$ is binary and each OD pair selects at most one base pair, \eqref{eq:path_product} has the following exact linear representation:
+\begin{subequations}\label{eq:path_linearization}
+\begin{align}
+ \sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ &\le h_{o,d}\alpha_{o,\ell,m,d},
+ &&(o,d)\in\mathcal D,\ \ell,m\in\mathcal L,\label{eq:path_pair}\\
+ \sum_{m\in\mathcal L}\sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ &\le h_{o,d}\rho_\ell,
+ &&(o,d)\in\mathcal D,\ \ell\in\mathcal L,\label{eq:path_source_upper}\\
+ h_{o,d}\rho_\ell-
+ \sum_{m\in\mathcal L}\sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ &\le h_{o,d}\left(1-\sum_{m\in\mathcal L}\alpha_{o,\ell,m,d}\right),
+ &&(o,d)\in\mathcal D,\ \ell\in\mathcal L.\label{eq:path_source_lower}
+\end{align}
+\end{subequations}
+At the selected departure base, the two source inequalities fix total service at $h_{o,d}\rho_\ell$, and the pair inequality assigns that flow to the selected return base.
+At every unselected departure base, the pair inequalities set all corresponding service flows to zero.
+
+Let $\mathcal R_{\ell,m}$ be the feasible empty repositioning paths from $\ell$ to $m$, for $\ell\ne m$, with actual rates $\varphi_{\ell,m}^{r}\ge0$.
+The total service and repositioning flow entering each base equals its total outgoing flow.
+These balances also determine the stationary routing probabilities at replenished returns.
+
+Let $I_\ell$ be the mean number of idle drones at base $\ell$.
+The FPM idle-inventory relationship is $I_\ell\ge\rho_\ell/(1-\rho_\ell)$.
+Its equivalent second-order cone representation is
+\begin{equation}
+ \left\|\begin{pmatrix}2\\I_\ell+\rho_\ell\end{pmatrix}\right\|_2
+ \le I_\ell+2-\rho_\ell,
+ \qquad I_\ell\ge0,\qquad 0\le\rho_\ell\le x_\ell.
+ \label{eq:path_idle_cone}
+\end{equation}
+For finite $I_\ell$, this cone enforces $\rho_\ell<1$.
+With $\tau_p$ and $\tau_r$ denoting mean service and repositioning durations, Little's law gives the fleet requirement
+\begin{equation}
+ \sum_{\ell\in\mathcal L}I_\ell
+ +\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+   \sum_{p\in\mathcal P_{o,\ell,m,d}}\tau_p\psi_{\ell,m}^{p}
+ +\sum_{\ell\ne m}\sum_{r\in\mathcal R_{\ell,m}}\tau_r\varphi_{\ell,m}^{r}
+ \le\Gamma,
+ \label{eq:path_fleet}
+\end{equation}
+where $\Gamma\ge0$ is a continuous fleet-sizing decision with unit cost $f^{\mathrm{fleet}}>0$.
+This relationship combines idle inventory with drones engaged in complete routes, as in the fleet-planning formulations of \citet{heServiceRegion2017M&SOM,chenCoordinatedDroneCourier2025}.
+
+\subsubsection{Drone Routes and Service Times}
+\label{subsubsec:path_times}
+
+A service path specifies a pickup locker $i(p)$, a delivery locker $j(p)\ne i(p)$, and the three successive stages
+\begin{equation}
+ \ell\longrightarrow i(p),\qquad i(p)\longrightarrow j(p),\qquad j(p)\longrightarrow m.
+ \label{eq:path_stages}
+\end{equation}
+Intermediate replenishment is allowed at nodes in $\mathcal K$.
+The only locker visits on a service path are its designated pickup and delivery actions, and all intermediate nodes belong to $\mathcal K$.
+An empty repositioning path visits replenishment nodes only.
+Let $t_{u,v}^{\mathrm{fly}}$ be the flight time on a candidate link, $t^{\mathrm{bat}}$ the usable flight-time budget of a full battery, and $t_k^{\mathrm{sw}}$ the replacement time at node $k$.
+Energy consumption is proportional to flight time and is the same for loaded and empty flight.
+The accumulated flight time between successive replenishments cannot exceed $t^{\mathrm{bat}}$.
+The drone starts fully replenished, preserves its residual energy at lockers, and receives a full replacement at every visited replenishment node, including its final return base.
+An intermediate base visit provides replenishment while the drone remains committed to its route.
+Replacement resources are sufficient, and a drone waiting for a courier rests on the ground.
+
+Let $t_p^1$ be the time from departure to arrival at the pickup locker, $t_p^2$ the time from meal collection there to deposition at the delivery locker, and $t_p^3$ the subsequent return-and-replenishment time.
+Each stage includes its flight, handling, and intermediate replacement times.
+The courier's travel time from merchant $o$ to pickup locker $i$ is the nonnegative random variable $T_{o,i}$.
+Route selection precedes its realization, and courier times are independent across orders and independent of inventory at the request epoch.
+We use an exponential specification with mean $t_{o,i}^{\mathrm r}$, estimated from delivery data.
+The complete service duration and its mean are
+\begin{align}
+ T_p&=\max\{t_p^1,T_{o,i(p)}\}+t_p^2+t_p^3,\label{eq:path_random_time}\\
+ \tau_p&=t_p^1+t_p^2+t_p^3
+ +t_{o,i(p)}^{\mathrm r}\exp\left(-\frac{t_p^1}{t_{o,i(p)}^{\mathrm r}}\right).
+ \label{eq:path_mean_time}
+\end{align}
+If $t_{o,i(p)}^{\mathrm r}=0$, the last term is zero.
+These durations define the general service-time distributions of the infinite-server activities; the planning model uses their means.
+An empty path has duration $\tau_r$, including all flight and replacement times.
+
+For each path, $a_{u,v}^{p}$ or $a_{u,v}^{r}$ counts its traversals of directed link $(u,v)$, and $t_p^{\mathrm{fly}}$ or $t_r^{\mathrm{fly}}$ is its total flight time.
+The locker coefficient $b_i^p=\mathbf1\{i(p)=i\}+\mathbf1\{j(p)=i\}$ records the handling event at location $i$.
+Path sets are constructed on the full candidate graph and incorporate the energy and action-order requirements.
+Within each stage, a replenishment node need only be visited once; an empty route likewise need not repeat a replenishment node.
+Removing a repeated-node cycle preserves the full battery state and weakly reduces time and cost.
+
+\subsection{Delivery-Mode Choice}
+\label{subsec:path_choice}
+
+At destination locker $j$, a customer at $d$ chooses between self-pickup and home delivery by a courier.
+Their deterministic utility components are $V_{d,j}^{P}$ and $V_{d,j}^{H}$, based on the specified walking, price, and terminal-service attributes.
+With independent type-I extreme-value utility disturbances, the self-pickup probability is
+\begin{equation}
+ \sigma_{d,j}=\frac{\exp(V_{d,j}^{P})}
+ {\exp(V_{d,j}^{P})+\exp(V_{d,j}^{H})}.
+ \label{eq:path_choice}
+\end{equation}
+Self-pickup is excluded when the locker is outside the allowed collection range, in which case $\sigma_{d,j}=0$.
+The utility attributes are fixed for each customer--locker pair, so the probabilities are evaluated before optimization.
+The path allocation selects the destination locker and therefore the applicable choice probability.
+
+Let $c_{a,b}^{\mathrm{rider}}$ be the per-order courier cost from location $a$ to $b$, and let $c^{\mathrm{drone}}$ be the drone cost per unit of flight time.
+Self-pickup incurs zero terminal delivery cost, while home delivery incurs $c_{j,d}^{\mathrm{rider}}$.
+The operating costs of service and repositioning columns are consequently
+\begin{align}
+ c_p^{\mathrm{service}}
+ &=c_{o,i(p)}^{\mathrm{rider}}
+ +(1-\sigma_{d,j(p)})c_{j(p),d}^{\mathrm{rider}}
+ +c^{\mathrm{drone}}t_p^{\mathrm{fly}},
+ &&p\in\mathcal P_{o,\ell,m,d},\label{eq:path_service_cost}\\
+ c_r^{\mathrm{reposition}}
+ &=c^{\mathrm{drone}}t_r^{\mathrm{fly}},
+ &&r\in\mathcal R_{\ell,m}.\label{eq:path_empty_cost}
+\end{align}
+Fleet costs are charged separately through $\Gamma$.
+
+\subsection{Full Formulation}
+\label{subsec:path_full}
+
+The objective minimizes facility and flight-link costs, fleet costs, path operating costs, and the direct-courier cost of all orders not served by drones.
+Each realized drone-assisted order removes one order from the direct-courier flow.
+For link activation, define $M^0=(|\mathcal L|+2)\sum_{(o,d)\in\mathcal D}h_{o,d}$ and
+\begin{equation}
+ M_{u,v}=\min\left(\{M^0\}\cup
+ \left\{\max_{s\in\mathcal S}\mu_{i,s}:i\in\{u,v\}\cap\mathcal H\right\}\right).
+ \label{eq:path_link_bound}
+\end{equation}
+An optimal operating plan can be chosen to satisfy these bounds; Section~\ref{subsec:path_inequalities} establishes them using empty-cycle removal and locker capacities.
+The complete mixed-integer second-order cone formulation is
+\begin{subequations}\label{eq:path_full}
+\begin{align}
+ \min\quad
+ &\sum_{\ell\in\mathcal L}f_\ell^{\mathrm{base}}x_\ell
+ +\sum_{i\in\mathcal H}\sum_{s\in\mathcal S}f_{i,s}^{\mathrm{locker}}z_{i,s}
+ +\sum_{k\in\mathcal E}f_k^{\mathrm{swap}}x_k
+ +\sum_{(u,v)\in\mathcal A}f_{u,v}^{\mathrm{link}}y_{u,v}
+ +f^{\mathrm{fleet}}\Gamma\notag\\
+ &+\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+   \sum_{p\in\mathcal P_{o,\ell,m,d}}c_p^{\mathrm{service}}\psi_{\ell,m}^{p}
+ +\sum_{\ell\ne m}\sum_{r\in\mathcal R_{\ell,m}}
+   c_r^{\mathrm{reposition}}\varphi_{\ell,m}^{r}\notag\\
+ &+\sum_{(o,d)\in\mathcal D}c_{o,d}^{\mathrm{rider}}
+  \left(h_{o,d}-\sum_{\ell,m\in\mathcal L}
+  \sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}\right),
+ \label{eq:path_objective}\\
+ \text{s.t.}\quad
+ &\sum_{s\in\mathcal S}z_{i,s}=x_i,
+ &&i\in\mathcal H,\label{eq:path_install}\\
+ &\sum_{\ell,m\in\mathcal L}\alpha_{o,\ell,m,d}\le1,
+ &&(o,d)\in\mathcal D,\label{eq:path_assign}\\
+ &\sum_{m\in\mathcal L}\alpha_{o,\ell,m,d}\le x_\ell,
+ &&(o,d)\in\mathcal D,\ \ell\in\mathcal L,\label{eq:path_open_source}\\
+ &\sum_{\ell\in\mathcal L}\alpha_{o,\ell,m,d}\le x_m,
+ &&(o,d)\in\mathcal D,\ m\in\mathcal L,\label{eq:path_open_return}\\
+ &y_{u,v}\le x_u,\quad y_{u,v}\le x_v,
+ &&(u,v)\in\mathcal A,\label{eq:path_open_link}\\
+ &y_{u,v}\ge x_u+x_v-1,
+ &&(u,v)\in\mathcal A^0,\label{eq:path_colocation}\\
+ &0\le\rho_\ell\le x_\ell,
+ &&\ell\in\mathcal L,\label{eq:path_rho}\\
+ &\|(2,I_\ell+\rho_\ell)\|_2\le I_\ell+2-\rho_\ell,
+ &&\ell\in\mathcal L,\label{eq:path_full_cone}\\
+ &\sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ \le h_{o,d}\alpha_{o,\ell,m,d},
+ &&\substack{(o,d)\in\mathcal D,\\\ell,m\in\mathcal L},\label{eq:path_full_pair}\\
+ &\sum_{m\in\mathcal L}\sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ \le h_{o,d}\rho_\ell,
+ &&(o,d)\in\mathcal D,\ \ell\in\mathcal L,\label{eq:path_full_source_upper}\\
+ &h_{o,d}\rho_\ell-
+ \sum_{m\in\mathcal L}\sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ \le h_{o,d}\left(1-\sum_{m\in\mathcal L}\alpha_{o,\ell,m,d}\right),
+ &&(o,d)\in\mathcal D,\ \ell\in\mathcal L,\label{eq:path_full_source_lower}\\
+ &\sum_{(o,d)\in\mathcal D}\sum_{m\in\mathcal L}
+  \sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}
+ +\sum_{m\ne\ell}\sum_{r\in\mathcal R_{\ell,m}}\varphi_{\ell,m}^{r}\notag\\
+ &\qquad=\sum_{(o,d)\in\mathcal D}\sum_{m\in\mathcal L}
+  \sum_{p\in\mathcal P_{o,m,\ell,d}}\psi_{m,\ell}^{p}
+ +\sum_{m\ne\ell}\sum_{r\in\mathcal R_{m,\ell}}\varphi_{m,\ell}^{r},
+ &&\ell\in\mathcal L,\label{eq:path_balance}\\
+ &\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+  \sum_{p\in\mathcal P_{o,\ell,m,d}}b_i^p\psi_{\ell,m}^{p}
+ \le\sum_{s\in\mathcal S}\mu_{i,s}z_{i,s},
+ &&i\in\mathcal H,\label{eq:path_capacity}\\
+ &\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+  \sum_{p\in\mathcal P_{o,\ell,m,d}}a_{u,v}^p\psi_{\ell,m}^{p}
+ +\sum_{\ell\ne m}\sum_{r\in\mathcal R_{\ell,m}}a_{u,v}^r\varphi_{\ell,m}^{r}
+ \le M_{u,v} y_{u,v},
+ &&(u,v)\in\mathcal A,\label{eq:path_activation}\\
+ &\sum_{\ell\in\mathcal L}I_\ell
+ +\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+ \sum_{p\in\mathcal P_{o,\ell,m,d}}\tau_p\psi_{\ell,m}^{p}
+ +\sum_{\ell\ne m}\sum_{r\in\mathcal R_{\ell,m}}\tau_r\varphi_{\ell,m}^{r}
+ \le\Gamma,\label{eq:path_full_fleet}\\
+ &x_v,z_{i,s},y_{u,v},\alpha_{o,\ell,m,d}\in\{0,1\},
+ \qquad I_\ell,\Gamma,\psi_{\ell,m}^{p},\varphi_{\ell,m}^{r}\ge0.
+ \label{eq:path_domains}
+\end{align}
+\end{subequations}
+All variables in \eqref{eq:path_domains} range over their previously defined index sets, and $\rho$ and $\Gamma$ are continuous.
+The direct-courier flow in \eqref{eq:path_objective} is nonnegative by \eqref{eq:path_linearization} and \eqref{eq:path_assign}.
+
+\section{Solution Method}
+\label{sec:path_solution}
+
+We decompose \eqref{eq:path_full} into an integer strategic master problem and a continuous conic operating subproblem.
+Column generation handles the service and repositioning paths within the subproblem.
+This follows the Benders--column-generation architecture of \citet{bayramHubNetwork2023TransportationScience}, with pricing adapted to battery feasibility and courier--drone coordination.
+All candidate paths are defined independently of the strategic decisions, which enter the operating constraints only through affine right-hand sides.
+
+\subsection{Master Problem}
+\label{subsec:path_master}
+
+Let $\mathcal X$ contain the binary strategic decisions satisfying \eqref{eq:path_install}--\eqref{eq:path_colocation}.
+For a fixed design $(x,z,y,\alpha)$, let $Q(x,z,y,\alpha)$ be its minimum fleet and delivery operating cost, including the direct-courier flow.
+The master uses a continuous variable $\zeta$ to approximate this value:
+\begin{equation}
+\begin{aligned}
+ \min_{x,z,y,\alpha,\zeta}\quad
+ &\sum_{\ell\in\mathcal L}f_\ell^{\mathrm{base}}x_\ell
+ +\sum_{i\in\mathcal H}\sum_{s\in\mathcal S}f_{i,s}^{\mathrm{locker}}z_{i,s}
+ +\sum_{k\in\mathcal E}f_k^{\mathrm{swap}}x_k
+ +\sum_{(u,v)\in\mathcal A}f_{u,v}^{\mathrm{link}}y_{u,v}
+ +\zeta\\
+ \text{s.t.}\quad
+ &(x,z,y,\alpha)\in\mathcal X,\qquad \zeta\ge0,\\
+ &\zeta\ge L^q(x,z,y,\alpha),\qquad q\in\mathcal C.
+\end{aligned}
+\label{eq:path_master}
+\end{equation}
+Here $\mathcal C$ indexes the Benders cuts generated so far, with $L^q$ defined in Section~\ref{subsec:path_inequalities}.
+The initial operating-cost bound in that section can be included before the first iteration.
+The facility, capacity-level, link, and assignment variables remain binary; all fleet, availability, and flow decisions are evaluated in the subproblem.
+
+\subsection{Benders Subproblem}
+\label{subsec:path_subproblem}
+
+For an integer master solution $(\widehat x,\widehat z,\widehat y,\widehat\alpha)$, the subproblem is
+\begin{equation}
+\begin{aligned}
+ Q(\widehat x,\widehat z,\widehat y,\widehat\alpha)
+ =\min_{\rho,I,\Gamma,\psi,\varphi}\quad
+ &f^{\mathrm{fleet}}\Gamma
+ +\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+  \sum_{p\in\mathcal P_{o,\ell,m,d}}c_p^{\mathrm{service}}\psi_{\ell,m}^{p}\\
+ &+\sum_{\ell\ne m}\sum_{r\in\mathcal R_{\ell,m}}
+  c_r^{\mathrm{reposition}}\varphi_{\ell,m}^{r}\\
+ &+\sum_{(o,d)\in\mathcal D}c_{o,d}^{\mathrm{rider}}
+  \left(h_{o,d}-\sum_{\ell,m\in\mathcal L}
+  \sum_{p\in\mathcal P_{o,\ell,m,d}}\psi_{\ell,m}^{p}\right)\\
+ \text{s.t.}\quad
+ &\eqref{eq:path_linearization},\ \eqref{eq:path_fleet},
+  \eqref{eq:path_rho},\ \eqref{eq:path_full_cone},
+  \eqref{eq:path_balance}--\eqref{eq:path_activation},\\
+ &(x,z,y,\alpha)=(\widehat x,\widehat z,\widehat y,\widehat\alpha),\\
+ &I,\Gamma,\psi,\varphi\ge0.
+\end{aligned}
+\label{eq:path_subproblem}
+\end{equation}
+The zero-flow solution $\rho=I=\Gamma=\psi=\varphi=0$ serves all orders by couriers and is feasible for every strategic design.
+Hence the decomposition requires optimality cuts only.
+
+The conic transformation has already been incorporated in \eqref{eq:path_full_cone}.
+The subproblem has an attained optimum and an attained dual optimum, including designs that force some availabilities to zero.
+To see this, eliminate $\Gamma$ and $I$ at their minimum-cost values.
+The resulting objective is a convex differentiable function of $\rho$ plus linear flow costs over a polyhedron, with queueing term $f^{\mathrm{fleet}}\sum_\ell\rho_\ell/(1-\rho_\ell)$.
+The feasible all-courier cost bounds the useful fleet and keeps an optimum away from $\rho_\ell=1$.
+Polyhedral first-order optimality conditions then provide finite multipliers for the conic formulation.
+
+For pricing and cut generation, use the nonnegative multipliers in Table~\ref{tab:path_duals}.
+Let $\pi_\ell$ be the unrestricted multiplier on base outflow minus inflow in \eqref{eq:path_balance}.
+The multiplier on \eqref{eq:path_fleet} can be chosen as $f^{\mathrm{fleet}}$, since $\Gamma$ is continuous and appears only in its positive linear cost and that constraint.
+
+\begin{table}[htbp]
+\centering
+\caption{Nonnegative operating-subproblem multipliers.}
+\label{tab:path_duals}
+\begin{tabular}{ll}
+\toprule
+Constraint & Multiplier\\
+\midrule
+Pair-flow upper bound \eqref{eq:path_pair} & $\beta_{o,\ell,m,d}$\\
+Source-flow upper bound \eqref{eq:path_source_upper} & $\gamma_{o,\ell,d}$\\
+Source-flow lower bound, oriented as \eqref{eq:path_source_lower} & $\delta_{o,\ell,d}$\\
+Availability bound $\rho_\ell\le x_\ell$ & $\eta_\ell$\\
+Locker capacity \eqref{eq:path_capacity} & $\nu_i$\\
+Link activation \eqref{eq:path_activation} & $\omega_{u,v}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Column Generation}
+\label{subsec:path_cg}
+
+The restricted subproblem replaces the complete path sets by subsets $\widehat{\mathcal P}_{o,\ell,m,d}$ and $\widehat{\mathcal R}_{\ell,m}$.
+It remains feasible even with an empty path pool because direct courier delivery is available for every order.
+Solving it yields feasible operations and dual prices for the current design.
+
+The reduced cost of a service column is
+\begin{align}
+ \overline c_{\ell,m}^{p}
+ ={}&c_p^{\mathrm{service}}-c_{o,d}^{\mathrm{rider}}
+ +f^{\mathrm{fleet}}\tau_p+\pi_\ell-\pi_m
+ +\beta_{o,\ell,m,d}+\gamma_{o,\ell,d}-\delta_{o,\ell,d}\notag\\
+ &+\sum_{i\in\mathcal H}\nu_i b_i^p
+ +\sum_{(u,v)\in\mathcal A}\omega_{u,v}a_{u,v}^p,
+ \qquad p\in\mathcal P_{o,\ell,m,d}.
+ \label{eq:path_rc_service}
+\end{align}
+The term $-c_{o,d}^{\mathrm{rider}}$ follows from the reduction in direct-courier flow when one additional order uses a service column.
+The reduced cost of an empty column is
+\begin{equation}
+ \overline c_{\ell,m}^{r}
+ =c_r^{\mathrm{reposition}}+f^{\mathrm{fleet}}\tau_r
+ +\pi_\ell-\pi_m
+ +\sum_{(u,v)\in\mathcal A}\omega_{u,v}a_{u,v}^{r}.
+ \label{eq:path_rc_empty}
+\end{equation}
+The pricing problems are
+\begin{equation}
+ \min_{p\in\mathcal P_{o,\ell,m,d}}\overline c_{\ell,m}^{p}
+ \quad\text{for each }(o,d),\ell,m,
+ \qquad
+ \min_{r\in\mathcal R_{\ell,m}}\overline c_{\ell,m}^{r}
+ \quad\text{for each }\ell\ne m.
+ \label{eq:path_pricing}
+\end{equation}
+Negative-reduced-cost paths are added and the restricted subproblem is reoptimized.
+Pricing examines the complete candidate graph, including currently closed facilities and links, whose use is controlled by the activation constraints.
+Once every pricing value is nonnegative, the restricted dual is feasible for all columns and the operating subproblem is solved.
+
+For service pricing, enumerate the pickup and delivery lockers $i\ne j$ and optimize the energy-feasible movements between the two bases and these locker actions.
+Before pickup, a label records elapsed time, accumulated flight and link-price cost, and remaining flight-time budget.
+The budget resets at replenishment nodes and is preserved at lockers.
+At a replenishment node all labels have a full battery, so a label with no greater elapsed time and no greater accumulated cost dominates another label there.
+At a locker, dominance additionally requires no smaller remaining budget.
+When pickup occurs after a drone prefix of duration $t$, charge $f^{\mathrm{fleet}}\mathbb E[\max\{t,T_{o,i}\}]$, the first-leg courier cost, and the locker price $\nu_i$.
+The expectation is nondecreasing in $t$, so this dominance rule preserves an optimal continuation.
+
+After pickup, all duration costs are additive: each flight contributes $(c^{\mathrm{drone}}+f^{\mathrm{fleet}})t_{u,v}^{\mathrm{fly}}+\omega_{u,v}$, and each replacement contributes $f^{\mathrm{fleet}}t_k^{\mathrm{sw}}$.
+The delivery action adds the locker price $\nu_j$ and expected terminal courier cost $(1-\sigma_{d,j})c_{j,d}^{\mathrm{rider}}$.
+Given handling times enter the same additive duration cost.
+The final replacement at $m$ is included.
+Empty pricing applies these additive movement and replacement prices to routes containing only replenishment nodes.
+
+The labeling search may allow walks and remove repeated-node cycles from its output.
+All movement and replenishment increments are nonnegative, and a completed replenishment restores the same battery state.
+Thus a within-stage cycle cannot improve a label or its best completion, and an optimal priced walk has a stagewise cycle-free representative in the specified path set.
+Identical labels are merged, including those induced by zero-time connections.
+This implements the dominance rule without imposing additional visited-set restrictions.
+
+\subsection{Valid Inequalities}
+\label{subsec:path_inequalities}
+
+At iteration $q$, let $(\widehat x,\widehat z,\widehat y,\widehat\alpha)$ be the tested design and $\widehat Q$ its fully evaluated operating cost.
+Use optimal multipliers obtained after all pricing problems have been checked.
+The Benders cut is
+\begin{align}
+ \zeta\ge L^q(x,z,y,\alpha)
+ :={}&\widehat Q
+ -\sum_{\ell\in\mathcal L}\widehat\eta_\ell(x_\ell-\widehat x_\ell)
+ -\sum_{i\in\mathcal H}\sum_{s\in\mathcal S}
+ \mu_{i,s}\widehat\nu_i(z_{i,s}-\widehat z_{i,s})\notag\\
+ &-\sum_{(u,v)\in\mathcal A}M_{u,v}\widehat\omega_{u,v}(y_{u,v}-\widehat y_{u,v})\notag\\
+ &+\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+ h_{o,d}(\widehat\delta_{o,\ell,d}-\widehat\beta_{o,\ell,m,d})
+ (\alpha_{o,\ell,m,d}-\widehat\alpha_{o,\ell,m,d}).
+ \label{eq:path_benders_cut}
+\end{align}
+
+\begin{proposition}
+Constraint \eqref{eq:path_benders_cut} is valid for every strategic design in $\mathcal X$ and is tight at its generating design.
+\end{proposition}
+\begin{proof}
+The complete-column dual feasible region is independent of the strategic design.
+Keeping its optimal multipliers fixed yields an affine lower bound on the operating value by weak duality.
+The right-hand-side derivatives are $-\eta_\ell$ for $x_\ell$, $-\mu_{i,s}\nu_i$ for $z_{i,s}$, $-M_{u,v}\omega_{u,v}$ for $y_{u,v}$, and $h_{o,d}(\delta_{o,\ell,d}-\beta_{o,\ell,m,d})$ for $\alpha_{o,\ell,m,d}$.
+Strong duality makes that lower bound equal to $\widehat Q$ at the generating design, giving \eqref{eq:path_benders_cut}.
+\end{proof}
+
+An initial master inequality follows from a lower bound on each assigned pair's per-order cost.
+Define
+\begin{equation}
+ \underline c_{o,\ell,m,d}
+ =\min_{p\in\mathcal P_{o,\ell,m,d}}
+ \{c_p^{\mathrm{service}}+f^{\mathrm{fleet}}\tau_p\},
+ \qquad
+ \Delta_{o,\ell,m,d}
+ =h_{o,d}\max\{0,c_{o,d}^{\mathrm{rider}}-\underline c_{o,\ell,m,d}\}.
+ \label{eq:path_saving_bound}
+\end{equation}
+For an empty path set, take $\underline c_{o,\ell,m,d}=+\infty$ and $\Delta_{o,\ell,m,d}=0$.
+Since an assigned OD can send at most $h_{o,d}$ orders through its base pair, while idle inventory and repositioning have nonnegative costs,
+\begin{equation}
+ \zeta\ge
+ \sum_{(o,d)\in\mathcal D}h_{o,d}c_{o,d}^{\mathrm{rider}}
+ -\sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+ \Delta_{o,\ell,m,d}\alpha_{o,\ell,m,d}
+ \label{eq:path_initial_cut}
+\end{equation}
+is a valid initial lower bound.
+The coefficients can be computed by the service pricing procedure with zero locker and link prices.
+Any valid lower estimate of $\underline c_{o,\ell,m,d}$ also gives a valid, possibly weaker, inequality.
+
+The activation coefficient in \eqref{eq:path_activation} is justified separately for every fixed design.
+A service route traverses a given link at most once in each of its three stages, and total service flow is at most $\sum_{(o,d)}h_{o,d}$.
+Remove directed cycles from the base-level empty flow while keeping service flows unchanged.
+The remaining empty flow decomposes into imbalance paths of at most $|\mathcal L|-1$ base-to-base movements, and their total source imbalance is at most total service flow.
+Each empty route traverses any given physical link at most once.
+The combined link usage therefore has an optimal representative bounded by $(|\mathcal L|+2)\sum_{(o,d)}h_{o,d}$, as used in the model.
+Cycle removal preserves all base balances and weakly decreases capacity use and fleet cost.
+
+For a link incident to locker $i$, an additional activation inequality is
+\begin{equation}
+ \sum_{(o,d)\in\mathcal D}\sum_{\ell,m\in\mathcal L}
+ \sum_{p\in\mathcal P_{o,\ell,m,d}}a_{u,v}^p\psi_{\ell,m}^{p}
+ +\sum_{\ell\ne m}\sum_{r\in\mathcal R_{\ell,m}}a_{u,v}^r\varphi_{\ell,m}^{r}
+ \le \left(\max_{s\in\mathcal S}\mu_{i,s}\right)y_{u,v}.
+ \label{eq:path_locker_link_cut}
+\end{equation}
+Every traversal of that link requires the designated handling event at $i$.
+For a link joining two lockers, the inequality applies to both endpoints.
+Taking the minimum of these bounds and $M^0$ gives \eqref{eq:path_link_bound}.
+The same coefficients $M_{u,v}$ are used in the full model, operating subproblem, and Benders cuts.
+
+The algorithm alternates between the integer master and complete operating evaluations by column generation.
+The master objective provides a lower bound, and each feasible design with its operating solution provides an upper bound.
+A Benders cut is added after complete pricing certifies the subproblem value.
+The algorithm terminates when the upper and lower bounds meet the prescribed tolerance.
+With exact subproblem solutions and exact pricing, the finite strategic design set and cuts that are tight at their generating designs give finite convergence.
+
+\label{sec:solution_methods}
+The model separates naturally into integer strategic decisions and continuous queueing and routing decisions.
+Our decomposition combines a path-based conic operating subproblem with a Benders master, following the conic-duality and column-generation architecture of \citet{Bayram2023}.
+Here the recourse coefficients incorporate pickup synchronization and a closed-fleet planning relationship, and the design includes a shared fixed charge for every directed physical flight link.
+The linear lift in Proposition~\ref{prop:lift} provides the affine design dependence required by the decomposition.
+
+\subsubsection{Master problem}
+
+Let $Q(x,n,y,B)$ be the minimum operational part of \eqref{eq:full-objective}, including $C^0$, for a fixed strategic design.
+Given a collection $\mathcal C$ of valid affine recourse lower bounds $L^k$, the master problem is
+\begin{equation}
+ \begin{aligned}
+ \min_{x,n,y,B,\zeta}\quad&C^{\mathrm{fix}}(x,n,y)+\zeta\\
+ \text{s.t.}\quad&(x,n,y,B)\in\mathcal X,\qquad\zeta\ge0,\\
+ &\zeta\ge L^k(x,n,y,B),\qquad k\in\mathcal C.
+ \end{aligned}
+ \label{eq:master}
+\end{equation}
+Only the cost epigraph $\zeta$ is continuous in the master.
+The remaining variables are the facility, cabinet-count, flight link, and OD-assignment decisions.
+The bound $\zeta\ge0$ follows from nonnegative actual fulfillment and fleet costs.
+All queueing and path-flow variables remain in the operating subproblem.
+
+\subsubsection{Subproblem}
+
+For an integer master solution $(\bar x,\bar n,\bar y,\bar B)$, substitute those values into \eqref{eq:full-cone}--\eqref{eq:full-nonnegative} and minimize the operational cost.
+This is a second-order cone program.
+For an assigned OD--base pair, it is computationally convenient to use the reduced equality $\Theta_{od,\ell m}=\lambda_{od}\rho_\ell$ and to eliminate inactive groups and their source slacks.
+Proposition~\ref{prop:lift} ensures that this reduction has the same fixed-design value.
+The full lifted form is retained for deriving globally valid cuts.
+
+The restricted subproblem includes subsets $\widehat{\mathcal P}_{od}^{\ell m}\subseteq\mathcal P_{od}^{\ell m}$ and $\widehat{\mathcal R}_{\ell m}\subseteq\mathcal R_{\ell m}$.
+Its solution supplies feasible operations for the current design and therefore an upper bound on $Q$.
+The zero-flow all-courier solution makes every restricted subproblem feasible, including one with an initially empty path pool.
+Initial energy-feasible paths can be added to obtain informative starting solutions.
+
+\subsubsection{Pricing subproblem}
+
+Associate free multipliers $\alpha_{od,\ell}$ with the source equations in the orientation $\lambda_{od}\rho_\ell-\sum_m\Theta_{od,\ell m}-w_{od,\ell}=0$.
+Associate free multipliers $\pi_\ell$ with base outflow minus inflow.
+Let $u_h,\eta_{uv},\nu_\ell,\sigma_\ell\ge0$ be the multipliers for cabinet capacity, flight link activation, empty-clock bounds, and $\rho_\ell\le\bar\rho x_\ell$, respectively.
+Finally, let $\gamma_{od,\ell m}\ge0$ and $\beta_{od,\ell}\ge0$ be the multipliers for \eqref{eq:group-lift} and \eqref{eq:slack-lift}.
+Define
+\begin{equation}
+ A_\ell^*=\sum_{(o,d)}\lambda_{od}\alpha_{od,\ell}
+          -\bar\kappa\nu_\ell+\sigma_\ell,
+ \qquad
+ h(A)=\min_{0\le r\le\bar\rho}
+       \left\{c^D\frac{r}{1-r}+Ar\right\}.
+ \label{eq:idle-conjugate}
+\end{equation}
+The minimizer is
+\begin{equation}
+ r^*(A)=
+ \begin{cases}
+ 0,&A\ge-c^D,\\
+ \min\{\bar\rho,\,1-\sqrt{c^D/(-A)}\},&A<-c^D,
+ \end{cases}
+ \qquad
+ h(A)=c^D\frac{r^*(A)}{1-r^*(A)}+Ar^*(A).
+ \label{eq:idle-conjugate-closed}
+\end{equation}
+This scalar minimization is the exact elimination of the idle cone in the operating dual.
+
+For any multiplier vector satisfying
+\begin{align}
+ \beta_{od,\ell}&\ge\alpha_{od,\ell},\label{eq:dual-w}\\
+ c_p+u_{i(p)}+u_{j(p)}+\sum_{(u,v)}\eta_{uv}a_{uv}^p
+ +\pi_\ell-\pi_m-\alpha_{od,\ell}+\gamma_{od,\ell m}&\ge0,
+ &&p\in\mathcal P_{od}^{\ell m},\label{eq:dual-service}\\
+ c_r+\sum_{(u,v)}\eta_{uv}a_{uv}^r+\pi_\ell-\pi_m+\nu_\ell&\ge0,
+ &&r\in\mathcal R_{\ell m},\label{eq:dual-empty}
+\end{align}
+the dual objective is the affine design function
+\begin{align}
+ L(x,n,y,B)={}&C^0+\sum_\ell h(A_\ell^*)
+ -\sum_{(o,d),\ell}M_{od}\beta_{od,\ell}\notag\\
+ &+\sum_{(o,d),\ell,m}M_{od}
+  (\beta_{od,\ell}-\gamma_{od,\ell m})B_{od,\ell m}
+ -\bar\rho\sum_\ell\sigma_\ell x_\ell\notag\\
+ &-\sum_h\mu_hu_hn_h
+ -\sum_{(u,v)}U_{uv}\eta_{uv}y_{uv}.
+ \label{eq:global-cut}
+\end{align}
+Maximizing this expression over the dual-feasible multipliers gives $Q$ under strong duality.
+
+
+
+For a service group, the pricing problem computes
+\begin{equation}
+ q_{od,\ell m}(u,\eta)=
+ \min_{p\in\mathcal P_{od}^{\ell m}}
+ \left\{c_p+u_{i(p)}+u_{j(p)}+
+       \sum_{(u,v)}\eta_{uv}a_{uv}^p\right\}.
+ \label{eq:service-pricing}
+\end{equation}
+Its minimum reduced cost is
+\begin{equation}
+ \bar c_{od,\ell m}=q_{od,\ell m}(u,\eta)
+ +\pi_\ell-\pi_m-\alpha_{od,\ell}+\gamma_{od,\ell m}.
+ \label{eq:service-reduced-cost}
+\end{equation}
+An empty-path pricing problem computes
+\begin{equation}
+ q_{\ell m}^{E}(\eta)=\min_{r\in\mathcal R_{\ell m}}
+ \left\{c_r+\sum_{(u,v)}\eta_{uv}a_{uv}^r\right\},
+ \label{eq:empty-pricing}
+\end{equation}
+with minimum reduced cost $q_{\ell m}^{E}(\eta)+\pi_\ell-\pi_m+\nu_\ell$.
+Every negative-reduced-cost path is eligible to enter the restricted subproblem.
+Pricing uses all candidate facilities and physical links, including currently disabled links whose flow is controlled by \eqref{eq:airline-activation}.
+This preserves the dual rows for the complete design-independent column universe.
+
+The pricing calculation exploits the complete replacement at every visited node in $\mathcal K$.
+Before pickup, a label at such a node $a$ records elapsed time $t$ and accumulated flight-distance and link-price cost $z$; all labels at $a$ have the same full battery resource.
+The initial label at $\ell$ is $(0,0)$.
+A station-to-station movement adds its flight and replacement duration to $t$, and its flight-distance charge and $\eta$ price to $z$.
+A label with no greater $t$ and no greater $z$ dominates another label at the same station, because every continuation begins with the same resource and the synchronization transform is nondecreasing in arrival time.
+Let $\mathcal F_{\ell a}$ denote the resulting nondominated prefix labels.
+Nonnegative increments ensure that cycles cannot produce a new nondominated label; Proposition~\ref{prop:finite-paths} therefore gives a finite exact calculation.
+
+After pickup, all time costs are additive.
+Station-to-station movements have price $c^{\mathrm{fly}}d_{uv}+c^D(t_{uv}+s_v)+\eta_{uv}$, where $s_v$ is the replacement duration at the arrival station.
+Their shortest-path closure accounts for any number of intermediate replacements.
+For fixed last pre-pickup station $a$, pickup locker $i$, delivery locker $j$, and return base $m$, let $D_{aijm}(\eta)$ be the minimum subsequent flight, fleet-time, and link-price cost, starting at $i$ with resource $\bar e-d_{ai}$.
+It is obtained by comparing a direct loaded link $i\to j$ with a route that first visits a replacement station, and then combining the station closure with delivery and return movements.
+Enumerating the stations adjacent to the two locker actions enforces the residual-energy sums between successive replacements.
+The terminal replacement at $m$ is included in $D_{aijm}$.
+
+The service pricing value can consequently be evaluated as
+\begin{equation}
+\begin{aligned}
+ q_{od,\ell m}(u,\eta)=
+ \min_{\substack{i,j\in\mathcal H,\ i\ne j;\ a\in\mathcal K\\
+                 (a,i)\in\mathcal A;\ (t,z)\in\mathcal F_{\ell a}}}
+ \bigl\{&z+c^{\mathrm{fly}}d_{ai}+\eta_{ai}
+       +c^D\mathbb E[\max\{t+t_{ai},T_{oi}\}]\\
+       &+D_{aijm}(\eta)+c_{oi}^F+\bar c_{dj}-c_{od}^R+u_i+u_j\bigr\}.
+\end{aligned}
+\label{eq:pricing-factorization}
+\end{equation}
+Energy-infeasible combinations have $D_{aijm}=+\infty$.
+This factorization shares post-pickup shortest-path calculations across OD groups while retaining the two-dimensional pre-pickup time--cost tradeoff.
+Empty pricing uses the same nonnegative-price station closure from $\ell$ to $m$, including replacement at every arrival.
+
+\subsection{Valid Inequalities}
+\label{sec:valid_inequalities_integrated}
+
+
+After complete pricing, source-slack and group multipliers can be completed explicitly as
+\begin{align}
+ \beta_{od,\ell}&=\max\{\alpha_{od,\ell},0\},\label{eq:beta-completion}\\
+ \gamma_{od,\ell m}&=
+ \max\{0,\alpha_{od,\ell}-\pi_\ell+\pi_m-q_{od,\ell m}(u,\eta)\}.
+ \label{eq:gamma-completion}
+\end{align}
+For an empty service-path set, its minimum cost is $+\infty$ and the corresponding completed $\gamma$ is zero.
+The empty reduced-cost conditions are checked over the full replacement network.
+To make this certificate explicit, first replace each empty-clock multiplier by
+\begin{equation}
+ \nu_\ell\leftarrow\nu_\ell+
+ \max\left\{0,\ \max_{m\ne\ell:\,\mathcal R_{\ell m}\ne\varnothing}
+ [\pi_m-\pi_\ell-\nu_\ell-q_{\ell m}^E(\eta)]\right\}.
+ \label{eq:empty-dual-repair}
+\end{equation}
+The increment is zero when there is no reachable return base or every empty reduced cost is already nonnegative.
+If the fixed-design solver eliminated inactive groups, let $a_{od,\ell m}$ be the multiplier on an assigned group in the reduced dual orientation $a_{od,\ell m}\le q_{od,\ell m}(u,\eta)$.
+Embed that multiplier by setting
+\begin{equation}
+ \alpha_{od,\ell}=
+ \min\{a_{od,\ell m},q_{od,\ell m}(u,\eta)\}+\pi_\ell-\pi_m
+ \quad\text{for the selected pair $(\ell,m)$},
+ \label{eq:alpha-embedding}
+\end{equation}
+and set $\alpha_{od,\ell}=0$ at unselected sources.
+Equations~\eqref{eq:beta-completion}--\eqref{eq:gamma-completion} then complete the source-slack and group prices for every candidate pair.
+Finally, recompute $A_\ell^*$ and $h(A_\ell^*)$ using the repaired $\nu_\ell$ before evaluating the cut.
+
+\begin{proposition}[Global Benders validity]
+\label{prop:cut-validity}
+Suppose \eqref{eq:dual-service} and \eqref{eq:dual-empty} hold over the complete candidate path sets, with the stated multiplier signs and \eqref{eq:dual-w}.
+Then $\zeta\ge L(x,n,y,B)$ is a valid optimality cut for every strategic design in $\mathcal X$.
+If the multipliers are optimal for the full operating subproblem at a design, the cut equals its recourse value there.
+\end{proposition}
+\begin{proof}
+Form the Lagrangian of the lifted operational problem using the stated orientations.
+The coefficient of each service or empty flow is its reduced cost in \eqref{eq:dual-service} or \eqref{eq:dual-empty}, and the coefficient of $w_{od,\ell}$ is $\beta_{od,\ell}-\alpha_{od,\ell}$.
+Their nonnegativity makes the infimum over these nonnegative variables equal to zero.
+Minimizing over the idle-cone variables gives $h(A_\ell^*)$.
+The remaining right-hand-side terms are exactly \eqref{eq:global-cut}.
+Weak duality therefore establishes $L\le Q$ for every design, since the dual feasibility region contains no strategic variables.
+Strong duality gives equality at an optimal multiplier vector.
+\end{proof}
+
+The algorithm solves the integer master, evaluates a feasible operating solution for its candidate design, and solves the restricted operational problem with repeated pricing.
+A full-network dual certificate generates \eqref{eq:global-cut}, which is added to the master before the next design is selected.
+The best verified complete solution provides an upper bound, while the master provides a global lower bound.
+The algorithm terminates when their prescribed absolute or relative gap is met.
+With exact subproblem optimization and exact pricing, the finite strategic design set and supporting cuts provide finite convergence.
+Under a computation limit, the algorithm retains its best feasible solution and its valid global lower bound.
+Any numerical reduced-cost violation is accounted for in the certified lower bound before the associated cut is used.
+
+The decomposition therefore preserves an integer design master, continuous availability decisions, and detailed energy-feasible path allocation.
+Locker capacities and fixed flight link decisions couple different OD missions through shared physical resources, while the complete-column dual supplies the common basis for pricing and Benders cuts.
+
 
 \color{black}
 
 \begingroup
 
-\section{Model Formulation}
-\label{sec:formulation}
 
-We formulate a multi-type facility location and network design problem for an urban drone delivery system that complements an existing courier system.
-We refer to this formulation as MLND.
-Following the staged logic of Wang et al.~\citeyearpar{wangVertiportPlanning2022M&SOM}, we first define infrastructure decisions, then connect OD-specific offered orders to network operations, and finally incorporate customer choice into fulfillment costs.
-The formulation uses $\mathcal L$ for physical drone bases, $\mathcal H$ for customer-facing smart lockers, and $\mathcal E$ for battery-swapping stations throughout.
-The mixed-delivery MLND is developed in the main text.
-Its detailed home-delivery-assistance and locker-only restrictions are reported in~\ref{app:hd_model} and~\ref{app:lo_model}, respectively.
-Within the model scope, customer demand is exogenous and every order is fulfilled by a drone--courier combination or by couriers alone.
-The formulation therefore adopts a modeled platform-cost minimization perspective and contains no revenue or profit term.
-Its results characterize cost-related conditions that may support commercial viability rather than commercial viability itself.
 
-\subsection{Infrastructure}
-\label{subsec:infrastructure}
 
-\subsubsection{Candidate facilities and network topology}
 
-A drone base $l\in\mathcal L$ stores, charges, inspects, and dispatches drones but does not directly interface with customers.
-A smart locker $i\in\mathcal H$ is a unified pickup, drop-off, and transfer interface at which parcels are loaded onto or unloaded from drones.
-A battery-swapping station $k\in\mathcal E$ can be used as the sole intermediate energy-replenishment point on a physical movement.
-Each smart locker $i\in\mathcal H$ has an associated virtual idle-drone state $s_i$ that retains drones for possible follow-on assignments after a delivery.
-We define $\mathcal S=\{s_i:i\in\mathcal H\}$.
-These virtual states are operational bookkeeping states rather than physical facilities, and therefore they have no facility-opening variables or physical arc-opening variables.
-
-Let $\widetilde{\mathcal L}=\mathcal L\cup\mathcal S$ be the set of physical and virtual idle-drone states.
-The balance arc set is
-\begin{align}
-\mathcal A
-={}&
-\mathcal A^{LH}
-\cup\mathcal A^{SH}
-\cup\mathcal A^{HH}
-\cup\mathcal A^{HL}
-\cup\mathcal A^{HS},
-\label{set:balance_arcs}
-\end{align}
-where $\mathcal A^{LH}$ contains base-to-locker arcs, $\mathcal A^{HH}$ contains loaded locker-to-locker service arcs, and $\mathcal A^{HL}$ contains locker-to-base arcs.
-The logical arc sets are $\mathcal A^{SH}=\{(s_i,i):i\in\mathcal H\}$ and $\mathcal A^{HS}=\{(i,s_i):i\in\mathcal H\}$.
-
-The set of physical movements is
-\begin{align}
-\mathcal A^{F}
-={}&
-\mathcal A^{LH}
-\cup\mathcal A^{HH}
-\cup\mathcal A^{HL}.
-\label{set:physical_arcs}
-\end{align}
-\textcolor{blue}{For each $(u,v)\in\mathcal A^{F}$, let $\mathcal E_{uv}\subseteq\mathcal E$ contain the swapping stations for which both flight legs of the one-stop route from $u$ to $v$ lie within the usable one-battery range.}
-Define
-\begin{align}
-\widetilde{\mathcal E}_{uv}
-=
-\begin{cases}
-\mathcal E_{uv}\cup\{0\},
-& \text{if direct flight from $u$ to $v$ is feasible},\\
-\mathcal E_{uv},
-& \text{otherwise},
-\end{cases}
-&&\forall (u,v)\in\mathcal A^{F},
-\label{set:route_options}
-\end{align}
-where option $0$ represents direct flight without battery swapping.
-The openable physical connections are
-\begin{align}
-\mathcal A^{Y}
-={}&
-\mathcal A^{F}
-\cup
-\left\{
-(u,k),(k,v):
-(u,v)\in\mathcal A^{F},\ k\in\mathcal E_{uv}
-\right\}.
-\label{set:openable_arcs}
-\end{align}
-For $(u,v)\in\mathcal A^{F}$, $y_{uv}$ activates the corresponding service corridor, whereas $y_{uk}$ and $y_{kv}$ activate the physical access and egress legs of a swap-assisted option.
-The connection-cost coefficients distinguish these design elements and therefore prevent their costs from being interpreted as duplicate charges for one physical leg.
-\textcolor{blue}{Flight-leg distance is screened when $\widetilde{\mathcal E}_{uv}$ is generated, and each physical movement uses either a direct route or at most one swapping station.}
-
-\subsubsection{Facility, capacity, and connection decisions}
-
-Let $\mathcal C$ be the set of smart-locker capacity levels, and let $\mu_c$ be the handling rate provided by level $c\in\mathcal C$.
-The binary variable $x_u$ indicates whether physical facility $u\in\mathcal L\cup\mathcal H\cup\mathcal E$ is opened.
-The binary variable $z_{ic}$ selects capacity level $c$ at smart locker $i$.
-The binary variable $y_{uv}$ indicates whether physical connection $(u,v)\in\mathcal A^{Y}$ is activated.
-Each open smart locker selects one capacity level, and each activated physical connection requires both endpoint facilities to be open:
-\begin{align}
-&
-\sum_{c\in\mathcal C}z_{ic}
-=x_i,
-&&\forall i\in\mathcal H,
-\label{con:capacity_select}
-\\
-&
-y_{uv}
-\le x_u,
-&&\forall (u,v)\in\mathcal A^{Y},
-\label{con:arc_tail}
-\\
-&
-y_{uv}
-\le x_v,
-&&\forall (u,v)\in\mathcal A^{Y}.
-\label{con:arc_head}
-\end{align}
-No $y$ variable is defined on the logical arcs in $\mathcal A^{SH}\cup\mathcal A^{HS}$.
-
-\subsection{Network Operation}
-\label{subsec:network_operation}
-
-Orders for each customer demand market are assumed to arrive according to a Poisson process.
-Drones, rather than parcels, circulate in a closed queueing network \citep{adelmanPriceDirectedControl2007OperationsResearch,heServiceRegion2017M&SOM,chenCoordinatedDroneCourier2025}.
-At any time, a drone is idle at a physical base or in a virtual state, being handled at a smart locker, or traveling on a physical movement.
-Smart lockers are represented by $M/M/1$-type handling queues, whereas flight routes are represented by $M/G/\infty$ transit states.
-
-\subsubsection{OD-specific offered orders}
-
-Let $\mathcal N$ be the set of customer origins and destinations, and let $h_{od}$ be the exogenous order rate of market $(o,d)$.
-We set $h_{od}=0$ for every unmodeled market, including $o=d$.
-For each smart locker $i$, define the eligible idle-state set as
-\begin{align}
-\widetilde{\mathcal L}_{i}
-={}&
-\left\{
-l\in\mathcal L:(l,i)\in\mathcal A^{LH}
-\right\}
-\cup\{s_i\}.
-\label{set:eligible_idle_states}
-\end{align}
-
-The nonnegative continuous variable $\chi_{odijr}$ is the rate of market $(o,d)$ orders assigned, before service realization, to loaded corridor $(i,j)$ and availability level $r$.
-Thus, $\chi_{odijr}$ is an offered rate rather than a realized completion rate.
-The nonnegative continuous variable $w_{\ell i j r}$ is the part of the same offered pool assigned to idle state $\ell\in\widetilde{\mathcal L}_{i}$.
-The OD demand limit is
-\begin{align}
-&
-\sum_{(i,j)\in\mathcal A^{HH}}
-\sum_{r\in\mathcal R}
-\chi_{odijr}
-\le h_{od},
-&&\forall o,d\in\mathcal N.
-\label{con:od_demand_bound}
-\end{align}
-The left-hand side is the total rate from market $(o,d)$ offered to all drone corridors and availability levels.
-The residual demand remains assigned to direct courier delivery.
-
-The OD allocation and idle-state allocation describe the same offered pool at each $(i,j,r)$ and therefore satisfy
-\begin{align}
-&
-\sum_{o,d\in\mathcal N}\chi_{odijr}
-=
-\sum_{\ell\in\widetilde{\mathcal L}_{i}}w_{\ell i j r},
-&&\forall(i,j)\in\mathcal A^{HH},\ r\in\mathcal R.
-\label{con:od_reliability_match}
-\end{align}
-This equality retains the OD composition before the availability factor $\rho_r$ is applied and prevents a later reassignment of realized corridor flow to cost-favorable OD pairs.
-
-We use four families of sufficiently large valid constants.
-The constants $M^1_{ij}$ activate offered flow on loaded corridor $(i,j)$, $M^2_{uv}$ activate realized physical flow on movement $(u,v)$, $M^3_i$ activates the expected population at smart locker $i$, and $M^4_{odj}$ is used in the displayed-locker product linearization.
-The offered-flow activation constraint is
-\begin{align}
-&
-\sum_{\ell\in\widetilde{\mathcal L}_{i}}
-\sum_{r\in\mathcal R}
-w_{\ell i j r}
-\le M^1_{ij}y_{ij},
-&&\forall(i,j)\in\mathcal A^{HH}.
-\label{con:corridor_offer_activation}
-\end{align}
-The summation on the left is the complete offered rate on corridor $(i,j)$, so one corridor-level activation constraint replaces separate bounds on every component of $w$.
-Orders not realized by the drone network fall back to direct origin-to-destination courier home delivery and are not lost from the market.
-
-\subsubsection{Availability and realized service flows}
-
-Let $\mathcal R=\{1,\ldots,R\}$ index the discrete availability levels $0<\rho_1<\cdots<\rho_R<1$.
-The binary variable $\delta_{\ell r}$ selects availability level $r$ for idle state $\ell\in\widetilde{\mathcal L}$.
-An open physical base selects exactly one level, whereas virtual state $s_i$ can select a level only when its associated smart locker is open:
-\begin{align}
-&
-\sum_{r\in\mathcal R}\delta_{l r}
-=x_l,
-&&\forall l\in\mathcal L,
-\label{con:availability_base}
-\\
-&
-\sum_{r\in\mathcal R}\delta_{s_i r}
-\le x_i,
-&&\forall i\in\mathcal H.
-\label{con:availability_virtual}
-\end{align}
-Offered orders can use only the selected availability level:
-\begin{align}
-&
-w_{\ell i j r}
-\le M^1_{ij}\delta_{\ell r},
-&&\forall \ell\in\widetilde{\mathcal L}_{i},\
-(i,j)\in\mathcal A^{HH},\ r\in\mathcal R,
-\label{con:w_reliability}
-\end{align}
-The selected $r$ is shared by the OD allocation through constraint~\eqref{con:od_reliability_match} and by the operational allocation through $w_{\ell i j r}$.
-Physical source connections are activated by the realized-flow constraint introduced below, while loaded-corridor activation is already enforced by constraint~\eqref{con:corridor_offer_activation}.
-
-The nonnegative continuous variable $\psi_{uv}$ denotes loaded flow on $\mathcal A^{HH}$, empty physical flow on $\mathcal A^{LH}\cup\mathcal A^{HL}$, and logical state-transition flow on $\mathcal A^{SH}\cup\mathcal A^{HS}$.
-The realized source and loaded flows are the following two marginals of the same $w$ variables:
-\begin{subequations}
-\label{con:realized_flow_definitions}
-\begin{align}
-&
-\psi_{\ell i}
-=
-\sum_{j:(i,j)\in\mathcal A^{HH}}
-\sum_{r\in\mathcal R}
-\rho_r w_{\ell i j r},
-&&\forall i\in\mathcal H,\ \ell\in\widetilde{\mathcal L}_{i},
-\label{con:source_flow}
-\\
-&
-\psi_{ij}
-=
-\sum_{\ell\in\widetilde{\mathcal L}_{i}}
-\sum_{r\in\mathcal R}
-\rho_r w_{\ell i j r},
-&&\forall (i,j)\in\mathcal A^{HH}.
-\label{con:loaded_flow}
-\end{align}
-\end{subequations}
-The first equality aggregates all realized orders dispatched from idle state $\ell$ to smart locker $i$.
-The second equality aggregates all realized orders carried on loaded corridor $(i,j)$.
-Because each $\rho_r$ is a parameter, the products $\rho_r w_{\ell i j r}$ are linear.
-Together, constraints~\eqref{con:od_reliability_match} and~\eqref{con:loaded_flow} imply
-\begin{align}
-\psi_{ij}
-=
-\sum_{o,d\in\mathcal N}
-\sum_{r\in\mathcal R}
-\rho_r\chi_{odijr},
-&&\forall(i,j)\in\mathcal A^{HH}.
-\label{eq:forward_loaded_flow}
-\end{align}
-Equation~\eqref{eq:forward_loaded_flow} is a consequence rather than an additional model constraint.
-It shows that realized OD flow is generated forward from $\chi$ and cannot be reconstructed freely from aggregate $\psi_{ij}$ after service realization.
-
-\subsubsection{Drone circulation and repositioning}
-
-One conservation equation closes the drone network over physical bases, smart lockers, and virtual idle states:
-\begin{align}
-&
-\sum_{v:(v,u)\in\mathcal A}\psi_{vu}
-=
-\sum_{v:(u,v)\in\mathcal A}\psi_{uv},
-&&\forall u\in\mathcal L\cup\mathcal H\cup\mathcal S.
-\label{con:flow_balance}
-\end{align}
-At a physical base, the equation balances empty recoveries and dispatches.
-At a smart locker, it connects inbound empty or loaded flow to outbound loaded flow, physical recovery, or a logical transition into a virtual idle state.
-At a virtual state, it balances post-delivery entries and releases for subsequent assignments.
-Physical flow is allowed only on activated connections:
-\begin{align}
-&
-\psi_{uv}
-\le M^2_{uv}y_{uv},
-&&\forall (u,v)\in\mathcal A^{F}.
-\label{con:physical_flow_open}
-\end{align}
-
-\subsubsection{Direct and swap-assisted routing}
-
-\textcolor{blue}{Let the nonnegative continuous variable $\varphi_{uv}^{k}$ be the portion of physical flow on $(u,v)$ that uses route option $k\in\widetilde{\mathcal E}_{uv}$, and let $t_{uv}^{k}$ be the corresponding route time, including swap-service time when $k\in\mathcal E_{uv}$.}
-Each physical flow is decomposed among its direct and one-swap options:
-\begin{align}
-&
-\sum_{k\in\widetilde{\mathcal E}_{uv}}
-\varphi_{uv}^{k}
-=\psi_{uv},
-&&\forall (u,v)\in\mathcal A^{F},
-\label{con:route_decomposition}
-\\
-&
-\varphi_{uv}^{k}
-\le M^2_{uv}y_{uk},
-&&\forall (u,v)\in\mathcal A^{F},\
-k\in\mathcal E_{uv},
-\label{con:route_swap_in}
-\\
-&
-\varphi_{uv}^{k}
-\le M^2_{uv}y_{kv},
-&&\forall (u,v)\in\mathcal A^{F},\
-k\in\mathcal E_{uv}.
-\label{con:route_swap_out}
-\end{align}
-Constraints~\eqref{con:route_swap_in}--\eqref{con:route_swap_out} activate the access and egress legs when swapping station $k$ is used.
-No separate bound on $\varphi_{uv}^{k}$ by $y_{uv}$ is required because nonnegativity, constraint~\eqref{con:route_decomposition}, and constraint~\eqref{con:physical_flow_open} already provide that implication.
-\textcolor{blue}{The preprocessed sets $\widetilde{\mathcal E}_{uv}$ enforce the usable one-battery range on a direct flight and separately on both flight legs of a one-swap route.}
-
-\subsubsection{Aggregate energy sufficiency}
-
-\textcolor{blue}{Flight-leg range screening does not control the long-run balance between energy consumption and battery supply.}
-Let the nonnegative continuous variable $\xi_i$ be the expected drone population at smart locker $i$.
-Let $\omega>0$ be the mean energy-depletion rate of one drone while it is traveling or being handled, let $\Omega>0$ be the nominal energy of a fully charged battery, and let $\varepsilon\in[0,1)$ be the required reserve fraction.
-The scalar reserve parameter $\varepsilon$ is distinct from the indexed auxiliary variable $\epsilon_{odj}$ introduced in the customer-demand layer.
-\textcolor{blue}{Thus, $(1-\varepsilon)\Omega$ is the usable energy supplied by one fully charged battery issued at a base or swapping station, and $(1-\varepsilon)\Omega/\omega$ is the corresponding usable operating time.}
-\textcolor{blue}{The aggregate energy-sufficiency constraint is}
-\begingroup
-\color{blue}
-\begin{align}
-&
-\omega
-\left(
-\sum_{i\in\mathcal H}\xi_i+
-\sum_{(u,v)\in\mathcal A^{F}}
-\sum_{k\in\widetilde{\mathcal E}_{uv}}
-t_{uv}^{k}\varphi_{uv}^{k}
-\right)
-\le
-(1-\varepsilon)\Omega
-\left(
-\sum_{(l,i)\in\mathcal A^{LH}}
-\sum_{k\in\widetilde{\mathcal E}_{li}}
-\varphi_{li}^{k}
-+
-\sum_{(u,v)\in\mathcal A^{F}}
-\sum_{k\in\mathcal E_{uv}}
-\varphi_{uv}^{k}
-\right).
-\label{con:energy_system}
-\end{align}
-\endgroup
-\textcolor{blue}{The first term on the right-hand side of constraint~\eqref{con:energy_system} counts one fully charged battery issued for every drone departure from a physical base, regardless of whether the selected route is direct or swap-assisted.}
-\textcolor{blue}{The second term counts one additional fully charged battery for every one-swap route, so a swap-assisted departure from a base correctly uses both its initial battery and its replacement battery.}
-\textcolor{blue}{On the left-hand side, $\xi_i$ counts drones being handled at smart locker $i$, and $t_{uv}^{k}\varphi_{uv}^{k}$ counts drones traveling or receiving the modeled swap service on route option $k$.}
-\textcolor{blue}{The logical waiting state $s_i$ is excluded because standby energy consumption is neglected.}
-\textcolor{blue}{Physical-base charging throughput and battery inventory are not separate decisions, and constraint~\eqref{con:energy_system} regulates system-wide aggregate energy sufficiency without tracing an individual drone's state of charge.}
-
-\subsubsection{Locker and holding-state congestion}
-
-The expected drone population $\xi_i$ is governed jointly by the smart-locker service rate and its inbound realized flow.
-The parameters $\tau^H$ and $\tau^S$ are the maximum average handling time at a smart locker and the maximum average waiting time in a virtual idle state, respectively.
-The total arrival rate at smart locker $i$ is written directly as $\sum_{u:(u,i)\in\mathcal A}\psi_{ui}$.
-The handling-time requirement is
-\begin{align}
-&
-\sum_{c\in\mathcal C}\mu_c z_{ic}
--\sum_{u:(u,i)\in\mathcal A}\psi_{ui}
-\ge
-\frac{x_i}{\tau^H},
-&&\forall i\in\mathcal H.
-\label{con:locker_qos}
-\end{align}
-The first term is the selected handling rate, the second term is the total inbound realized flow, and their difference is the service-rate slack that determines mean handling time.
-The expected smart-locker population is activated by $x_i$ and satisfies the second-order-cone epigraph of the $M/M/1$ queue-length relation:
-\begin{align}
-&
-\xi_i
-\le M^3_i x_i,
-&&\forall i\in\mathcal H,
-\label{con:locker_population_bound}
-\\
-&
-\left\|
-\begin{pmatrix}
-2\displaystyle\sum_{c\in\mathcal C}\sqrt{\mu_c}\,z_{ic}
-\\[1mm]
-\xi_i
-+\displaystyle\sum_{u:(u,i)\in\mathcal A}\psi_{ui}
--\displaystyle\sum_{c\in\mathcal C}\mu_c z_{ic}+1
-\end{pmatrix}
-\right\|_2
-\le
-\xi_i
--\displaystyle\sum_{u:(u,i)\in\mathcal A}\psi_{ui}
-+\sum_{c\in\mathcal C}\mu_c z_{ic}+1,
-&&\forall i\in\mathcal H.
-\label{con:locker_queue_soc}
-\end{align}
-In constraint~\eqref{con:locker_queue_soc}, the first vector component represents the selected service rate in rotated-cone form.
-The second vector component combines expected population, inbound realized flow, and the selected service rate.
-The right-hand side completes the conic representation of the standard $M/M/1$ population relation after the arrival and service rates have been expanded directly.
-
-The availability selection at an idle state implies the expected idle-drone population $\sum_r\rho_r\delta_{\ell r}/(1-\rho_r)$, so no separate idle-population variable is needed.
-The virtual-state waiting-time requirement is
-\begin{align}
-&
-\sum_{r\in\mathcal R}
-\frac{\rho_r}{1-\rho_r}\delta_{s_i r}
-\le
-\tau^S\psi_{s_i i},
-&&\forall i\in\mathcal H.
-\label{con:holding_qos}
-\end{align}
-The left-hand side is the expected number of drones waiting in virtual state $s_i$, while the right-hand side is the maximum admissible waiting population implied by its release rate $\psi_{s_i i}$.
-
-\subsubsection{Fleet sizing}
-
-Let the nonnegative integer variable $\Gamma$ be the required fleet size.
-The fleet covers all drones in idle, smart-locker handling, and physical transit states:
-\begin{align}
-&
-\sum_{\ell\in\widetilde{\mathcal L}}
-\sum_{r\in\mathcal R}
-\frac{\rho_r}{1-\rho_r}\delta_{\ell r}
-+
-\sum_{i\in\mathcal H}\xi_i
-+
-\sum_{(u,v)\in\mathcal A^{F}}
-\sum_{k\in\widetilde{\mathcal E}_{uv}}
-t_{uv}^{k}\varphi_{uv}^{k}
-\le\Gamma.
-\label{con:fleet_size}
-\end{align}
-The first term counts drones idle at physical and virtual states.
-The second term counts drones being handled at smart lockers.
-The third term applies Little's law to count drones in physical transit.
-\subsection{Customer Demand}
-\label{subsec:customer_demand}
-
-\subsubsection{Customer choice and infrastructure dependence}
-
-We follow the utility-based demand interface of Wang et al.~\citeyearpar{wangVertiportPlanning2022M&SOM}, while adapting it to the information visible in parcel delivery.
-In Wang et al., infrastructure and matching decisions affect an endogenous passenger trip time, which then enters utility and the UAM traffic share.
-In MLND, customers do not observe the backend origin locker, availability level, drone circulation, or locker congestion when selecting a delivery alternative.
-Customer-perceived delivery times, price differences, and walking distance are therefore treated as exogenous scenario attributes, while infrastructure decisions determine whether a candidate locker enters the choice set.
-
-Let $d^{\mathrm{walk}}>0$ be the maximum admissible walking distance and define the destination-specific set of eligible pickup lockers as
-\begin{align}
-\mathcal H_d
-={}&
-\left\{j\in\mathcal H:d_{dj}\le d^{\mathrm{walk}}\right\},
-&&\forall d\in\mathcal N.
-\label{set:choice_lockers}
-\end{align}
-Customer-side courier movements remain feasible for every modeled market even when $\mathcal H_d$ is empty.
-
-Let $\beta_0^{\mathrm{lk}}\in\mathbb R$ be the alternative-specific constant for locker pickup, and let $\beta^{t}$, $\beta^{p}$, and $\beta^{w}$ be nonnegative sensitivities to delivery time, price, and walking distance, respectively.
-Let $\widehat t_{od}^{\mathrm{hm}}$ and $\widehat t_{odj}^{\mathrm{lk}}$ denote the quoted customer-perceived delivery times, and let $\Delta p_{odj}\ge0$ denote the price discount of locker pickup relative to home delivery.
-Because only utility differences determine logit probabilities, we normalize the common price component and the home-delivery alternative-specific constant to zero and write
-\begin{subequations}
-\label{eq:choice_utilities}
-\begin{align}
-U_{od}^{\mathrm{hm}}
-={}&
--\beta^{t}\widehat t_{od}^{\mathrm{hm}},
-&&\forall o,d\in\mathcal N,
-\label{eq:home_utility}
-\\
-U_{odj}^{\mathrm{lk}}
-={}&
-\beta_0^{\mathrm{lk}}
--\beta^{t}\widehat t_{odj}^{\mathrm{lk}}
-+\beta^{p}\Delta p_{odj}
--\beta^{w}d_{dj},
-&&\forall o,d\in\mathcal N,\ j\in\mathcal H_d.
-\label{eq:locker_utility}
-\end{align}
-\end{subequations}
-The signs in~\eqref{eq:choice_utilities} encode that longer quoted delivery time and walking distance reduce utility, whereas a larger pickup discount increases utility.
-Equivalently, the systematic utility advantage of locker pickup is
-\begin{align}
-U_{odj}^{\mathrm{lk}}-U_{od}^{\mathrm{hm}}
-={}&
-\beta_0^{\mathrm{lk}}
-+\beta^{t}\left(\widehat t_{od}^{\mathrm{hm}}-\widehat t_{odj}^{\mathrm{lk}}\right)
-+\beta^{p}\Delta p_{odj}
--\beta^{w}d_{dj}.
-\label{eq:choice_utility_difference}
-\end{align}
-Assuming independent type-I extreme-value random utility terms gives the conditional two-alternative MNL share
-\begin{align}
-\eta_{odj}
-={}&
-\frac{\exp\!\left(U_{odj}^{\mathrm{lk}}\right)}
-{\exp\!\left(U_{od}^{\mathrm{hm}}\right)+\exp\!\left(U_{odj}^{\mathrm{lk}}\right)}
-=
-\frac{1}{1+\exp\!\left[-\left(U_{odj}^{\mathrm{lk}}-U_{od}^{\mathrm{hm}}\right)\right]},
-&&\forall o,d\in\mathcal N,\ j\in\mathcal H_d.
-\label{eq:choice_share}
-\end{align}
-The quantity $\eta_{odj}$ is the probability of choosing locker pickup conditional on locker $j$ being the only displayed locker, rather than the unconditional market share.
-All attributes in~\eqref{eq:choice_utilities} are fixed before optimization, so $\eta_{odj}$ is a derived parameter.
-
-The binary variable $\alpha_{dj}$ equals one if eligible locker $j\in\mathcal H_d$ is displayed as the pickup alternative for destination $d$.
-Facility opening does not enter either conditional utility directly because assigning a closed locker zero utility would incorrectly leave that unavailable alternative in the MNL denominator.
-Instead, $x_j$ determines whether locker $j$ can enter the choice set through the display constraints below.
-With home delivery always available, the MNL probability of choosing pickup at $j$ is
-\begin{align}
-\Pr\!\left(\mathrm{lk},j\mid o,d,\boldsymbol\alpha\right)
-={}&
-\frac{\alpha_{dj}\exp\!\left(U_{odj}^{\mathrm{lk}}\right)}
-{\exp\!\left(U_{od}^{\mathrm{hm}}\right)
-+\sum_{j'\in\mathcal H_d}\alpha_{dj'}\exp\!\left(U_{odj'}^{\mathrm{lk}}\right)}
-=\alpha_{dj}\eta_{odj}.
-\label{eq:available_choice_share}
-\end{align}
-The final equality follows from the at-most-one display rule, and the corresponding choice-stage home-delivery share is $1-\sum_{j\in\mathcal H_d}\alpha_{dj}\eta_{odj}$.
-Thus, $\eta_{odj}$ is precomputed, whereas the market-level choice shares remain endogenous through $\boldsymbol\alpha$ and its dependence on the facility-opening decisions.
-
-For each eligible candidate locker, let
-\begin{align}
-\mathcal H_{dj}^{<}
-={}&
-\left\{j'\in\mathcal H_d:d_{dj'}<d_{dj}\right\}.
-\label{set:closer_lockers}
-\end{align}
-At most one destination locker is displayed, a displayed locker must be open, and no strictly closer eligible locker may be open:
-\begin{align}
-&
-\sum_{j\in\mathcal H_d}\alpha_{dj}
-\le1,
-&&\forall d\in\mathcal N,
-\label{con:locker_destination_limit}
-\\
-&
-\alpha_{dj}
-\le x_j,
-&&\forall d\in\mathcal N,\ j\in\mathcal H_d,
-\label{con:locker_destination_open}
-\\
-&
-\alpha_{dj}
-\le1-x_{j'},
-&&\forall d\in\mathcal N,\ j\in\mathcal H_d,\ j'\in\mathcal H_{dj}^{<}.
-\label{con:nearest_locker}
-\end{align}
-Consequently, the platform may display no locker, but any displayed locker must be one of the nearest eligible open lockers; equal-distance ties may be resolved endogenously.
-The variable $\alpha_{dj}$ is therefore an explicit display decision constrained by $\boldsymbol x$, not a deterministic function of $x_j$ alone.
-If a policy required the nearest open locker to be displayed automatically, an additional lower-bound constraint and a deterministic tie-breaking order would be required.
-The present optional-display rule allows the platform to suppress a locker alternative whose modeled cost consequence is unfavorable.
-
-\subsubsection{Displayed-locker cost qualification}
-
-Locker-pickup and home-delivery orders use the same network resources until they reach destination locker $j$.
-Their distinction is therefore retained only in the fulfillment-cost layer.
-We assume that, conditional on market $(o,d)$ and displayed locker $j$, the customer-choice outcome is independent of the backend origin locker $i$, assigned availability level $r$, and subsequent service realization.
-This proportional-realization assumption is what permits the same conditional share $\eta_{odj}$ to be applied to every realized unit of market $(o,d)$ ending at the displayed locker without introducing order-type-specific network flows.
-Let the nonnegative continuous auxiliary variable $\epsilon_{odj}$ represent the successful flow of market $(o,d)$ that reaches displayed locker $j\in\mathcal H_d$.
-The successful flow of this market ending at $j$ is the affine expression
-\begin{align}
-&
-\sum_{i:(i,j)\in\mathcal A^{HH}}
-\sum_{r\in\mathcal R}
-\rho_r\chi_{odijr}.
-\label{eq:successful_flow_to_locker}
-\end{align}
-The product of this expression and $\alpha_{dj}$ is represented exactly by
-\begin{align}
-&
-\epsilon_{odj}
-\le
-\sum_{i:(i,j)\in\mathcal A^{HH}}
-\sum_{r\in\mathcal R}
-\rho_r\chi_{odijr},
-&&\forall o,d\in\mathcal N,\ j\in\mathcal H_d,
-\label{con:epsilon_flow}
-\\
-&
-\epsilon_{odj}
-\le M^4_{odj}\alpha_{dj},
-&&\forall o,d\in\mathcal N,\ j\in\mathcal H_d,
-\label{con:epsilon_display}
-\\
-&
-\epsilon_{odj}
-\ge
-\sum_{i:(i,j)\in\mathcal A^{HH}}
-\sum_{r\in\mathcal R}
-\rho_r\chi_{odijr}
--M^4_{odj}(1-\alpha_{dj}),
-&&\forall o,d\in\mathcal N,\ j\in\mathcal H_d.
-\label{con:epsilon_lower}
-\end{align}
-Constraint~\eqref{con:epsilon_flow} prevents $\epsilon_{odj}$ from exceeding the successful flow ending at $j$.
-Constraint~\eqref{con:epsilon_display} sets $\epsilon_{odj}$ to zero when locker $j$ is not displayed.
-Constraint~\eqref{con:epsilon_lower}, together with the first two inequalities and nonnegativity, makes $\epsilon_{odj}$ equal the successful flow expression whenever $\alpha_{dj}=1$.
-Because constraint~\eqref{con:od_demand_bound} implies that the expression in~\eqref{eq:successful_flow_to_locker} is at most $\rho_Rh_{od}$, we set $M^4_{odj}=\rho_Rh_{od}$.
-The actual locker-pickup rate is $\eta_{odj}\epsilon_{odj}$; both the displayed alternative and successful network service are therefore endogenous even though $\eta_{odj}$ is precomputed.
-
-\subsubsection{Realized service accounting}
-
-For market $(o,d)$, the rate completed through the drone network is
-\begin{align}
-&
-\sum_{(i,j)\in\mathcal A^{HH}}
-\sum_{r\in\mathcal R}
-\rho_r\chi_{odijr}.
-\label{eq:od_realized_service}
-\end{align}
-Consequently, the direct courier-delivery rate is $h_{od}$ minus the expression in~\eqref{eq:od_realized_service}.
-The locker-pickup rate is $\sum_{j\in\mathcal H_d}\eta_{odj}\epsilon_{odj}$.
-The drone-assisted home-delivery rate is the expression in~\eqref{eq:od_realized_service} minus this locker-pickup rate.
-These three quantities sum to $h_{od}$, and no separate realized locker or home-flow variable is required.
-
-For computational implementation, all fixed investment coefficients are converted into equivalent cost rates expressed in the same monetary-per-time unit as the flow-dependent operating and fulfillment terms.
-The coefficients $f_u^{F}$, $f_{ic}^{C}$, $f_{uv}^{A}$, $f_{uvk}^{O}$, and $f^{D}$ represent facility, capacity, connection, route-operation, and fleet costs, respectively.
-The coefficient $f_{od}^{\mathrm{rider}}$ is the direct courier cost for market $(o,d)$, $f_{oi}^{\mathrm{rider}}$ is the first-mile courier cost to origin locker $i$, and $f_{jd}^{\mathrm{rider}}$ is the last-mile courier cost from destination locker $j$.
-The coefficient $f_j^{\mathrm{locker}}$ is charged only to the fraction that completes locker pickup at $j$.
-Drone flight costs are represented only by the route-operation term in the objective and are not included in the courier coefficients.
-
-The two restricted service scopes are formulated separately in~\ref{app:hd_model} and~\ref{app:lo_model}.
-
-\subsection{Full MLND Formulation}
-\label{subsec:full_model}
-
-Collecting the preceding components, we formulate MLND as follows:
-\begin{align}
-\min\quad
-&
-\sum_{u\in\mathcal L\cup\mathcal H\cup\mathcal E}f_u^{F}x_u
-+
-\sum_{i\in\mathcal H}\sum_{c\in\mathcal C}f_{ic}^{C}z_{ic}
-+
-\sum_{(u,v)\in\mathcal A^{Y}}f_{uv}^{A}y_{uv}
-\nonumber\\
-&+
-\sum_{(u,v)\in\mathcal A^{F}}
-\sum_{k\in\widetilde{\mathcal E}_{uv}}
-f_{uvk}^{O}\varphi_{uv}^{k}
-+f^{D}\Gamma
-+
-\sum_{o,d\in\mathcal N}f_{od}^{\mathrm{rider}}h_{od}
-\nonumber\\
-&+
-\sum_{o,d\in\mathcal N}
-\sum_{(i,j)\in\mathcal A^{HH}}
-\sum_{r\in\mathcal R}
-\rho_r
-\left(
-f_{oi}^{\mathrm{rider}}
-+f_{jd}^{\mathrm{rider}}
--f_{od}^{\mathrm{rider}}
-\right)
-\chi_{odijr}
-\nonumber\\
-&+
-\sum_{o,d\in\mathcal N}
-\sum_{j\in\mathcal H_d}
-\eta_{odj}
-\left(
-f_j^{\mathrm{locker}}
--f_{jd}^{\mathrm{rider}}
-\right)
-\epsilon_{odj}
-\label{obj:integrated}
-\\[1mm]
-\text{s.t.}\quad
-&\text{Infrastructure siting and connections:}
-&&\eqref{con:capacity_select}\text{--}\eqref{con:arc_head},
-\nonumber\\
-&\text{OD offered flow and availability:}
-&&\eqref{con:od_demand_bound}\text{--}\eqref{con:w_reliability},
-\nonumber\\
-&\text{Realized flows and closed-network circulation:}
-&&\eqref{con:realized_flow_definitions},\ \eqref{con:flow_balance},\ \eqref{con:physical_flow_open},
-\nonumber\\
-&\text{Direct and swap-assisted routes:}
-&&\eqref{con:route_decomposition}\text{--}\eqref{con:route_swap_out},
-\nonumber\\
-&\text{Aggregate energy sufficiency:}
-&&\eqref{con:energy_system},
-\nonumber\\
-&\text{Locker congestion, holding states, and fleet:}
-&&\eqref{con:locker_qos}\text{--}\eqref{con:fleet_size},
-\nonumber\\
-&\text{Customer choice and displayed-locker flow:}
-&&\eqref{con:locker_destination_limit}\text{--}\eqref{con:nearest_locker},\ \eqref{con:epsilon_flow}\text{--}\eqref{con:epsilon_lower}.
-\nonumber\\
-&\boldsymbol{\chi},\boldsymbol{w},\boldsymbol{\psi},\boldsymbol{\varphi},\boldsymbol{\xi},\boldsymbol{\epsilon}\ \text{nonnegative;}
-\nonumber\\
-&\boldsymbol{\Gamma}\ \text{integer; }\boldsymbol{x},\boldsymbol{y},\boldsymbol{z},\boldsymbol{\delta},\boldsymbol{\alpha}\ \text{binary.}
-\nonumber
-\end{align}
-
-The first line of objective~\eqref{obj:integrated} contains facility, smart-locker capacity, and connection costs.
-The second line contains route-operation and fleet costs, followed by the all-courier baseline cost for every order.
-The third line replaces the direct courier cost of each realized drone order by its first-mile and last-mile courier costs.
-The final line applies only to the locker-pickup share and replaces its last-mile courier cost by the destination-locker handling cost.
-Consequently, an order not offered to drones or not realized by the selected availability level retains only its direct courier baseline cost.
-An order realized by drones incurs the first- and last-mile costs, and the fraction $\eta_{odj}\epsilon_{odj}$ that completes locker pickup receives the corresponding last-mile cost replacement.
-
-The complete expanded model is reported in~\ref{app:full_model}.
-The home-delivery-assistance and locker-only restrictions are reported only in~\ref{app:hd_model} and~\ref{app:lo_model}, respectively.
-Cross-formulation comparisons therefore identify differences in modeled fulfillment cost rather than differences in profit.
-Any claim of cost reduction will be evaluated against explicit courier-only and formulation-matched counterfactual baselines in the computational study.
-A positive modeled cost saving provides favorable evidence on the cost dimension of commercial viability but does not demonstrate sustainable profitability.
-\endgroup
-
-\section{Solution Methods}
-\label{sec:solution_methods}
-
-\subsection{Valid Inequalities for MLND}
-\label{sec:valid_inequalities_integrated}
-
-\subsection{Candidate Network Valid Inequalities}
-\label{sec:valid_inequalities}
 
 The variables $\chi_{odijr}$ determine how much OD demand is offered to each corridor and availability level, while constraint~\eqref{con:od_reliability_match} connects this allocation to $w$ and constraints~\eqref{con:source_flow}--\eqref{con:loaded_flow} generate realized drone flow.
 Consequently, a network cut that forces capacity for all exogenous market demand is not valid for the current model without an additional minimum drone-service requirement.
@@ -1154,15 +1167,11 @@ Its final right-hand side and capacity definitions must be derived only after a 
 
 The baseline instances are constructed from an anonymized 2023 sample of 592,667 delivery orders in Nanshan District, Shenzhen, supplied by Meituan for the 2026 City Low-Altitude Aviation Network business-analysis competition \citep{Meituan2026NanshanDataset}.
 The source replaces calendar dates with seven sequential day identifiers and applies anonymization and grid processing to order and coordinate fields; no customer identifiers are used.
-\textcolor{blue}{For the formal full-parent instance, we use a 20-km-by-20-km study window centered at the common projection origin, retain orders whose pickup and delivery endpoints both lie within the window, and use the 12:00--13:00 records to construct demand.}
-\textcolor{blue}{We aggregate pickup and delivery endpoints to 0.5-km grid cells, define each nonzero cell pair as an OD market, and divide its seven-day order count by seven one-hour observation periods to obtain $h_{od}$.}
-\textcolor{blue}{This procedure retains 57,377 demand-period records, creates 11,427 nonzero OD markets, and yields total demand of 8,196.71 orders per hour.}
-\textcolor{blue}{Candidate locations are generated from 08:00--24:00 activity on a 0.25-km grid: joint pickup--drop-off activity for smart lockers, pickup activity for drone bases, and pickup--drop-off midpoint activity for battery-swapping stations.}
-\textcolor{blue}{The full-parent candidate set contains 120 smart lockers, 8 drone bases, and 13 battery-swapping stations.}
-\textcolor{blue}{For computational-scale analysis, we construct six concentric square study windows with side lengths of 6, 9, 12, 15, 17, and 20 km around the same projection center.}
-\textcolor{blue}{The corresponding smart-locker, drone-base, and battery-swapping-station candidate targets are 11/2/2, 24/2/3, 43/3/5, 68/5/7, 87/6/9, and 120/8/13, respectively.}
-\textcolor{blue}{At each scale, an order is retained only when both endpoints lie within the corresponding window, retained orders are neither sampled nor replicated, and demand is not rescaled.}
-\textcolor{blue}{OD aggregation and facility candidates are regenerated within each crop using the same time windows, grid resolutions, and deterministic seed.}
+For the baseline 16-km-by-16-km study window, we retain orders whose pickup and delivery endpoints both lie within the window and use the 12:00--13:00 records to construct demand.
+We aggregate pickup and delivery endpoints to 0.5-km grid cells, define each nonzero cell pair as an OD market, and divide its seven-day order count by seven one-hour observation periods to obtain $h_{od}$.
+This procedure retains 56,045 records, creates 11,004 nonzero OD markets, and yields total demand of 8,006.43 orders per hour.
+Candidate locations are generated from 08:00--24:00 activity on a 0.25-km grid: joint pickup--drop-off activity for smart lockers, pickup activity for drone bases, and pickup--drop-off midpoint activity for battery-swapping stations.
+The baseline candidate set contains 34 smart lockers, 5 drone bases, and 8 battery-swapping stations; candidate-density experiments regenerate this set from the same records and preprocessing rules.
 The order data identify spatial demand and candidate-site activity only.
 The MNL coefficients in~\eqref{eq:choice_utilities}, the 30-minute home-delivery attribute, 20-minute locker-delivery attribute, locker-price discount, maximum walking distance, delivery-cost coefficients, availability levels, energy parameters, service rates, flight speed, infrastructure costs, and other operating parameters are transparent scenario inputs rather than empirical estimates from these records.
 All sensitivity results therefore distinguish data-derived demand and candidate locations from assumed behavioral, cost, and operating parameters.
@@ -1307,19 +1316,19 @@ The principal network sets are
 \cup\mathcal A^{HL}.
 \label{app:set_physical_arcs}
 \end{align}
-\textcolor{blue}{For each $(u,v)\in\mathcal A^{F}$, the flight-leg-range-feasible route-option set is}
+For each $(u,v)\in\mathcal A^{F}$, the feasible route-option set is
 \begin{align}
 \widetilde{\mathcal E}_{uv}
 =
 \begin{cases}
 \mathcal E_{uv}\cup\{0\},
-& \text{if the direct-flight distance is within one-battery range},\\
+& \text{if direct flight from $u$ to $v$ is feasible},\\
 \mathcal E_{uv},
 & \text{otherwise},
 \end{cases}
 \label{app:set_route_options}
 \end{align}
-\textcolor{blue}{Here, $\mathcal E_{uv}\subseteq\mathcal E$ contains stations for which both flight legs are within one-battery range, and option $0$ denotes direct flight.}
+where $\mathcal E_{uv}\subseteq\mathcal E$ contains the feasible one-swap stations and option $0$ denotes direct flight.
 The openable physical connections and eligible idle states are
 \begin{align}
 \mathcal A^{Y}
@@ -1398,7 +1407,7 @@ The set of smart-locker capacity levels is $\mathcal C$, and the service-rate pa
 The exogenous order rate is $h_{od}$ for $o,d\in\mathcal N$, with $h_{od}=0$ for a nonexistent market, $d_{dj}$ is the walking distance from destination $d$ to locker $j$, and $d^{\mathrm{walk}}$ is the maximum admissible walking distance.
 The customer-choice inputs are $\beta_0^{\mathrm{lk}}$, $\beta^{t}$, $\beta^{p}$, $\beta^{w}$, $\widehat t_{od}^{\mathrm{hm}}$, $\widehat t_{odj}^{\mathrm{lk}}$, and $\Delta p_{odj}$; the utilities and $\eta_{odj}$ are derived through~\eqref{app:choice_utilities}--\eqref{app:choice_share}.
 The maximum average times at smart lockers and virtual holding states are $\tau^H$ and $\tau^S$, respectively.
-\textcolor{blue}{The route time of option $k\in\widetilde{\mathcal E}_{uv}$ is $t_{uv}^{k}$ and includes swap-service time when $k\in\mathcal E_{uv}$.}
+The travel time of route option $k\in\widetilde{\mathcal E}_{uv}$ is $t_{uv}^{k}$.
 The energy parameters are the depletion rate $\omega$, nominal battery energy $\Omega$, and reserve fraction $\varepsilon$; the scalar parameter $\varepsilon$ is distinct from the indexed auxiliary variable $\epsilon_{odj}$.
 The constants $M^1_{ij}$, $M^2_{uv}$, $M^3_i$, and $M^4_{odj}$ are used for offered-flow activation, physical-flow activation, smart-locker population activation, and displayed-locker product linearization, respectively.
 We set $M^4_{odj}=\rho_Rh_{od}$ for $j\in\mathcal H_d$.
@@ -1411,7 +1420,7 @@ The structural variable $\chi_{odijr}$ retains the market, corridor, and availab
 The variable $w_{\ell i j r}$ allocates the same offered pool among eligible idle states.
 The variable $\epsilon_{odj}$ is the only product-linearization auxiliary variable and qualifies successful flow for the locker-pickup cost adjustment.
 
-\textcolor{blue}{Table~\ref{tab:model_parameters} summarizes selected enterprise-facing and scenario-calibration inputs for MLND and its two restrictions; sets, preprocessed relations, and decision variables are excluded.}
+Table~\ref{tab:model_parameters} consolidates all scalar and indexed numerical inputs required to instantiate MLND and its two restrictions; sets, preprocessed relations, and decision variables are excluded.
 The third column reports units, admissible domains, or exact preprocessing requirements rather than treating the transparent scenario inputs as empirical estimates.
 The home-delivery-assistance restriction omits all customer-choice inputs and derived quantities, $M^4_{odj}$, and $f_j^{\mathrm{locker}}$, whereas the locker-only restriction omits $M^4_{odj}$ and $f_{jd}^{\mathrm{rider}}$; the aggregate energy parameters are shared by all three service scopes.
 
@@ -1640,35 +1649,41 @@ k\in\mathcal E_{uv}.
 \end{align}
 The route-decomposition equality assigns every physical flow unit to one feasible direct or one-swap option.
 The two inequalities activate the access and egress legs whenever a swap-assisted option is used.
-\textcolor{blue}{Aggregate energy sufficiency requires}
-\begingroup
-\color{blue}
+Aggregate energy sufficiency requires
 \begin{align}
 &
 \omega
+\sum_{i:(l,i)\in\mathcal A^{LH}}
+\sum_{k\in\widetilde{\mathcal E}_{li}}
+t_{li}^{k}\varphi_{li}^{k}
+\le
+(1-\varepsilon)\Omega
+\sum_{i:(l,i)\in\mathcal A^{LH}}
+\sum_{k\in\mathcal E_{li}}
+\varphi_{li}^{k},
+&&\forall l\in\mathcal L,
+\label{app:energy_base}
+\\
+&
+\omega
 \left(
-\sum_{i\in\mathcal H}\xi_i+
-\sum_{(u,v)\in\mathcal A^{F}}
-\sum_{k\in\widetilde{\mathcal E}_{uv}}
-t_{uv}^{k}\varphi_{uv}^{k}
+\xi_i+
+\sum_{v:(i,v)\in\mathcal A^{F}}
+\sum_{k\in\widetilde{\mathcal E}_{iv}}
+t_{iv}^{k}\varphi_{iv}^{k}
 \right)
 \le
 (1-\varepsilon)\Omega
-\left(
-\sum_{(l,i)\in\mathcal A^{LH}}
-\sum_{k\in\widetilde{\mathcal E}_{li}}
-\varphi_{li}^{k}
-+
-\sum_{(u,v)\in\mathcal A^{F}}
-\sum_{k\in\mathcal E_{uv}}
-\varphi_{uv}^{k}
-\right).
-\label{app:energy_system}
+\sum_{v:(i,v)\in\mathcal A^{F}}
+\sum_{k\in\mathcal E_{iv}}
+\varphi_{iv}^{k},
+&&\forall i\in\mathcal H.
+\label{app:energy_locker}
 \end{align}
-\endgroup
-\textcolor{blue}{The first supply term in constraint~\eqref{app:energy_system} counts fully charged batteries issued at physical-base departures, and the second counts additional batteries supplied by one-swap routes.}
-\textcolor{blue}{Its left-hand side includes the expected smart-locker handling population and all modeled route times, including swap-service time.}
-\textcolor{blue}{Standby energy consumption in the logical virtual states is neglected, and individual state-of-charge trajectories are not tracked.}
+Constraint~\eqref{app:energy_base} bounds the aggregate energy depletion of departures from each physical base by the usable energy supplied through swap-assisted departures.
+Constraint~\eqref{app:energy_locker} additionally includes the expected smart-locker handling population $\xi_i$ before applying the same aggregate requirement to departures from locker $i$.
+Direct route options contribute to energy consumption but not to the swap count on the right-hand sides.
+Standby energy consumption in the logical virtual states is neglected, and individual state-of-charge trajectories are not tracked.
 
 \subsection{Congestion and Fleet Constraints}
 

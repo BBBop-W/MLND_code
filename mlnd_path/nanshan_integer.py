@@ -82,14 +82,22 @@ def build_master(data,all_open,time_limit,threads=1,mip_gap=.01,pooled=True,log=
     return model,facility,B,zeta,fixed,weight
 
 
-def solve(data,time_limit=60.,threads=1,mip_gap=.001,pooled=True,log=None):
+def solve(data,time_limit=60.,threads=1,mip_gap=.001,pooled=True,log=None,warm_starts=None,
+          fixed_facility=None):
     from .integer_recourse import solve_integer_recourse
     start=time.perf_counter();deadline=start+time_limit
     inst=as_instance(data);L,H,K,D=data['n_l'],data['n_h'],data['n_k'],data['n_od']
+    if fixed_facility is not None:
+        fixed_facility=np.asarray(fixed_facility,dtype=float)
+        if (fixed_facility.shape!=(L+H+K,) or not np.isfinite(fixed_facility).all()
+            or np.any((fixed_facility!=0)&(fixed_facility!=1))):
+            raise ValueError('Fixed facilities must be a binary array of size L+H+K')
     all_open=price_design(data)
     oracle_cache={tuple([1]*(L+H+K)):all_open}
     oracle_seconds=all_open['wall'];recourse_seconds=0.
     master,fac,B,zeta,fixed,weights=build_master(data,all_open,time_limit,threads,mip_gap,pooled,log)
+    if fixed_facility is not None:
+        fac.LB=fixed_facility;fac.UB=fixed_facility;master.update()
     built=time.perf_counter()-start
     stats=dict(oracle_calls=1,oracle_cache_hits=0,recourse_calls=0,benders_cuts=0,pooled_cuts=int(pooled),
                master_binaries=int(master.NumBinVars),master_continuous=int(master.NumVars-master.NumBinVars),
@@ -97,7 +105,9 @@ def solve(data,time_limit=60.,threads=1,mip_gap=.001,pooled=True,log=None):
                maximum_recourse_duality_gap=0.,incomplete_recourse_certificates=0)
     best=dict(objective=data['c0'],facility=np.zeros(L+H+K),assignment=np.zeros((D,L,L)),
               rho=[0.]*L,idle=[0.]*L,empty=np.zeros((L,L)),fleet=0.,served=0.,recourse=data['c0'],primal_residual=0.)
-    lower=0.;trace=[];errors=[]
+    if fixed_facility is not None:
+        best.update(objective=data['c0']+float(fixed@fixed_facility),facility=fixed_facility.copy())
+    lower=0.;trace=[];errors=[];termination_reason=None
 
     def evaluate(facility,assignment):
         nonlocal oracle_seconds,recourse_seconds,best
@@ -144,6 +154,7 @@ def solve(data,time_limit=60.,threads=1,mip_gap=.001,pooled=True,log=None):
     # Same-base missions form a balanced warm start at every availability.
     starts=[np.ones(L+H+K)]
     if K:starts.append(np.r_[np.ones(L+H),np.zeros(K)])
+    if fixed_facility is not None:starts=[fixed_facility.copy()]
     for index,initial_fac in enumerate(starts):
         if time.perf_counter()>=deadline:break
         key=tuple(initial_fac.astype(int))
@@ -157,11 +168,30 @@ def solve(data,time_limit=60.,threads=1,mip_gap=.001,pooled=True,log=None):
         ans=evaluate(initial_fac,initial)
         if ans.get('cut_valid'):
             c,bs,fs=cut_arrays(ans);master.addConstr(zeta>=c+(bs*B).sum()+fs@fac,name=f'warm_benders_{index}');stats['benders_cuts']+=1
+    # External starts are only feasible candidate designs; reprice and solve
+    # their continuous recourse here before installing any bound or cut.
+    for index,warm in enumerate(warm_starts or []):
+        if time.perf_counter()>=deadline:break
+        initial_fac=np.asarray(warm['facility'],dtype=float)
+        initial=np.asarray(warm['assignment'],dtype=float)
+        if initial_fac.shape!=(L+H+K,) or initial.shape!=(D,L,L):
+            raise ValueError('Unexpected warm-start design dimensions')
+        if (not np.isfinite(initial_fac).all() or not np.isfinite(initial).all()
+            or initial_fac.min()<0 or initial_fac.max()>1 or initial.min()<0 or initial.max()>1
+            or np.max(np.abs(initial_fac-np.rint(initial_fac)))>1e-8 or np.max(np.abs(initial-np.rint(initial)))>1e-8):
+            raise ValueError('Warm-start strategic variables must be integral')
+        if fixed_facility is not None and not np.array_equal(initial_fac,fixed_facility):
+            raise ValueError('Warm start does not satisfy the fixed facilities')
+        ans=evaluate(initial_fac,initial)
+        if ans.get('cut_valid'):
+            c,bs,fs=cut_arrays(ans);master.addConstr(zeta>=c+(bs*B).sum()+fs@fac,name=f'external_benders_{index}');stats['benders_cuts']+=1
+    stats['external_start_count']=len(warm_starts or [])
     fac.Start=best['facility'];B.Start=best['assignment'];zeta.Start=best['recourse']
 
     def callback(model,where):
-        nonlocal lower
-        if time.perf_counter()>=deadline:model.terminate();return
+        nonlocal lower,termination_reason
+        if time.perf_counter()>=deadline:
+            termination_reason=termination_reason or 'time_limit';model.terminate();return
         if where==GRB.Callback.MIP:
             bound=model.cbGet(GRB.Callback.MIP_OBJBND)
             if abs(bound)<1e90:lower=max(lower,float(bound))
@@ -183,7 +213,13 @@ def solve(data,time_limit=60.,threads=1,mip_gap=.001,pooled=True,log=None):
                     model.cbSetSolution(fac,f);model.cbSetSolution(B,b)
                     model.cbSetSolution(zeta,answer['objective']);model.cbUseSolution();stats['incumbent_injections']+=1
             else:
-                errors.append({'kind':'uncertified_recourse','status':answer.get('status')});model.terminate()
+                if answer.get('status')=='time_limit' and time.perf_counter()>=deadline:
+                    # No unverified cut or incumbent is installed. Keep the
+                    # already certified master bound and feasible best design.
+                    termination_reason='time_limit_in_recourse'
+                else:
+                    errors.append({'kind':'uncertified_recourse','status':answer.get('status')})
+                model.terminate()
             trace.append(dict(elapsed=time.perf_counter()-start,upper=best['objective'],lower=lower,
                               recourse_seconds=recourse_seconds,oracle_seconds=oracle_seconds,
                               benders_cuts=stats['benders_cuts'],pooled_cuts=stats['pooled_cuts']))
@@ -193,19 +229,21 @@ def solve(data,time_limit=60.,threads=1,mip_gap=.001,pooled=True,log=None):
         left=deadline-time.perf_counter()
         if left>0:
             master.Params.TimeLimit=left;master.optimize(callback)
-            if abs(master.ObjBound)<1e90:lower=max(lower,float(master.ObjBound))
+            if termination_reason!='time_limit_in_recourse' and abs(master.ObjBound)<1e90:
+                lower=max(lower,float(master.ObjBound))
         else:errors.append('budget exhausted before master optimization')
         status=int(master.Status)
         runtime=float(master.Runtime);nodes=float(master.NodeCount)
     finally:master.dispose()
     elapsed=time.perf_counter()-start
     result=dict(name=data['name'],method='integer_benders_pooled' if pooled else 'integer_benders',
-        status=status,wall=elapsed,budget=time_limit,build_wall=built,master_runtime=runtime,nodes=nodes,
+        status=status,termination_reason=termination_reason,wall=elapsed,budget=time_limit,build_wall=built,master_runtime=runtime,nodes=nodes,
         objective=best['objective'],bound=lower,gap=max(0,best['objective']-lower)/max(1,abs(best['objective'])),
         oracle_wall=oracle_seconds,recourse_wall=recourse_seconds,stats=stats,trace=trace,errors=errors,
         rho=best['rho'],fleet=best['fleet'],served=best['served'],primal_residual=best['primal_residual'],
         opened={'L':int(best['facility'][:L].sum()),'H':int(best['facility'][L:L+H].sum()),'E':int(best['facility'][L+H:].sum())},
         n_od=D,demand=float(data['demand'].sum()),all_ground_cost=data['c0'],
+        fixed_facility=None if fixed_facility is None else fixed_facility.tolist(),
         basic_path_combinations=all_open['implicit_basic_paths'],explicit_path_enumeration=False,
         provenance=data['provenance'],threads=threads,mip_gap_target=mip_gap,
         source_sha256={name:hashlib.sha256((Path(__file__).parent/name).read_bytes()).hexdigest()
