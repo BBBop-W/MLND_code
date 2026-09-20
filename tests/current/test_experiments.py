@@ -72,7 +72,10 @@ def test_source_mutation_is_detected(tmp_path):
         storage.verify_sources(record)
 
 
-@pytest.mark.parametrize("method", ["direct", "benders", "hybrid"])
+@pytest.mark.parametrize(
+    "method",
+    ["full_path", "benders_cg_plain", "benders_cg", "arc", "benders_cg_solver"],
+)
 def test_run_positive_solution_and_replay(tmp_path, method):
     inputs = tmp_path / "inputs"
     output = tmp_path / method
@@ -94,7 +97,7 @@ def test_run_positive_solution_and_replay(tmp_path, method):
     assert main(["validate", str(output)]) == 0
     assert main(["status", str(output)]) == 0
     manifest = json.loads((output / "manifest.json").read_text())
-    assert manifest["passed"] and "src/optimization/benders.py" in manifest["sources"]
+    assert manifest["passed"] and "src/solvers/benders/engine.py" in manifest["sources"]
     assert "result.json" in manifest["artifacts"]
     with pytest.raises(FileExistsError, match="Preserving"):
         run_case(None, output, input_path=inputs)

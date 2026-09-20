@@ -12,6 +12,7 @@ from .instance_io import project_path, read_instance
 from .calibration import load_calibration
 from .choice import pickup_probability, rider_tariff
 from .provenance import attach_provenance
+from .demand import demand_signature
 
 DEFAULT = project_path("data/model_inputs")
 
@@ -21,8 +22,11 @@ def load_instance(hubs, config=None):
     cfg = load_config(config)
     costs, op = cfg["costs"], cfg["operations"]
     hours = np.prod(list(cfg["depreciation"].values()))
-    data, direct_distances, _ = read_instance(hubs, cfg["data"]["instance_root"])
-    cal = load_calibration(hubs, data, cfg["data"]["calibration"])
+    data, direct_distances, _ = read_instance(
+        hubs, cfg["data"]["instance_root"], demand_hubs=cfg["data"]["demand_hubs"]
+    )
+    demand_source = data["provenance"]["demand_selection"]["source_hubs"]
+    cal = load_calibration(demand_source, data, cfg["data"]["calibration"])
     slope = op["rider_minutes_per_km"]
     if slope is None:
         slope = float(cal["mean_fit"]["slope_minutes_per_straight_km"])
@@ -109,6 +113,13 @@ def load_instance(hubs, config=None):
         data[field] = costs[investment] / hours
     data["c0"] = float(data["demand"] @ data["ground"])
     attach_provenance(data, cfg, cal)
+    data["demand_signature"] = demand_signature(data)
+    data["provenance"]["demand_selection"].update(
+        hourly_demand=float(data["demand"].sum()),
+        all_ground_cost=data["c0"],
+        demand_scale=cfg["data"]["demand_scale"],
+        signature=data["demand_signature"],
+    )
     return data
 
 

@@ -4,6 +4,7 @@
   "data": {
     "instance_root": "data/instances/nanshan_nested_h120",
     "calibration": "data/model_inputs/calibration.json",
+    "demand_hubs": 120,
     "demand_scale": 1.0
   },
   "depreciation": {
@@ -58,6 +59,8 @@
     "mip_gap": null,
     "mip_gap_abs": null,
     "max_iterations": null,
-    "seed": 43
+    "seed": 43,
+    "column_limit": 500000,
+    "graph_limit": 1000000
   }
 }

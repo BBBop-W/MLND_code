@@ -1,0 +1,97 @@
+{
+  "unit": "hour",
+  "definition": "payment-to-fetch duration excluded from drone workload",
+  "cases": {
+    "10": {
+      "unit": "hour",
+      "crop_half_size_km": 2.8867513459481287,
+      "canonical_demand_orders": 12292,
+      "canonical_od_count": 2220,
+      "valid_timing_samples": 12145,
+      "excluded_timing_samples": 147,
+      "mean_hours": 0.25189515575682725,
+      "mean_minutes": 15.113709345409633,
+      "median_minutes": 13.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.0
+    },
+    "20": {
+      "unit": "hour",
+      "crop_half_size_km": 4.08248290463863,
+      "canonical_demand_orders": 34348,
+      "canonical_od_count": 6445,
+      "valid_timing_samples": 33939,
+      "excluded_timing_samples": 409,
+      "mean_hours": 0.25356227349067445,
+      "mean_minutes": 15.213736409440466,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 30.0
+    },
+    "40": {
+      "unit": "hour",
+      "crop_half_size_km": 5.773502691896257,
+      "canonical_demand_orders": 47800,
+      "canonical_od_count": 9162,
+      "valid_timing_samples": 47258,
+      "excluded_timing_samples": 542,
+      "mean_hours": 0.25559270388082445,
+      "mean_minutes": 15.335562232849465,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.0
+    },
+    "60": {
+      "unit": "hour",
+      "crop_half_size_km": 7.0710678118654755,
+      "canonical_demand_orders": 53988,
+      "canonical_od_count": 10560,
+      "valid_timing_samples": 53373,
+      "excluded_timing_samples": 615,
+      "mean_hours": 0.2553300982394344,
+      "mean_minutes": 15.319805894366064,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.0
+    },
+    "80": {
+      "unit": "hour",
+      "crop_half_size_km": 8.16496580927726,
+      "canonical_demand_orders": 57071,
+      "canonical_od_count": 11293,
+      "valid_timing_samples": 56419,
+      "excluded_timing_samples": 652,
+      "mean_hours": 0.25657845761179743,
+      "mean_minutes": 15.394707456707847,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.0
+    },
+    "100": {
+      "unit": "hour",
+      "crop_half_size_km": 9.128709291752768,
+      "canonical_demand_orders": 57335,
+      "canonical_od_count": 11413,
+      "valid_timing_samples": 56680,
+      "excluded_timing_samples": 655,
+      "mean_hours": 0.2565772759350741,
+      "mean_minutes": 15.394636556104446,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.0
+    },
+    "120": {
+      "unit": "hour",
+      "crop_half_size_km": 10.0,
+      "canonical_demand_orders": 57377,
+      "canonical_od_count": 11427,
+      "valid_timing_samples": 56722,
+      "excluded_timing_samples": 655,
+      "mean_hours": 0.25656035870855515,
+      "mean_minutes": 15.39362152251331,
+      "median_minutes": 14.0,
+      "p90_minutes": 26.0,
+      "p95_minutes": 31.0
+    }
+  }
+}

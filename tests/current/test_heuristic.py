@@ -6,10 +6,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.optimization import direct as direct_solver, heuristic
+import src.solvers.direct.path as direct_solver
+import src.solvers.heuristic.search as heuristic
 from src.model.network import levels, network
 from src.operations.validation import build_operations
-from src.pricing.oracle import enumerate_all_columns
+from src.solvers.pricing.label import enumerate_all_columns
 
 _spec = importlib.util.spec_from_file_location(
     "optimization_fixture", Path(__file__).with_name("test_optimization.py")

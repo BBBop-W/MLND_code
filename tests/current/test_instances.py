@@ -18,7 +18,7 @@ from src.data.instance_io import ROOT, sha256
     (43,3,5,9162,6828.5714287189), (68,5,7,10571,7726.2857144554),
     (87,6,9,11293,8153.0000001821), (120,8,13,11427,8196.7142858995)])
 def test_canonical_instance_schema_and_operating_units(hubs,bases,swaps,ods,demand):
-    d=load_instance(hubs)
+    d=load_instance(hubs, {'data': {'demand_hubs': None}})
     assert (d['n_l'],d['n_k'],d['n_od'])==(bases,swaps,ods)
     assert d['demand'].sum()==pytest.approx(demand)
     assert d['model_version']=='path_cqn_v1'

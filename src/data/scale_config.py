@@ -44,6 +44,23 @@ DEFAULT_NANSHAN_LEVELS = (
     NanshanScaleLevel(10.0, 120, 8, 13),
 )
 
+AREA_REGULAR_MAIN_COUNTS = (
+    (20, 3, 5),
+    (40, 6, 10),
+    (60, 9, 15),
+    (80, 12, 20),
+    (100, 15, 25),
+    (120, 18, 30),
+)
+AREA_REGULAR_SUPPLEMENTARY_COUNTS = ((10, 2, 3),)
+AREA_REGULAR_LEVELS = tuple(
+    NanshanScaleLevel(10.0 * math.sqrt(hubs / 120.0), hubs, bases, swaps)
+    for hubs, bases, swaps in (
+        *AREA_REGULAR_SUPPLEMENTARY_COUNTS,
+        *AREA_REGULAR_MAIN_COUNTS,
+    )
+)
+
 
 @dataclass(frozen=True)
 class NanshanScaleBuildConfig:

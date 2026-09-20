@@ -57,3 +57,44 @@ from src.data import load_instance
 config = load_config("configs/default.json", overrides={"solver": {"seed": 43}})
 data = load_instance(120, config)
 ```
+
+`solver.column_limit` (default 500,000) stops full-path enumeration before an
+oversized model is built. `solver.graph_limit` (default 1,000,000) similarly
+limits state-graph arcs for the direct arc formulation. A null value disables
+that guard. These guards do not silently remove paths or arcs. Pricing backend
+and acceleration defaults belong to the five method profiles in
+`src/solvers/methods.py`; all methods use the same model parameters.
+
+## Keep demand independent of candidate counts
+
+The default is `data.demand_hubs: 120`. All candidate sizes use the complete
+H120 demand market, its OD coordinates/order, rider costs and OD delivery-time
+calibration: 11,427 OD pairs and 8,196.7143 orders/hour. `--hubs` selects the
+candidate facilities only. An OD outside the candidate-site extent remains in
+the objective, with direct-rider service for any demand not served by drones.
+
+```json
+{"data": {"demand_hubs": 120, "demand_scale": 1.0}}
+```
+
+Set `demand_hubs` to another available size (e.g. 24) to fix a different market
+for every candidate size. Set it explicitly to `null` to use each candidate
+instance's own geographic crop and demand; `configs/geographic.json` provides
+that historical mode. `demand_scale` changes volumes without changing OD pairs.
+
+```sh
+python main.py audit-demand --hubs 11 24 43 68 87 120
+python main.py audit-demand --config configs/geographic.json
+```
+
+These commands load and compare data without optimization. Batch runs audit
+fixed demand before solving, then check each case against the same fingerprint.
+The check includes OD identities, coordinates, volumes, rider baseline costs
+and delivery benchmarks; matching only the total number of orders is not enough.
+Demand source, counts, baseline cost and fingerprint are recorded in saved runs.
+
+The existing candidate sets were reclustered separately within different
+geographic crops; their L/E counts and locations also vary. Fixing demand does
+not make these facility sets nested or turn them into an experiment that changes
+only H while holding all other candidates fixed. Historical input files and
+saved-run replay retain their original demand definitions.

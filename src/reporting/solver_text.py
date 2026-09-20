@@ -10,6 +10,8 @@ STAGE_NAMES = {
     "refinement": ("Full-graph column-generation refinement", "完整图列生成复核"),
     "polish": ("Fixed-design polishing", "固定设计精修"),
     "direct": ("Complete-column reference model", "全列参考模型"),
+    "full_path": ("Full-path direct MISOCP", "全路径直接MISOCP"),
+    "arc": ("State-expanded arc-flow MISOCP", "状态扩展弧流MISOCP"),
 }
 
 

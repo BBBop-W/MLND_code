@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "family": "exponential",
+  "slope_minutes_per_straight_km": 5.733438163127652,
+  "mean_function": {
+    "form": "slope_times_straight_distance",
+    "intercept_minutes": 0.0,
+    "slope_minutes_per_straight_km": 5.733438163127652,
+    "input_distance_unit": "km",
+    "output_unit": "minutes"
+  },
+  "fitted_postfetch_intercept_minutes": 7.580591641383588,
+  "mean_source": "distance slope of Nanshan post-fetch delivery conditional mean, refitted on all seven days",
+  "transfer_assumption": "distance-associated travel component transfers to merchant-H and H-customer travel; distance-independent customer handoff and stops absorbed by fitted intercept are omitted from these travel legs",
+  "family_status": "working exponential family assumption; mean estimated from proxy observations; first-leg family is not empirically identified",
+  "selectedcounts": {
+    "source": "Meituan-Shenzhen/\u6df1\u5733\u5e02\u5357\u5c71\u533a\u8fd0\u5355\u62bd\u6837_\u5df2\u8131\u654f.csv",
+    "sha256": "0d8eb1bf6f9f23896ff73dfe88362caf36b1e994a9b36842fca9fcb5c944cbb1",
+    "raw_rows": 592667,
+    "selected_window_rows": 57377,
+    "chronology_or_numeric_rejected": 655,
+    "selected_valid_rows": 56722,
+    "zero_projected_distance_rows": 4596,
+    "above_120_minutes_rows": 1,
+    "duplicate_day_order_keys": 0,
+    "distance_definition": "Euclidean local kilometres from raw anonymized coordinates; same H120 projection, no road factor",
+    "time_definition": "arrived_time minus fetch_time in minutes; strictly same-day payment < fetch < arrived",
+    "timestamp_resolution": "one minute",
+    "window": "canonical H120 12:00<=payment<13:00; both endpoints in 20km by 20km crop",
+    "coordinate_note": "zero projected distances retained: rounded/anonymized equal coordinates need not imply zero physical trip",
+    "train_days": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5"
+    ],
+    "test_days": [
+      "6",
+      "7"
+    ],
+    "observed_scope": "post-fetch delivery elapsed time, including unobserved stops and customer handoff",
+    "unavailable": "merchant-to-H events, GPS trajectory, road-path length, building entry and delivery handoff split"
+  },
+  "zero_distance": "T=0 almost surely by continuity",
+  "expected_max": "a + mean*exp(-a/mean), with deterministic a when mean=0",
+  "preserve_payment_to_fetch_empirical_mean": true,
+  "postfetch_intercept_added_to_customer_clock": false,
+  "first_leg_observed": false,
+  "shape_parameter_estimated": false,
+  "diagnostics": "Gamma and exponential checks refer to observed post-fetch delivery elapsed time only",
+  "raw_sources_unchanged": true
+}

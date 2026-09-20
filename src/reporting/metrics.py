@@ -227,6 +227,8 @@ def _solver_metrics(result, manifest, run_summary):
     elif (
         result.get("method", "").startswith("direct")
         or manifest.get("method") == "direct"
+        or result.get("method") in {"arc", "full_path"}
+        or manifest.get("method") in {"arc", "full_path"}
     ):
         metrics.update(
             schema="direct",
@@ -259,7 +261,11 @@ def _solver_metrics(result, manifest, run_summary):
     elif metrics["schema"] == "direct":
         metrics["stage_rows"] = [
             dict(
-                name="direct",
+                name=(
+                    result.get("method")
+                    if result.get("method") in {"arc", "full_path"}
+                    else "direct"
+                ),
                 wall=metrics["wall"],
                 budget=metrics["budget"],
                 status=metrics["status"],
@@ -330,7 +336,11 @@ def audit(case):
     assigned = float(demand @ assignment.sum(axis=(1, 2)))
     empty = np.asarray(s["empty_flow_by_base_pair"])
     pairs = [
-        dict(origin=f"L{i+1}", destination=f"L{j+1}", flow_per_hour=float(empty[i, j]))
+        dict(
+            origin=f"L{i + 1}",
+            destination=f"L{j + 1}",
+            flow_per_hour=float(empty[i, j]),
+        )
         for i, j in np.argwhere(empty > 1e-4)
     ]
     flow = float(s["empty_flow"])
@@ -344,7 +354,7 @@ def audit(case):
     share = float(s["served"])
     swap_rows = [
         dict(
-            station=f"E{k+1}",
+            station=f"E{k + 1}",
             open=int(
                 result["_solution"]["facility"][data["n_l"] + data["n_h"] + k] > 0.5
             ),

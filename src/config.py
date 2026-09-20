@@ -18,7 +18,7 @@ DEFAULT_CONFIG = ROOT / "configs/default.json"
 def _merge(base, changes, prefix=""):
     result = deepcopy(base)
     if not isinstance(changes, dict):
-        raise ValueError(f'{prefix or "Configuration"} must be an object')
+        raise ValueError(f"{prefix or 'Configuration'} must be an object")
     for key, value in changes.items():
         if key not in base:
             raise ValueError(f"Unknown configuration key: {prefix}{key}")
@@ -39,7 +39,7 @@ def _number(value, key, *, positive=False, nullable=False, integer=False):
     ):
         raise ValueError(f"{key} must be finite")
     if value < 0 or (positive and value == 0):
-        raise ValueError(f'{key} must be {"positive" if positive else "nonnegative"}')
+        raise ValueError(f"{key} must be {'positive' if positive else 'nonnegative'}")
     if integer and int(value) != value:
         raise ValueError(f"{key} must be an integer")
 
@@ -53,6 +53,12 @@ def validate_config(config):
         if not isinstance(config["data"][name], str) or not config["data"][name]:
             raise ValueError(f"data.{name} must be a path")
     _number(config["data"]["demand_scale"], "data.demand_scale", positive=True)
+    demand_hubs = config["data"]["demand_hubs"]
+    _number(demand_hubs, "data.demand_hubs", nullable=True, integer=True)
+    if demand_hubs is not None and demand_hubs < 2:
+        raise ValueError(
+            "data.demand_hubs must be at least two, or null for per-instance demand"
+        )
     for key, value in config["depreciation"].items():
         _number(value, f"depreciation.{key}", positive=True)
     for key, value in config["costs"].items():
@@ -95,8 +101,16 @@ def validate_config(config):
             value,
             f"solver.{key}",
             nullable=key not in ("threads", "seed"),
-            positive=key in ("time_limit", "threads", "max_iterations"),
-            integer=key in ("threads", "max_iterations", "seed"),
+            positive=key
+            in (
+                "time_limit",
+                "threads",
+                "max_iterations",
+                "column_limit",
+                "graph_limit",
+            ),
+            integer=key
+            in ("threads", "max_iterations", "seed", "column_limit", "graph_limit"),
         )
     if config["solver"]["seed"] > 2**31 - 1:
         raise ValueError("solver.seed must be at most 2147483647")

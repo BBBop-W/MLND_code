@@ -38,23 +38,46 @@ def coordinates(rows):
     return values
 
 
-def read_instance(hubs, instance_root):
-    """Read sites and OD demand without any model or result-directory input."""
-    if int(hubs) != hubs or hubs < 2:
+def instance_directory(hubs, instance_root):
+    if isinstance(hubs, bool) or int(hubs) != hubs or hubs < 2:
         raise ValueError("hubs must be a positive integer of at least two")
     directories = sorted(project_path(instance_root).glob(f"H{int(hubs):03d}_*"))
     if len(directories) != 1:
         raise ValueError(
             f"Expected exactly one canonical instance for H{hubs}: {directories}"
         )
-    directory = directories[0]
+    return directories[0]
+
+
+def read_instance(hubs, instance_root, *, demand_hubs=None):
+    """Read candidates and a separately selected complete demand market."""
+    directory = instance_directory(hubs, instance_root)
+    source_hubs = hubs if demand_hubs is None else demand_hubs
+    demand_directory = instance_directory(source_hubs, instance_root)
     metadata = json.loads((directory / "metadata.json").read_text())
+    demand_metadata = json.loads((demand_directory / "metadata.json").read_text())
     if metadata.get("coordinate_system") != "local_km":
         raise ValueError("Canonical instances must use local_km coordinates")
+    if demand_directory != directory:
+        for key in (
+            "coordinate_system",
+            "projection_center_lon",
+            "projection_center_lat",
+        ):
+            if (
+                key not in metadata
+                or key not in demand_metadata
+                or metadata[key] != demand_metadata[key]
+            ):
+                raise ValueError(
+                    f"Candidate and demand coordinate systems differ: {key}"
+                )
     sites = _rows(directory / "sites.csv", ("site_id", "type", "x_km", "y_km"))
-    nodes = _rows(directory / "od_nodes.csv", ("node_id", "role", "x_km", "y_km"))
+    nodes = _rows(
+        demand_directory / "od_nodes.csv", ("node_id", "role", "x_km", "y_km")
+    )
     orders = _rows(
-        directory / "od_demand.csv",
+        demand_directory / "od_demand.csv",
         ("origin_node", "destination_node", "lambda_per_hour", "direct_distance_km"),
     )
     if len({r["site_id"] for r in sites}) != len(sites):
@@ -83,6 +106,7 @@ def read_instance(hubs, instance_root):
         od_origin=np.asarray([oi[row["origin_node"]] for row in orders]),
         od_destination=np.asarray([di[row["destination_node"]] for row in orders]),
         demand=demand,
+        od_pairs=[list(pair) for pair in od_pairs],
     )
     data.update(
         n_l=len(data["bases"]),
@@ -95,10 +119,27 @@ def read_instance(hubs, instance_root):
     direct = np.asarray([float(row["direct_distance_km"]) for row in orders])
     if not np.isfinite(direct).all() or np.any(direct < 0):
         raise ValueError("Direct distances must be finite and nonnegative")
+    sources = {"sites.csv": directory / "sites.csv"}
+    sources.update(
+        {
+            name: demand_directory / name
+            for name in ("od_nodes.csv", "od_demand.csv", "periods.csv")
+        }
+    )
     data["provenance"] = dict(
         directory=str(directory),
         instance_metadata=metadata,
-        sha256={p.name: sha256(p) for p in directory.glob("*.csv")},
+        sha256={name: sha256(path) for name, path in sources.items()},
+        source_files={name: str(path) for name, path in sources.items()},
+        demand_selection=dict(
+            mode="instance" if demand_hubs is None else "fixed",
+            source_hubs=int(source_hubs),
+            directory=str(demand_directory),
+            instance_metadata=demand_metadata,
+            n_od=len(orders),
+            hourly_demand=float(demand.sum()),
+            all_source_ods_included=True,
+        ),
         orders_sampled=False,
         demand_rescaled=False,
         screening_is_exact=True,

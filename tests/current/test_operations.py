@@ -250,8 +250,8 @@ def test_shared_wait_uncertainty_gives_single_joint_reliability():
 
 
 def test_oracle_trace_is_checked_against_independent_reconstruction():
-    from src.pricing.oracle import price_design
-    from src.pricing.routes import trace_mission, trace_empty
+    from src.solvers.pricing.label import price_design
+    from src.solvers.pricing.routes import trace_mission, trace_empty
 
     data, result = example()
     priced = price_design(data)
@@ -292,7 +292,7 @@ def test_no_service_solution_has_well_defined_mobile_report(tmp_path):
 
 
 def test_current_recourse_positive_solution_reconciles_complete_objective():
-    from src.optimization.recourse import solve
+    from src.solvers.benders.subproblem import solve
 
     data, result = example()
     data["ground"][:] = 12.0

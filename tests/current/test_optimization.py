@@ -8,9 +8,11 @@ import gurobipy as gp
 import numpy as np
 import pytest
 
-from src.optimization import direct as direct_solver, recourse, benders
+import src.solvers.direct.path as direct_solver
+import src.solvers.benders.subproblem as recourse
+import src.solvers.benders.engine as benders
 from src.model.network import network
-from src.pricing.oracle import enumerate_all_columns
+from src.solvers.pricing.label import enumerate_all_columns
 
 _spec = importlib.util.spec_from_file_location(
     "physical_fixture", Path(__file__).with_name("test_pricing.py")

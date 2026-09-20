@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import load_config, ROOT
 from .experiments.storage import json_payload
+from .solvers.methods import METHODS
 
 
 def emit(value):
@@ -32,20 +33,35 @@ def parser():
     )
     inspect.add_argument("--hubs", type=int, default=120)
     inspect.add_argument("--config", type=Path)
-    run = commands.add_parser(
-        "run", help="Run one or more instances in a new experiment directory"
+    audit = commands.add_parser(
+        "audit-demand",
+        help="Check OD consistency across candidate sizes without solving",
     )
-    run.add_argument("--hubs", type=int, nargs="+", default=[11])
-    run.add_argument("--config", type=Path)
-    run.add_argument(
-        "--method", choices=("benders", "hybrid", "direct"), default="benders"
+    audit.add_argument("--hubs", type=int, nargs="+", default=[11, 24, 43, 68, 87, 120])
+    audit.add_argument("--config", type=Path)
+    commands.add_parser(
+        "methods", help="List the five methods and acceleration settings"
     )
-    run.add_argument("--seconds", type=time_limit, default=argparse.SUPPRESS)
-    run.add_argument("--threads", type=int)
-    run.add_argument("--seed", type=int)
-    run.add_argument("--gap", type=float)
-    run.add_argument("--max-iterations", type=int)
-    run.add_argument("--out", type=Path)
+    plan = commands.add_parser(
+        "plan", help="Display an experiment matrix without starting optimization"
+    )
+    run = commands.add_parser("run", help="Execute the selected experiment matrix")
+    for command in (plan, run):
+        command.add_argument("--hubs", type=int, nargs="+", default=[11])
+        command.add_argument("--config", type=Path)
+        command.add_argument(
+            "--methods",
+            "--method",
+            nargs="+",
+            choices=["all", *METHODS],
+            default=["all"] if command is plan else ["benders_cg"],
+        )
+        command.add_argument("--seconds", type=time_limit, default=argparse.SUPPRESS)
+        command.add_argument("--threads", type=int)
+        command.add_argument("--seed", type=int)
+        command.add_argument("--gap", type=float)
+        command.add_argument("--max-iterations", type=int)
+        command.add_argument("--out", type=Path)
     run.add_argument(
         "--input", type=Path, help="Replay saved instance inputs as a single new case"
     )
@@ -67,6 +83,7 @@ def parser():
 
 def _inspect(args):
     from .data.instances import load_instance
+    from .data.demand import describe_demand
 
     config = load_config(args.config)
     data = load_instance(args.hubs, config)
@@ -80,6 +97,7 @@ def _inspect(args):
             },
             od_pairs=data["n_od"],
             hourly_demand=float(data["demand"].sum()),
+            demand_input=describe_demand(data),
             config=config,
         )
     )
@@ -87,9 +105,7 @@ def _inspect(args):
 
 
 def _run(args):
-    from .experiments.runner import run_case, run_batch
-
-    if args.input and args.config:
+    if getattr(args, "input", None) and args.config:
         raise ValueError(
             "--input reuses saved model parameters; use --config with canonical instances"
         )
@@ -111,12 +127,28 @@ def _run(args):
     output = args.out or ROOT / "outputs/experiments" / datetime.now().strftime(
         "%Y%m%d_%H%M%S_%f"
     )
+    methods = (
+        list(METHODS) if "all" in args.methods else list(dict.fromkeys(args.methods))
+    )
+    if args.command == "plan":
+        from .experiments.plan import build_plan
+
+        emit(
+            build_plan(
+                args.hubs, methods, config=config, options=options, output=args.out
+            )
+        )
+        return 0
+    from .experiments.runner import run_case, run_batch
+
     if args.input:
+        if len(methods) != 1:
+            raise ValueError("--input requires exactly one selected method")
         result = run_case(
             None,
             output,
             config=config,
-            method=args.method,
+            method=methods[0],
             options=options,
             input_path=args.input,
         )
@@ -127,7 +159,7 @@ def _run(args):
             hubs,
             output,
             config=config,
-            method=args.method,
+            methods=methods,
             options=options,
             progress=emit,
         )
@@ -155,7 +187,15 @@ def main(argv=None):
     try:
         if args.command == "inspect":
             return _inspect(args)
-        if args.command == "run":
+        if args.command == "audit-demand":
+            from .data.demand import audit_instances
+
+            emit(audit_instances(args.hubs, args.config))
+            return 0
+        if args.command == "methods":
+            emit([method.describe() for method in METHODS.values()])
+            return 0
+        if args.command in ("run", "plan"):
             return _run(args)
         if args.command == "report":
             return _report(args)

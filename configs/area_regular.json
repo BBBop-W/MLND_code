@@ -1,0 +1,9 @@
+{
+  "name": "area_regular",
+  "data": {
+    "instance_root": "data/instances/nanshan_area_regular",
+    "calibration": "data/model_inputs/area_regular/calibration.json",
+    "demand_hubs": null,
+    "demand_scale": 1.0
+  }
+}

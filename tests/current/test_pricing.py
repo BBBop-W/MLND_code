@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from scipy.integrate import quad
 
-from src.pricing import oracle
+import src.solvers.pricing.label as oracle
 
 
 def _fixture():
