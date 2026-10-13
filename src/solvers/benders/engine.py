@@ -218,16 +218,45 @@ def solve(
                 if str(error) != "time_limit":
                     raise
                 # The ordinary cut is already certified and remains available.
+                state.trace.append(
+                    dict(stage="pareto", accepted=False, reason="time_limit")
+                )
                 state.emit("pareto_finished", accepted=False, reason="time_limit")
                 return
             state.record_pareto(improved, time.perf_counter() - aux_started)
-            accepted = improved.get("accepted", False) and improved.get("cut_valid", False)
+            accepted = (
+                improved.get("accepted", False)
+                and improved.get("cut_valid", False)
+                and improved.get("certified", False)
+            )
             if accepted:
                 add_cut(improved, prefix="pareto")
                 state.stats["pareto_cuts"] += 1
-            state.emit(
-                "pareto_finished", accepted=bool(accepted), reason=improved.get("reason")
+            state.trace.append(
+                dict(
+                    stage="pareto",
+                    accepted=bool(accepted),
+                    elapsed=time.perf_counter() - started,
+                    **{
+                        key: improved.get(key)
+                        for key in (
+                            "core_gain",
+                            "core_optimality_loss",
+                            "tightness_error",
+                            "anchor_tolerance",
+                            "certified",
+                            "reason",
+                        )
+                    },
+                )
             )
+            state.emit(
+                "pareto_finished",
+                accepted=bool(accepted),
+                reason=improved.get("reason"),
+            )
+            if improved.get("reason") == "user_stop":
+                raise RecourseStopped("user_stop")
         finally:
             core.update(*design)
 
@@ -283,7 +312,9 @@ def solve(
             state.save("incumbent_improved")
         if answer["cut_valid"]:
             add_cut(answer)
-        strengthen((facility, cabinets, assignment, airlines), answer, budget, sub_started)
+        strengthen(
+            (facility, cabinets, assignment, airlines), answer, budget, sub_started
+        )
         return answer
 
     state.emit("master_ready")

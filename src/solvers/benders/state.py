@@ -157,5 +157,15 @@ class BendersState:
         self.stats["pareto_wall"] += elapsed
         for name in ("cg_iterations", "pricing_calls", "pricing_wall"):
             self.stats[f"pareto_{name}"] += answer.get(name, 0)
-        accepted = answer.get("accepted", False) and answer.get("cut_valid", False)
-        self.stats["pareto_rejected"] += int(not accepted)
+        accepted = (
+            answer.get("accepted", False)
+            and answer.get("cut_valid", False)
+            and answer.get("certified", False)
+        )
+        interrupted = answer.get("reason") in {
+            "time_limit",
+            "user_stop",
+            "incomplete_pricing",
+        }
+        self.stats["pareto_interrupted"] += int(interrupted)
+        self.stats["pareto_rejected"] += int(not accepted and not interrupted)

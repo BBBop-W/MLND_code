@@ -29,3 +29,13 @@ dist/
 .pytest_cache/
 .ruff_cache/
 tests/*
+!tests/current/
+tests/current/*
+!tests/current/test_pareto.py
+!tests/current/test_pareto_integration.py
+!tests/current/test_methods.py
+!tests/current/test_benders_options.py
+!tests/current/test_sensitivity_inputs.py
+!tests/current/test_sensitivity.py
+!tests/current/test_sensitivity_density.py
+!tests/current/test_construction_failure.py

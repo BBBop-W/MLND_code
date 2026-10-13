@@ -78,6 +78,10 @@ def build_operations(data, result):
     checks["assignment_count_violation"] = _maximum(alpha.sum(axis=(1, 2)) - 1)
     checks["assignment_source_violation"] = _maximum(alpha.sum(axis=2) - facility[:L])
     checks["assignment_return_violation"] = _maximum(alpha.sum(axis=1) - facility[:L])
+    if data.get("same_base_service", False):
+        checks["same_base_assignment_violation"] = _maximum(
+            abs(alpha[:, ~np.eye(L, dtype=bool)])
+        )
     checks["rho_opening_violation"] = _maximum(np.r_[-rho, rho - facility[:L]])
     checks["nonnegative_resource_violation"] = _maximum(np.r_[-idle, -fleet])
     checks["idle_cone_violation"] = _maximum(
@@ -195,6 +199,10 @@ def build_operations(data, result):
             )
     served = served_pair.sum(axis=(1, 2))
     total = float(served.sum())
+    if data.get("same_base_service", False):
+        checks["same_base_service_violation"] = _maximum(
+            service_ll[~np.eye(L, dtype=bool)]
+        )
     expected = demand[:, None, None] * alpha * rho[None, :, None]
     checks["assignment_service_error"] = _maximum(abs(served_pair - expected))
     checks["served_demand_violation"] = _maximum(served - demand)

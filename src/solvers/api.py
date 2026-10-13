@@ -27,6 +27,8 @@ def solve(
 ):
     """Solve one model. Reading method descriptions never calls this function."""
     spec = get_method(method, accelerations)
+    if data.get("same_base_service", False) and spec.formulation != "arc":
+        raise ValueError("Same-base service experiments currently require the arc method")
     common = dict(
         threads=threads,
         seed=seed,

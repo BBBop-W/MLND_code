@@ -101,7 +101,28 @@ def run_case(
                     f"Solver source fingerprint differs from its snapshot: {name}"
                 )
         phase = "validation"
-        if result.get("_solution") is None:
+        if result.get("construction_complete") is False:
+            reason = result.get("termination_reason") or "construction_incomplete"
+            summary = dict(
+                case=output.name,
+                method=method,
+                status="failed",
+                passed=False,
+                failed_phase="construction",
+                construction_complete=False,
+                termination_reason=reason,
+                error={
+                    "type": "IncompleteConstruction",
+                    "message": f"Complete model construction did not finish: {reason}",
+                },
+                solver_status=result.get("status"),
+                **{
+                    key: result.get(key)
+                    for key in ("objective", "bound", "gap", "wall", "budget")
+                },
+                output=str(output),
+            )
+        elif result.get("_solution") is None:
             summary = dict(
                 case=output.name,
                 method=method,

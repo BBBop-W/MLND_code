@@ -73,6 +73,7 @@ def build_model(
         None if time_limit is None else time.perf_counter() + max(0.0, time_limit)
     )
     L, H, D = c["L"], c["H"], c["D"]
+    same_base = bool(data.get("same_base_service", False))
     net = network(data)
     sizes, capacity, levelcost = levels(data)
     fixed = [fixed_facility, fixed_capacity_level, fixed_assignment, fixed_airlines]
@@ -112,6 +113,15 @@ def build_model(
                     "Fixed strategic variables must be binary with required dimensions"
                 )
             variable.LB, variable.UB = values, values
+        if same_base:
+            for l in range(L):
+                for m in range(L):
+                    if l != m:
+                        if fixed_assignment is not None and np.any(
+                            np.asarray(fixed_assignment)[:, l, m] != 0
+                        ):
+                            raise ValueError("Same-base service forbids cross-base assignments")
+                        alpha[:, l, m].UB = 0
         rho = model.addVars(L, lb=0, ub=1, name="rho")
         idle = model.addVars(L, lb=0, name="idle")
         fleet = model.addVar(lb=0, name="Gamma")
@@ -168,7 +178,7 @@ def build_model(
 
         for l in range(L):
             for m in range(L):
-                for od in range(D):
+                for od in (range(D) if not same_base or l == m else ()):
                     check()
                     graph = build_service(c, od, l, m, check=check)
                     check(graph)
@@ -183,8 +193,10 @@ def build_model(
             check()
             h = float(data["demand"][od])
             for l in range(L):
-                source = gp.quicksum(groups[od, l, m] for m in range(L))
+                source = gp.quicksum(groups.get((od, l, m), 0) for m in range(L))
                 for m in range(L):
+                    if (od, l, m) not in groups:
+                        continue
                     model.addConstr(
                         groups[od, l, m] <= h * alpha[od, l, m],
                         name=f"pair_{od}_{l}_{m}",

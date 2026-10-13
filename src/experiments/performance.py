@@ -34,7 +34,15 @@ THREAD_ENV = {
 SUMMARY_FIELDS = (
     "id", "source", "region", "H", "L", "E", "OD", "method", "state",
     "pid", "exit_code", "stop_reason", "elapsed_seconds", "peak_rss_bytes",
-    "status", "passed", "objective", "bound", "gap", "wall", "served", "output",
+    "status", "passed", "failed_phase", "construction_complete", "termination_reason",
+    "objective", "bound", "gap", "wall", "served", "output",
+    "round", "factor", "multiplier", "total_cost_per_hour", "all_courier_cost_per_hour",
+    "saving_per_hour", "saving_pct", "drone_served_share_pct", "fleet",
+    "opened_bases", "opened_lockers", "opened_swaps", "locker_units",
+    "reposition_flow_per_hour", "swap_visits_per_hour", "service_using_swap_pct",
+    "max_cabinets", "walk_distance_coefficient", "mean_delivery_minutes",
+    "direct_same_served_OD_minutes",
+    "postprocess_status",
 )
 
 
@@ -52,7 +60,7 @@ def _gurobi_defaults():
 
 
 def prepare(manifest, output, *, config=None, hubs=(10, 20, 30), workers=3,
-            seconds=7200, methods=tuple(METHODS)):
+            seconds=7200, methods=tuple(METHODS), solver_options=None, postprocess=None):
     """Freeze the requested matrix and code without starting any optimization."""
     output = _absolute(output)
     if output.exists():
@@ -75,6 +83,9 @@ def prepare(manifest, output, *, config=None, hubs=(10, 20, 30), workers=3,
     defaults = _gurobi_defaults()
     options = dict(time_limit=float(seconds), threads=1, **defaults,
                    column_limit=None, graph_limit=None)
+    options.update(solver_options or {})
+    if options["time_limit"] != seconds:
+        raise ValueError("The per-case solve budget must match the batch time limit")
     records = []
     configurations = {}
     for case in sorted(cases, key=lambda row: (row["H"], row["source"], str(row["region"]))):
@@ -94,16 +105,19 @@ def prepare(manifest, output, *, config=None, hubs=(10, 20, 30), workers=3,
                 "config": str(output / "configs" / f"{case['id']}.json"),
                 "output": str(output / "runs" / job_id),
                 "log": str(output / "logs" / f"{job_id}.log"),
+                **{key: case[key] for key in ("round", "factor", "multiplier") if key in case},
             })
     output.mkdir(parents=True)
     write_json(output / "input_manifest.json", family)
     for name, configuration in configurations.items():
         write_json(output / "configs" / f"{name}.json", configuration)
     plan = {
-        "schema": 1, "family": "algorithm performance", "created_utc": utc_now(),
+        "schema": 1, "family": family.get("family", "algorithm performance"),
+        "created_utc": utc_now(),
         "manifest": str(manifest), "manifest_sha256": sha256(manifest),
         "workers": workers, "seconds": float(seconds), "solver": options,
-        "gap_policy": "Defaults read from a fresh local Gurobi model", "gurobi_defaults": defaults,
+        "gap_policy": "Explicit solver options" if solver_options else "Defaults read from a fresh local Gurobi model",
+        "gurobi_defaults": defaults, "postprocess": postprocess,
         "termination_grace_seconds": 120, "kill_grace_seconds": 180,
         "memory_limit_bytes": None, "source_snapshot": str(output / "source_snapshot"),
         "python": sys.executable, "sources": snapshot_sources(output), "jobs": records,
@@ -231,9 +245,8 @@ def supervise(batch, *, poll_seconds=1.0):
                     if summary_path.exists():
                         try:
                             summary = json.loads(summary_path.read_text())
-                            job.update({key: summary.get(key) for key in (
-                                "status", "passed", "objective", "bound", "gap", "wall", "served"
-                            )})
+                            job.update({key: summary[key] for key in SUMMARY_FIELDS
+                                        if key in summary and key not in ("id", "state", "pid")})
                         except (OSError, ValueError) as error:
                             job.update(status="failed", error=f"Cannot read result: {error}")
                     if code != 0 or not summary_path.exists() or job.get("status") == "failed":
@@ -306,8 +319,12 @@ def worker(batch, job_id):
     summary = run_case(job["H"], job["output"], config=job["config"],
                        method=job["method"], options=plan["solver"],
                        input_path=job["input_path"])
+    if plan.get("postprocess"):
+        from .sensitivity import finalize_job
+
+        summary = finalize_job(plan, job, summary)
     print(json.dumps(summary, ensure_ascii=False), flush=True)
-    return 1 if summary["status"] == "failed" else 0
+    return 1 if summary["status"] == "failed" or summary.get("postprocess_status") == "failed" else 0
 
 
 def main(argv=None):
