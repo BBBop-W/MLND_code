@@ -48,7 +48,7 @@ Json check(const Input& d,const std::vector<double>* mask=nullptr) {
     require(report.empty_added==paths.empty_paths.size(),"wrong empty count");
     require(!paths.complete && paths.support_complete,"seed changed catalogue semantics");
     auto assigned=[&](int r,BasePair b) {
-        return d.demand[r]>0 && (!mask || (*mask)[(r*d.n_l+b[0])*d.n_l+b[1]]!=0);
+        return d.demand[r]>0 && (!mask || (*mask)[d.assignment_offset(r,b[0],b[1])]!=0);
     };
     std::set<Group> groups;
     std::map<Group,std::vector<int>> segments;
@@ -115,8 +115,8 @@ int main(int argc,char** argv) {
         Json cases=Json::array();
         for (int seed=0;seed<12;++seed) for (int k:{1,2}) for (const auto& policy:{"aggregate","segment"}) {
             auto d=fixture(seed,k,policy); cases.push_back(check(d));
-            std::vector<double> mask(d.n_od*d.n_l*d.n_l,0);
-            mask[1]=1; mask[5]=1; // Two assigned ODs, cross-base AA/AB/BA/BB.
+            std::vector<double> mask(d.assignment_count(),0);
+            mask[d.assignment_offset(0,0,1)]=1; mask[d.assignment_offset(1,0,1)]=1; // Two assigned ODs, cross-base AA/AB/BA/BB.
             cases.push_back(check(d,&mask));
         }
         if (argc>1) for (int k:{1,2}) {

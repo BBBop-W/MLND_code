@@ -10,6 +10,7 @@ import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 from src.model.types import MODEL_VERSION
+from src.model.assignment import assignment_scope
 from .formulation import (
     DESIGN_NAMES,
     BuildStopped,
@@ -42,6 +43,7 @@ def baseline(data, paths=None):
     return dict(
         model_version=MODEL_VERSION,
         flow_policy=data.flow_policy,
+        assignment_scope=assignment_scope(data),
         objective=cost,
         continuous_cost=cost,
         opening_cost=0.0,
@@ -523,9 +525,8 @@ def solve_benders(
                 theta
                 >= cost_floor
                 - gp.quicksum(
-                    data.demand[r] * savings[r, l, m] * variables["assignment"][r, l, m]
-                    for r in range(data.n_od)
-                    for l, m in data.base_pairs
+                    data.demand[key[0]] * savings[key] * variables["assignment"][key]
+                    for key in np.ndindex(savings.shape)
                 ),
                 name="courier_savings_bound",
             )

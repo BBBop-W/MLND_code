@@ -41,7 +41,7 @@ std::vector<double> design(const Input& d,int base_mask,int first,int second,int
     for(int l=0;l<2;++l)x[l]=(base_mask>>l)&1;
     if(base_mask)for(int h=0;h<2;++h){x[2+h]=1;x[layout.capacity+h*2+level]=1;}
     for(int r=0;r<2;++r){const int pair=r==0?first:second;
-        if(pair>=0){require(x[pair/2]&&x[pair%2],"Illegal test assignment");x[layout.assignment+r*4+pair]=1;}}
+        if(pair>=0){require(x[pair/2]&&x[pair%2],"Illegal test assignment");x[layout.assignment_index(r,pair/2,pair%2)]=1;}}
     for(int i=0;i<4;++i)for(int j=0;j<4;++j)x[layout.airline+i*4+j]=d.allowed_links(i,j)*x[i]*x[j];
     return x;
 }
@@ -78,6 +78,8 @@ Json fractional_checks(const Input& d,const PathCollection& paths) {
     require(!point_residuals(queue.matrix,stronger).at("passed").get<bool>(),"Perspective failed to remove old fractional inventory witness");
     stronger[queue.idle[0]]=.5;stronger[queue.fleet]=.5;set_cones(queue,stronger);
     require(point_residuals(queue.matrix,stronger).at("passed").get<bool>(),"Perspective threshold witness invalid");
+    if (d.origin_assignment()) return {{"perspective_old_idle",1.0/3},{"perspective_new_idle",.5},
+        {"pair_split_witness","not_applicable_to_origin_assignment"}};
     // Full operational witness: split an OD between two returns while each
     // separate McCormick product claims rho. Balance with one empty return.
     for(int b=0;b<2;++b){x[old.layout.assignment+b]=.25;x[ids.at("v_0_0_"+std::to_string(b))]=.25;}

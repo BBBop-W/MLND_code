@@ -57,8 +57,8 @@ std::vector<double> interior_anchor_core(const Input& d) {
     std::vector<double> core(layout.count,0);
     std::fill(core.begin()+layout.facility,core.begin()+layout.capacity,.5);
     std::fill(core.begin()+layout.capacity,core.begin()+layout.assignment,.5/d.n_levels);
-    for (int r=0;r<d.n_od;++r) for (int l=0;l<d.n_l;++l) for (int b=0;b<d.n_l;++b)
-        core[layout.assignment+(r*d.n_l+l)*d.n_l+b]=(l==b?.5:.25)/(d.n_l*d.n_l+1);
+    for (int r=0;r<d.n_od;++r) for (int l=0;l<d.n_l;++l) for (int b=0;b<d.assignment_destinations();++b)
+        core[layout.assignment_index(r,l,b)]=d.origin_assignment()?.25/(d.n_l+1):(l==b?.5:.25)/(d.n_l*d.n_l+1);
     for (int u=0;u<d.n_nodes();++u) for (int v=0;v<d.n_nodes();++v)
         core[layout.airline+u*d.n_nodes()+v]=d.allowed_links(u,v)?(u==v?.25:.125):0;
     require(point_residuals(design_model(d,false).matrix,core).at("passed").get<bool>(),
@@ -219,6 +219,8 @@ int main(int argc,char** argv) {
                 std::ifstream stream(anchor_source);
                 if (!stream) throw std::invalid_argument("Could not read anchor JSON");
                 Json source; stream>>source;
+                if (d.origin_assignment() && (!source.is_object() || source.value("assignment_scope",std::string()) != "origin"))
+                    throw std::invalid_argument("K=1 anchor must declare assignment_scope=origin");
                 anchor=(source.is_array() ? source : source.at("design")).get<std::vector<double>>();
             }
             if (interior_weight>0) {

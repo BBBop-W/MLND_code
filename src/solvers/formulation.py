@@ -14,6 +14,7 @@ import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 from src.model.types import MODEL_VERSION
+from src.model.assignment import assignment_shape, assignment_scope, assignment_pools
 from src.model.locker_capacity import poisson_mean_threshold
 
 DESIGN_NAMES = ("facility", "capacity_level", "assignment", "airline")
@@ -30,9 +31,32 @@ def shapes(data):
     return dict(
         facility=(data.n_nodes,),
         capacity_level=data.slot_counts.shape,
-        assignment=(data.n_od, data.n_l, data.n_l),
+        assignment=assignment_shape(data),
         airline=(data.n_nodes, data.n_nodes),
     )
+
+
+def validate_design_arrays(data, design, *, source="fixed_design"):
+    """Require the current binary design shape before fixing or warm-starting.
+
+    In particular, a historical K=1 base-pair assignment is not silently
+    squeezed or aggregated into the new departure-assignment model.
+    """
+    if design.get("assignment_scope", assignment_scope(data)) != assignment_scope(data):
+        raise ValueError(f"{source}.assignment_scope disagrees with the current model")
+    values = {}
+    for name, shape in shapes(data).items():
+        if name not in design:
+            raise ValueError(f"{source}.{name} is missing")
+        array = np.asarray(design[name], dtype=float)
+        if (
+            array.shape != shape
+            or not np.isfinite(array).all()
+            or np.any((array != 0) & (array != 1))
+        ):
+            raise ValueError(f"{source}.{name} must be binary with shape {shape}")
+        values[name] = array
+    return values
 
 
 def setup(model, threads=1, seed=43, mip_gap=1e-4):
@@ -65,10 +89,13 @@ def add_design(model, data, binary=True, check=None):
         model.addConstr(z.sum(i, "*") == x[data.n_l + i], name=f"install_{i}")
     for r in range(data.n_od):
         check()
-        model.addConstr(a.sum(r, "*", "*") <= 1, name=f"assign_{r}")
-        for l, m in data.base_pairs:
-            model.addConstr(a[r, l, m] <= x[l])
-            model.addConstr(a[r, l, m] <= x[m])
+        model.addConstr(
+            a.sum(r, *(["*"] * (len(assignment_shape(data)) - 1))) <= 1,
+            name=f"assign_{r}",
+        )
+        for pool in assignment_pools(data):
+            for base in pool:
+                model.addConstr(a[r, *pool] <= x[base])
     for u in range(data.n_nodes):
         check()
         for v in range(data.n_nodes):
@@ -172,7 +199,7 @@ def build_model(
         + len(paths.initial_segments)
         + (len(lift_groups) if pooled else 0)
         + (len(lift_groups) * (3 * data.n_od + 2) if active_lifts else 0)
-        + data.n_od * data.n_l**2
+        + int(np.prod(assignment_shape(data)))
         + len(P)
         + len(K)
         + 5 * data.n_l
@@ -192,16 +219,7 @@ def build_model(
         x, z, a, y = (variables[name] for name in DESIGN_NAMES)
         fix = {}
         if fixed_design is not None:
-            for name, shape in shapes(data).items():
-                values = np.asarray(fixed_design[name], dtype=float)
-                if (
-                    values.shape != shape
-                    or not np.isfinite(values).all()
-                    or np.any((values != 0) & (values != 1))
-                ):
-                    raise ValueError(
-                        f"fixed_design.{name} must be binary with shape {shape}"
-                    )
+            for name, values in validate_design_arrays(data, fixed_design).items():
                 for key, var in variables[name].items():
                     fix[name, key] = model.addConstr(
                         var == float(values[key]), name=f"fix_{name}_{key}"
@@ -215,7 +233,7 @@ def build_model(
         idle = variables["idle"] = model.addVars(L, ub=fleet_bound, name="idle")
         fleet = variables["fleet"] = model.addVar(ub=fleet_bound, name="fleet")
         head = variables["head"] = model.addVars(len(segments), name="head")
-        v = variables["v"] = model.addVars(R, L, L, ub=1, name="v")
+        v = variables["v"] = model.addVars(*assignment_shape(data), ub=1, name="v")
         courier = variables["courier"] = model.addVars(R, name="courier")
         flow = variables["flow"] = model.addVars(P, ub=total, name="flow")
         empty = variables["empty_flow"] = model.addVars(K, ub=total, name="empty_flow")
@@ -238,7 +256,7 @@ def build_model(
         variables["_lift_groups"] = lift_groups
         variables["_pooled"] = pooled
         variables["_active_lifts"] = active_lifts
-        by_pair = {b: [] for b in data.base_pairs}
+        by_pool = {b: [] for b in assignment_pools(data)}
         branch_single, branch_double, executed_head = {}, {}, {}
         cones = []
         for l in range(L):
@@ -254,10 +272,10 @@ def build_model(
         for r in range(R):
             check()
             courier[r].UB = float(data.demand[r])
-            for l, m in data.base_pairs:
-                model.addConstr(v[r, l, m] <= rho[l])
-                model.addConstr(v[r, l, m] <= a[r, l, m])
-                model.addConstr(v[r, l, m] >= rho[l] + a[r, l, m] - 1)
+            for pool in assignment_pools(data):
+                model.addConstr(v[r, *pool] <= rho[pool[0]])
+                model.addConstr(v[r, *pool] <= a[r, *pool])
+                model.addConstr(v[r, *pool] >= rho[pool[0]] + a[r, *pool] - 1)
         for j, segment in enumerate(segments):
             check()
             head[j].UB = float(data.demand[segment.first_od])
@@ -270,7 +288,7 @@ def build_model(
             check()
             segment = segments[indices[0]]
             l, m = segment.b
-            by_pair[segment.b].append(g)
+            by_pool[(l,) if data.max_orders == 1 else segment.b].append(g)
             h = float(data.demand[segment.first_od])
             if pooled:
                 group_head[g].UB = h
@@ -328,7 +346,7 @@ def build_model(
                     )
                     for j in indices:
                         branch_double[j, r] = double_row
-        for b, group_indices in by_pair.items():
+        for b, group_indices in by_pool.items():
             for r in range(R):
                 check()
                 expression = gp.quicksum(
@@ -343,7 +361,7 @@ def build_model(
                     )
                 model.addConstr(
                     expression == data.demand[r] * v[r, *b],
-                    name=f"orders_{r}_{b[0]}_{b[1]}",
+                    name="orders_" + "_".join(map(str, (r, *b))),
                 )
         order = {
             r: model.addConstr(courier[r] == data.demand[r], name=f"demand_{r}")
@@ -590,6 +608,7 @@ def read_solution(built, *, value=None):
     return dict(
         model_version=MODEL_VERSION,
         flow_policy=data.flow_policy,
+        assignment_scope=assignment_scope(data),
         objective=float(
             expression_value(built.strategy_cost)
             + expression_value(built.continuous_cost)

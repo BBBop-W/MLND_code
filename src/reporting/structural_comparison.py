@@ -27,17 +27,21 @@ def csv_file(path, rows):
 
 def structural_point_violations(result, data, *, tolerance=1e-6):
     """Independent arithmetic on saved fractional points, without optimization."""
-    l, h, r = data["n_l"], data["n_h"], data["n_od"]
+    l, h, r = data["n_l"], data["n_h"], data["n_od"]  # noqa: E741
     levels = data["slot_counts"].shape[1]
     assignment_offset = l + h + h * levels
     design = result.get("design")
     point = result.get("operating_point") or {}
     if not result.get("primal_valid") or not isinstance(design, list):
         return dict(available=False, reason="no_validated_fractional_primal"), []
-    if (len(design) < assignment_offset + r*l*l or
-            point.get("v_order") != "r_then_departure_then_return" or
-            any(not isinstance(point.get(key), list) or len(point[key]) != size
-                for key, size in (("rho",l),("idle",l),("v",r*l*l)))):
+    origin = result.get("assignment_scope") == "origin" or point.get("v_order") == "r_then_departure"
+    assignment_count = r*l if origin else r*l*l
+    expected_order = "r_then_departure" if origin else "r_then_departure_then_return"
+    if (result.get("assignment_scope", "origin" if origin else "base_pair") != ("origin" if origin else "base_pair")
+            or len(design) < assignment_offset + assignment_count
+            or point.get("v_order") != expected_order
+            or any(not isinstance(point.get(key), list) or len(point[key]) != size
+                for key, size in (("rho",l),("idle",l),("v",assignment_count)))):
         return dict(available=False, reason="saved_point_dimensions_or_order_mismatch"), []
     if not all(number(value) for values in (design, point["rho"], point["idle"], point["v"]) for value in values):
         return dict(available=False, reason="nonfinite_saved_point"), []
@@ -49,10 +53,14 @@ def structural_point_violations(result, data, *, tolerance=1e-6):
         return design[assignment_offset + (od*l+departure)*l+returned]
     for od in range(r):
         for site in range(l):
-            incident = sum(a(od, departure, returned) for departure in range(l) for returned in range(l)
-                           if site in (departure, returned))
-            assigned = sum(a(od,site,returned) for returned in range(l))
-            served = sum(point["v"][(od*l+site)*l+returned] for returned in range(l))
+            if origin:
+                incident = assigned = design[assignment_offset + od*l + site]
+                served = point["v"][od*l+site]
+            else:
+                incident = sum(a(od, departure, returned) for departure in range(l) for returned in range(l)
+                               if site in (departure, returned))
+                assigned = sum(a(od,site,returned) for returned in range(l))
+                served = sum(point["v"][(od*l+site)*l+returned] for returned in range(l))
             add("assignment_incident_clique", od, site, incident, design[site])
             add("shared_rho_executed", od, site, served, point["rho"][site])
             add("shared_rho_unexecuted", od, site, assigned-served, design[site]-point["rho"][site])

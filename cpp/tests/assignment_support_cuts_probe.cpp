@@ -266,7 +266,7 @@ int main(int argc,char** argv) {
     try {
         if(argc>2) throw std::invalid_argument("Usage: assignment_support_cuts_probe [OUTPUT_JSON]");
         mlnd::Json report{{"cases",mlnd::Json::array()}};
-        for(int K:{1,2}) for(int L:{1,2}) for(bool sparse:{false,true})
+        for(int K:{2}) for(int L:{1,2}) for(bool sparse:{false,true})
             report["cases"].push_back(exhaustive(K,L,sparse));
         report["boundaries"]=boundaries(); report["passed"]=true; report["solver_runs"]=0;
         if(argc==2) {

@@ -146,7 +146,7 @@ int main(int argc,char**argv) {
  try {
     if(argc!=3) throw std::invalid_argument("Usage: probe FIXED_DESIGN_CASES_JSON OUTPUT_JSON");
     Json checks=Json::array();
-    for(bool two_bases:{false,true}) for(int k:{1,2}) {
+    for(bool two_bases:{false,true}) for(int k:{2}) {
         auto d=fixture(k,"aggregate",two_bases);
         // OD 0 can only be picked up at locker 0; OD 1 only at locker 1.
         d.rider_mean.values={.02,1.,1.,.02}; d.deadline={.25,.25};

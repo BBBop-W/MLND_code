@@ -39,8 +39,21 @@ struct Input {
     Json metadata, model_json, manifest;
 
     int n_nodes() const { return n_l + n_h; }
+    bool origin_assignment() const { return max_orders == 1; }
+    int assignment_destinations() const { return origin_assignment() ? 1 : n_l; }
+    int assignment_pool_count() const { return n_l * assignment_destinations(); }
+    int assignment_count() const { return n_od * assignment_pool_count(); }
+    int assignment_offset(int r, int l, int m = 0) const {
+        return (r * n_l + l) * assignment_destinations() + (origin_assignment() ? 0 : m);
+    }
+    const char* assignment_scope() const { return origin_assignment() ? "origin" : "base_pair"; }
     double effective_delta() const { return max_orders == 1 ? 0.0 : delta; }
 };
+
+inline double assignment_value(const Input& d, const Json& values, int r, int l, int m = 0) {
+    const auto& origin = values.at(r).at(l);
+    return d.origin_assignment() ? origin.get<double>() : origin.at(m).get<double>();
+}
 
 // max_orders=0 uses the default in model.json; 1/2 choose the declared case.
 Input read_input(const std::filesystem::path& path, int max_orders = 0,

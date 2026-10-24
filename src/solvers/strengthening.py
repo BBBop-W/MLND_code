@@ -2,7 +2,7 @@
 
 This module never constructs or solves an optimization model. Call it with
 the same physically validated complete catalogue used by the solver. Returned
-perassignment_savings is currency per served order, indexed [OD, base, base];
+perassignment_savings is currency per served order, indexed by the strategic assignment shape;
 multiply by demand when forming coefficients of assignment variables.
 """
 
@@ -11,6 +11,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
+
+from src.model.assignment import assignment_shape, assignment_key
 
 
 def master_bounds(data, paths):
@@ -39,7 +41,7 @@ def master_bounds(data, paths):
         or fleet_cost < 0
     ):
         raise ValueError("Demand and operating cost coefficients must be nonnegative")
-    minimum = np.full((data.n_od, data.n_l, data.n_l), np.inf)
+    minimum = np.full(assignment_shape(data), np.inf)
     beta = 0.0
     zero_load_profitable_paths = []
     zero_load_paths = 0
@@ -92,7 +94,8 @@ def master_bounds(data, paths):
         share = float(np.nextafter(augmented / occurrences, -np.inf))
         share = max(0.0, share)
         for od, _ in counts:
-            minimum[(od, *pair)] = min(minimum[(od, *pair)], share)
+            key = assignment_key(data, od, pair)
+            minimum[key] = min(minimum[key], share)
         saving = (
             math.fsum(float(ground[od]) * count for od, count in counts) - augmented
         )
@@ -106,7 +109,9 @@ def master_bounds(data, paths):
             beta = max(beta, float(np.nextafter(saving / occupancy, np.inf)))
     supported = np.isfinite(minimum)
     gains = np.zeros_like(minimum)
-    broadcast_ground = np.broadcast_to(ground[:, None, None], minimum.shape)
+    broadcast_ground = np.broadcast_to(
+        ground.reshape((-1,) + (1,) * (minimum.ndim - 1)), minimum.shape
+    )
     gains[supported] = np.maximum(0.0, broadcast_ground[supported] - minimum[supported])
     gains[gains > 0] = np.nextafter(gains[gains > 0], np.inf)
     if beta > 0:
@@ -114,7 +119,9 @@ def master_bounds(data, paths):
     locker_value = None if zero_load_profitable_paths else beta
     baseline = float(demand @ ground)
     numerical_margin = 1e-8 * (1 + abs(baseline))
-    global_floor = baseline - float(demand @ gains.max(axis=(1, 2)))
+    global_floor = baseline - float(
+        demand @ gains.max(axis=tuple(range(1, gains.ndim)))
+    )
     return dict(
         perassignment_savings=gains,
         locker_value_per_load=locker_value,
@@ -124,7 +131,9 @@ def master_bounds(data, paths):
             service_paths=len(paths.service_paths),
             supported_assignments=int(supported.sum()),
             positive_saving_assignments=int((gains > 0).sum()),
-            unsupported_ods=np.flatnonzero(~supported.any(axis=(1, 2))).tolist(),
+            unsupported_ods=np.flatnonzero(
+                ~supported.any(axis=tuple(range(1, supported.ndim)))
+            ).tolist(),
             all_courier_cost=baseline,
             numerical_margin=numerical_margin,
             assignment_global_operating_floor=global_floor - numerical_margin,

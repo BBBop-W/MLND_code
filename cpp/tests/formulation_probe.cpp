@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
             cones.push_back({c.up,c.down,c.one,c.factor});
         std::ofstream stream(argv[4]);
         if (!stream) throw std::runtime_error("Cannot open output file");
-        stream << mlnd::Json{{"variables",vars},{"rows",rows},{"cones",cones},
+        stream << mlnd::Json{{"assignment_scope",d.assignment_scope()},{"variables",vars},{"rows",rows},{"cones",cones},
             {"minimize",f.matrix.minimize},{"constant",f.matrix.constant},
             {"fixed",fixed}}.dump() << '\n';
         std::cout << "variables=" << vars.size() << " rows=" << rows.size() << " cones=" << cones.size() << '\n';

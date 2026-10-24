@@ -4,6 +4,31 @@
 
 固定测试实例为 `examples/tsl_2l20h50od`：2 个基地、20 个柜候选点、50 个 OD。K=1、K=2 共用该目录，通过 `--k` 选择，所有地理、需求和成本系数保持相同。格式及参数定义见实例的 `README.md`。
 
+`examples/` 中的实例采用原生 CSV/JSON 格式，供本目录程序或 `python -m src.experiments.native gurobi --instance ...` 使用。Python 常规入口 `main.py run --input` 需要 `input_metadata.json` / `input_arrays.npz` 快照，例如 `data/benchmarks/tsl_2l20h50od/`；两种目录不能互换。
+
+当前分支的 **K=1 使用 OD × 出发基地分配**，返回基地由服务路径选择；K=2 仍使用 OD × 出发基地 × 返回基地分配。路径中的出发/返回端点、基地流量平衡和空飞调拨均保留。两种 K 的对照现在同时包含分配域差异；历史 K=1 基地对结果也不能直接当作当前 K=1 的同模型算法基准。公式和迁移边界见 [K=1 起点分配说明](../docs/k1_origin_assignment.md)。
+
+K=1 输出 `assignment_scope="origin"`，分配及可用率乘积数组为 `(R,L)`；K=2 保留基地对数组。K=1 明确拒绝 `--assignment-support-cuts`、`--double-support-cuts`、`--joint-base-cost-cuts`：这三项当前使用固定返回基地的证书。一般成本下界在可选返回基地上取最小值；资源 LP 保留交付和出发侧门控，K=1 不使用返回分配门控。公共模型、完整路径、Benders 和 CG 仍保留完整返回路径。
+
+## 代码组成与复用
+
+| 文件组 | 职责 |
+|---|---|
+| `include/mlnd/` | 输入、路径、矩阵、求解结果和算法的公共类型与接口 |
+| `src/input.cpp`、`main.cpp` | 标准 CSV/JSON 实例校验、配置、命令行和运行入口 |
+| `src/paths.cpp` | 首段、完整服务/空飞路径及统一资源系数；完整枚举和定价共用 |
+| `src/formulation.cpp`、`linear_model.cpp` | 设计与运营约束、稀疏列系数、锥模型及 Concert 调用 |
+| `src/benders.cpp`、`dual_workspace.cpp` | 外层 Benders、固定设计 SOCP、认证对偶、列池和增量对偶 LP |
+| `src/pricing.cpp` | 精确标号扩展、支配、约化成本与完整定价证书 |
+| `src/heuristics.cpp` | 初始设计、列池 MIP、邻域搜索等可行上界策略 |
+| `src/strengthening.cpp`、`topology_cuts.cpp`、`assignment_support_cuts.cpp`、`branch_joint_cuts.cpp` | 公共下界、路径支持及组合成本割；分别检查其适用分配域 |
+| `src/bdd.cpp`、`bdd_search.cpp` | 独立 BDD 诊断及乘子搜索，与默认算法区分 |
+| `src/output.cpp`、`progress.cpp` | 统一结果、运营表、来源记录及运行进度 |
+
+修改模型时先改公共构造与索引，再核对完整模型、Benders、定价、固定设计和导出；不要分别维护几套需求方程。`cpp/tests/` 中的探针由 Makefile 的对应目标构建，用于矩阵、固定设计、割、定价和求解器互验。实际可用目标以 `cpp/Makefile` 为准。
+
+原生结果的 Python 互验入口是 `src/experiments/native.py`；已验证结果的报告使用 `src/reporting/native.py` 或相应批次的 `scale_ladder.py`、`structural_comparison.py`、`bdd.py`。所有图形共用 `src/reporting/style.py`，不要另写一套 CPLEX 专用绘图样式。输入布局和现成命令见 [根 README 的报告复用指南](../README.md#报告与绘图优先复用已有入口)。
+
 可选的 `--od-airline-bounds` 在 Benders 外部资源 LP 中加入按 OD 需求分解的航线门控，再投影为主问题成本割；不增加主问题变量。它适用于 lifted 和 conditional 两种需求表示，默认关闭。这些割只保证对整数设计及其凸包有效，开启后的 `root_diagnostics` 与原 `continuous_root` 分开报告，不能相互拼接计算连续 gap。数学证明、测试和对照协议见 [OD 航线割说明](../docs/od_airline_cuts_20261022.md)。
 
 ## 构建
@@ -78,7 +103,7 @@ cpp/build/mlnd_cpp \
   --out outputs/cpp_tsl20h_fixed_K2
 ```
 
-`--start FILE` 提供初始设计：完整模型把四组设计变量作为部分 MIP start；Benders 先评估该设计。其他连续变量不会作为跨求解器热启动值原样使用。输入文件可以是原生 `solution.json`，或包含 `_solution` 对象的 JSON；原生入口不读取 Python 的 `.npz`。设计文件应来自同一个实例及相同 ID 顺序；跨 K 复用时也只读取设计，连续流量按本次 K 重新求解。
+`--start FILE` 提供初始设计：完整模型把四组设计变量作为部分 MIP start；Benders 先评估该设计。其他连续变量不会作为跨求解器热启动值原样使用。输入文件可以是原生 `solution.json`，或包含 `_solution` 对象的 JSON；原生入口不读取 Python 的 `.npz`。设计文件应来自同一个实例及相同 ID 顺序，分配维度必须匹配本次模型。当前 K=1 与 K=2 的分配域不同，不能直接跨 K 传入旧三维分配；如需利用旧设计，应显式转换、核验，并重新求解运营流量。
 
 固定设计的求解器目标仅含运营成本；对外输出的 `objective` 和 `bound` 会加回固定设计的设施成本，保持与完整模型一致的总成本口径。
 

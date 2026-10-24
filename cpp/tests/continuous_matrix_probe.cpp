@@ -142,6 +142,9 @@ int main(int argc,char** argv) {
                 {"budget_seconds",seconds},{"threads",1},{"lower_bound",nullptr}};
             if(argc==8) {
                 const auto source=read(argv[7]);
+                if (data.value("assignment_scope",std::string())=="origin" &&
+                    (!source.is_object() || source.value("assignment_scope",std::string())!="origin"))
+                    throw std::invalid_argument("K=1 design sidecar must declare assignment_scope=origin");
                 const auto design=(source.is_array()?source:source.at("design")).get<std::vector<double>>();
                 if(design.size()>point.size())throw std::invalid_argument("Design is larger than candidate");
                 for(std::size_t j=0;j<design.size();++j) {
@@ -182,7 +185,7 @@ int main(int argc,char** argv) {
         }
         auto f=build_formulation(d,paths);
         for (auto& variable:f.matrix.variables) variable.binary=false;
-        Json matrix={{"schema","mlnd-linear-model/1"},{"K",d.max_orders},
+        Json matrix={{"schema","mlnd-linear-model/1"},{"K",d.max_orders},{"assignment_scope",d.assignment_scope()},
             {"input_manifest",d.manifest},{"scope",seeded?"restricted_seed_rmp_continuous_relaxation":"full_path_continuous_relaxation"},
             {"constant",f.matrix.constant},{"minimize",f.matrix.minimize},
             {"variables",Json::array()},{"rows",Json::array()},{"cones",Json::array()}};

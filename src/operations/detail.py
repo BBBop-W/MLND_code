@@ -56,6 +56,7 @@ def enrich_operations(inputs, data, result, payload):
                 "Saved pickup_share must be an OD-by-locker probability matrix"
             )
     assignment = np.asarray(sol["assignment"], float)
+    origin_assignment = assignment.ndim == 2
     facility = np.asarray(sol["facility"], float)
     airlines = np.asarray(sol["airline"], float)
     rho, idle = np.asarray(sol["rho"], float), np.asarray(sol["idle"], float)
@@ -68,6 +69,7 @@ def enrich_operations(inputs, data, result, payload):
     pair_actual = defaultdict(float)
     single_actual = defaultdict(float)
     pool_actual = defaultdict(lambda: defaultdict(float))
+    physical_pool_actual = defaultdict(lambda: defaultdict(float))
     path_rows = {(row["kind"], row["path"]): row for row in tables["paths"]}
     order_rows = defaultdict(list)
     for row in tables["order_paths"]:
@@ -84,6 +86,7 @@ def enrich_operations(inputs, data, result, payload):
             pid = int(path["id"])
             p = path_rows[kind, pid]
             origin, target = p["departure"], p["return_base"]
+            pool_target = None if origin_assignment else target
             double = kind == "service" and path.get("second_od") is not None
             names = (
                 ("empty",)
@@ -117,7 +120,8 @@ def enrich_operations(inputs, data, result, payload):
             flight_drones = flow * sum(durations)
             base[origin][kind + "_tasks_depart_per_hour"] += flow
             base[target][kind + "_tasks_arrive_per_hour"] += flow
-            pool_actual[origin, target][kind + "_tasks_per_hour"] += flow
+            pool_actual[origin, pool_target][kind + "_tasks_per_hour"] += flow
+            physical_pool_actual[origin, target][kind + "_tasks_per_hour"] += flow
             p.update(
                 first_od=path.get("first_od"),
                 second_od=path.get("second_od"),
@@ -150,11 +154,13 @@ def enrich_operations(inputs, data, result, payload):
             ] += flow
             base[origin]["served_orders_depart_per_hour"] += count * flow
             base[target]["served_orders_arrive_per_hour"] += count * flow
-            pool_actual[origin, target]["served_orders_per_hour"] += count * flow
+            pool_actual[origin, pool_target]["served_orders_per_hour"] += count * flow
             if double:
-                pair_actual[origin, target, path["first_od"], path["second_od"]] += flow
+                pair_actual[
+                    origin, pool_target, path["first_od"], path["second_od"]
+                ] += flow
             else:
-                single_actual[origin, target, path["first_od"]] += flow
+                single_actual[origin, pool_target, path["first_od"]] += flow
             p.update(first_wait_minutes=0.0, second_wait_minutes=0.0)
             for row in order_rows[pid]:
                 r, i, j = row["od"], row["pickup"], row["delivery"]
@@ -265,7 +271,9 @@ def enrich_operations(inputs, data, result, payload):
                     kind + "_per_hour"
                 ]
     for i, row in enumerate(tables["bases"]):
-        assigned = assignment[:, i, :].sum(axis=1)
+        assigned = (
+            assignment[:, i] if origin_assignment else assignment[:, i, :].sum(axis=1)
+        )
         offered = float(data.demand @ assigned)
         b = base[i]
         components = (
@@ -380,7 +388,10 @@ def enrich_operations(inputs, data, result, payload):
         row.update(
             assigned=bool(len(selected)),
             departure=selected_pair[0] if selected_pair else None,
-            return_base=selected_pair[1] if selected_pair else None,
+            return_base=selected_pair[1]
+            if selected_pair and not origin_assignment
+            else None,
+            assignment_scope=summary["assignment_scope"],
             assigned_availability=float(rho[selected_pair[0]])
             if selected_pair
             else 0.0,
@@ -436,7 +447,12 @@ def enrich_operations(inputs, data, result, payload):
     pair_rows, single_rows, assignment_rows = [], [], []
     for pool in tables["pools"]:
         departure, arrival = pool["departure"], pool["return_base"]
-        h = data.demand * assignment[:, departure, arrival]
+        assigned = (
+            assignment[:, departure]
+            if origin_assignment
+            else assignment[:, departure, arrival]
+        )
+        h = data.demand * assigned
         lam = float(h.sum())
         q = float(pool["continuation_probability"])
         pi = h / lam if lam else np.zeros(data.n_od)
@@ -450,9 +466,7 @@ def enrich_operations(inputs, data, result, payload):
         actual = pool_actual[departure, arrival]
         pool.update(
             availability=float(rho[departure]),
-            assigned_od_count=int(
-                np.count_nonzero(assignment[:, departure, arrival] > 0.5)
-            ),
+            assigned_od_count=int(np.count_nonzero(assigned > 0.5)),
             offered_single_tasks_per_hour=float(singles.sum()),
             offered_double_tasks_per_hour=float(offers.sum()),
             expected_served_orders_per_hour=float(lam * rho[departure]),
@@ -475,8 +489,9 @@ def enrich_operations(inputs, data, result, payload):
                     od=r,
                     departure=departure,
                     return_base=arrival,
-                    assigned=bool(assignment[r, departure, arrival] > 0.5),
-                    assignment=float(assignment[r, departure, arrival]),
+                    assigned=bool(assigned[r] > 0.5),
+                    assignment=float(assigned[r]),
+                    assignment_scope=summary["assignment_scope"],
                     demand_per_hour=float(data.demand[r]),
                     availability=float(rho[departure]),
                     offered_orders_per_hour=float(h[r]),
@@ -625,14 +640,14 @@ def enrich_operations(inputs, data, result, payload):
         cross_base_service_tasks_per_hour=float(
             sum(
                 values["service_tasks_per_hour"]
-                for (departure, arrival), values in pool_actual.items()
+                for (departure, arrival), values in physical_pool_actual.items()
                 if departure != arrival
             )
         ),
         cross_base_service_fraction=_ratio(
             sum(
                 values["service_tasks_per_hour"]
-                for (departure, arrival), values in pool_actual.items()
+                for (departure, arrival), values in physical_pool_actual.items()
                 if departure != arrival
             ),
             summary["task_flights"],
@@ -831,7 +846,7 @@ def metric_dictionary(tables):
         "self_pickup_probability": "Saved exogenous probability of customer self-pickup at this order's delivery locker",
         "self_pickup_orders_per_hour": "Expected drone-served orders ending in customer self-pickup; not measured choices",
         "terminal_courier_orders_per_hour": "Expected drone-served orders requiring the delivery-locker-to-customer courier leg",
-        "unassigned_direct_orders_per_hour": "Demand sent directly by courier because the OD has no assigned base pair",
+        "unassigned_direct_orders_per_hour": "Demand sent directly by courier because the OD has no strategic assignment",
         "unavailability_direct_orders_per_hour": "Assigned demand sent directly by courier through departure-base unavailability 1-rho",
         "mean_threshold": "Maximum Poisson mean offered load allowed by installed compartments and overflow tolerance",
         "pickup_reservation_mean": "Mean number of pickup reservations: order rate times request-to-pickup mean",
@@ -879,8 +894,9 @@ def metric_dictionary(tables):
         "inflow": "Complete service plus empty task arrivals per hour",
         "opened": "Whether the site or directed flight link is activated in the solution",
         "allowed": "Whether the directed flight link exists in the candidate network",
-        "assigned": "Whether this OD is assigned to a departure-return base pair; assignment does not force positive flow if rho is zero",
+        "assigned": "Whether this OD is assigned to the strategic pool; assignment does not force positive flow if rho is zero",
         "assignment": "Saved binary assignment value",
+        "assignment_scope": "origin uses one departure base per OD; base_pair also fixes the return base",
         "first_per_hour": "Orders served in first position, including singleton tasks",
         "second_per_hour": "Orders served in second position of a two-order task",
         "direct_per_hour": "Original demand served by direct ground courier",
@@ -897,7 +913,7 @@ def metric_dictionary(tables):
         "locker": "Zero-based candidate locker index",
         "od": "Zero-based prepared origin-destination demand index",
         "departure": "Zero-based departure base index",
-        "return_base": "Zero-based return base index",
+        "return_base": "Zero-based physical return base for paths; strategic return base for assignments and pools, null under origin assignment",
         "first_od": "Zero-based OD index served first",
         "second_od": "Zero-based OD index served second; blank for single-order/empty paths",
         "first_pickup": "Zero-based first pickup locker index",

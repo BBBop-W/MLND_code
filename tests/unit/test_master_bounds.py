@@ -72,7 +72,9 @@ def legal_designs(d):
                 if design["facility"][edge[0]] and design["facility"][edge[1]]
             ]
             for assignment in product((0, 1) if base_open else (0,), repeat=d.n_od):
-                design["assignment"][:, 0, 0] = assignment
+                design["assignment"][
+                    (slice(None),) + (0,) * (design["assignment"].ndim - 1)
+                ] = assignment
                 for airline in product((0, 1), repeat=len(permitted)):
                     design["airline"][:] = 0
                     for edge, value in zip(permitted, airline):
@@ -100,7 +102,7 @@ def test_exhaustive_all_tiny_binary_designs_have_valid_cost_bounds(max_orders):
             operating = float(built.model.ObjVal)
             first = float(d.demand @ d.ground_cost) - float(
                 np.sum(
-                    d.demand[:, None, None]
+                    d.demand.reshape((-1,) + (1,) * (design["assignment"].ndim - 1))
                     * bounds["perassignment_savings"]
                     * design["assignment"]
                 )

@@ -93,6 +93,8 @@ int main(int argc, char** argv) {
         if (!design_stream || !(design_stream >> source)) throw std::runtime_error("Cannot read design JSON");
         if (!source.is_object() || !source.contains("design") || !source.at("design").is_array())
             throw std::invalid_argument("Design JSON must contain a full strategic vector: {\"design\":[...]}");
+        if (d.origin_assignment() && source.value("assignment_scope",std::string()) != "origin")
+            throw std::invalid_argument("K=1 design sidecar must declare assignment_scope=origin; legacy base-pair vectors need explicit conversion");
         const auto fixed = source.at("design").get<std::vector<double>>();
         if (fixed.size() != static_cast<std::size_t>(layout.count)) throw std::invalid_argument("Design length mismatch");
         std::vector<double> network;
@@ -103,6 +105,7 @@ int main(int argc, char** argv) {
             network.push_back(fixed[j]);
         }
         report["instance"] = d.name;
+        report["assignment_scope"] = d.assignment_scope();
         report["provenance"] = {{"design_sha256", sha256_file(design_file)}, {"input_manifest", d.manifest},
             {"model_version", d.model_version}, {"flow_policy", d.flow_policy}, {"route_mode", d.route_mode},
             {"demand_formulation", "complete_lifted"}, {"tight_airline_bounds", true},
@@ -145,7 +148,7 @@ int main(int argc, char** argv) {
         report["model"] = {{"variables", f.matrix.variables.size()}, {"binary_variables", binaries},
             {"linear_constraints", f.matrix.rows.size()}, {"quadratic_constraints", f.matrix.cones.size()},
             {"nonzeros", nonzeros}, {"strategic_variables", layout.count},
-            {"assignment_variables", layout.airline - layout.assignment}};
+            {"assignment_variables", layout.airline - layout.assignment},{"assignment_scope",d.assignment_scope()}};
         report["timings"]["formulation_seconds"] = wall_time() - build_start;
         std::vector<double> selected(f.matrix.variables.size(), 0);
         for (int j = 0; j < layout.count; ++j)

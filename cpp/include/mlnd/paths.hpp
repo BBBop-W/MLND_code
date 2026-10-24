@@ -106,8 +106,8 @@ struct BranchSeedReport {
 
 // Primal-only seed: cover the single branch and each positive-demand, positive-
 // kappa continuation required by the given binary assignment mask. Its shape
-// is n_od*n_l*n_l, indexed (r*n_l+departure)*n_l+return; nullptr considers every
-// pair. Aggregate groups may use different first segments for their branches.
+// is Input::assignment_count(), indexed by Input::assignment_offset; nullptr
+// considers every departure (K=1) or base pair (K=2). Aggregate groups may use different first segments for their branches.
 // Segment-policy groups receive one common prefix with a complete branch
 // bundle, when one exists. Prefixes are ranked cheaply, then a low-cost second
 // leg is chosen; this is not a shortest-path or pricing certificate. Storage is

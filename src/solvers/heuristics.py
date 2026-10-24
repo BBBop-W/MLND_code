@@ -11,6 +11,7 @@ from copy import deepcopy
 import numpy as np
 
 from src.model.locker_capacity import occupancy_limits
+from src.model.assignment import assignment_shape, assignment_key
 from src.operations.validation import build_operations
 from .formulation import shapes
 
@@ -39,7 +40,7 @@ def _support(data, paths):
             - reposition
         )
         if saving > 0:
-            key = (p.first_od, *p.b)
+            key = assignment_key(data, p.first_od, p.b)
             offers[key] = max(offers.get(key, 0.0), float(saving))
     return double, offers
 
@@ -76,12 +77,12 @@ def initial_design(data, paths):
     is only a proposal heuristic. K2 checks both ordered directions and AA.
     """
     double, offers = _support(data, paths)
-    assignment = np.zeros((data.n_od, data.n_l, data.n_l))
+    assignment = np.zeros(assignment_shape(data))
     ranked = sorted(
         offers, key=lambda k: (-data.demand[k[0]] * offers[k], -data.demand[k[0]], k)
     )
-    for od, departure, arrival in ranked:
-        pair = (departure, arrival)
+    for od, *pair in ranked:
+        pair = tuple(pair)
         if not assignment[od].any() and _compatible(data, double, assignment, od, pair):
             assignment[od, *pair] = 1
     return _open_design(data, assignment)
@@ -102,16 +103,16 @@ def design_neighbors(data, paths, incumbent, max_neighbors=3):
     double, offers = _support(data, paths)
     assignment = np.asarray(incumbent["_solution"]["assignment"], dtype=float)
     if (
-        assignment.shape != (data.n_od, data.n_l, data.n_l)
+        assignment.shape != assignment_shape(data)
         or not np.isin(assignment, (0, 1)).all()
     ):
         raise ValueError("Incumbent assignments must have the binary design shape")
     ranked = sorted(offers, key=lambda k: (-data.demand[k[0]], -offers[k], k))
     neighbors = []
-    for od, departure, arrival in ranked:
+    for od, *pair in ranked:
         if len(neighbors) >= max_neighbors:
             break
-        pair = (departure, arrival)
+        pair = tuple(pair)
         if assignment[od].any() or not _compatible(data, double, assignment, od, pair):
             continue
         proposal = assignment.copy()
@@ -162,8 +163,11 @@ def cleanup_incumbent(data, result):
                     sol["capacity_level"][i] = 0
                     sol["capacity_level"][i, level] = 1
     for base in range(data.n_l):
+        assignment = sol["assignment"]
         assigned = (
-            sol["assignment"][:, base, :].any() or sol["assignment"][:, :, base].any()
+            assignment[:, base].any()
+            if assignment.ndim == 2
+            else assignment[:, base, :].any() or assignment[:, :, base].any()
         )
         if (
             base not in used_nodes

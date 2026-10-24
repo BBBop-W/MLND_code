@@ -57,7 +57,7 @@ std::vector<double> design(const Input& d, const std::string& mode) {
     for (int r = 0; r < d.n_od; ++r) {
         if (mode == "partial_assignment" && r % 2) continue;
         const int destination = mode == "cross_base" ? 1 : 0;
-        result[layout.assignment+r*d.n_l*d.n_l+destination] = 1;
+        result[layout.assignment_index(r,0,destination)] = 1;
     }
     for (int u = 0; u < d.n_nodes(); ++u) for (int v = 0; v < d.n_nodes(); ++v)
         result[layout.airline+u*d.n_nodes()+v] = mode == "assigned_without_links" ? 0 : d.allowed_links(u,v);

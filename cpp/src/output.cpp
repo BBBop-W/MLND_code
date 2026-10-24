@@ -27,12 +27,13 @@ Json empty_solution(const Input& data, const PathCollection& paths) {
     for (int h = 0; h < data.n_h; ++h) capacity.push_back(zeros(data.n_levels));
     for (int r = 0; r < data.n_od; ++r) {
         Json row = Json::array();
-        for (int l = 0; l < data.n_l; ++l) row.push_back(zeros(data.n_l));
+        for (int l = 0; l < data.n_l; ++l)
+            row.push_back(data.origin_assignment() ? Json(0.0) : zeros(data.n_l));
         assignment.push_back(std::move(row));
     }
     for (int u = 0; u < data.n_nodes(); ++u) airline.push_back(zeros(data.n_nodes()));
     return {{"facility", zeros(data.n_nodes())}, {"capacity_level", capacity},
-            {"assignment", assignment}, {"airline", airline},
+            {"assignment", assignment}, {"assignment_scope", data.assignment_scope()}, {"airline", airline},
             {"rho", zeros(data.n_l)}, {"idle", zeros(data.n_l)},
             {"head", zeros(static_cast<int>(paths.initial_segments.size()))},
             {"eta", zeros(static_cast<int>(paths.initial_segments.size()))},
@@ -143,7 +144,7 @@ Json package(const Input& data, const PathCollection& paths, Json solution) {
     const double demand = std::accumulate(data.demand.begin(), data.demand.end(), 0.0);
     const double served = std::accumulate(m.served.begin(), m.served.end(), 0.0);
     const Json totals = metric_json(data, solution, m);
-    return {{"model_version", data.model_version}, {"flow_policy", data.flow_policy},
+    return {{"assignment_scope", data.assignment_scope()}, {"model_version", data.model_version}, {"flow_policy", data.flow_policy},
             {"objective", m.opening() + m.continuous()}, {"continuous_cost", m.continuous()},
             {"opening_cost", m.opening()}, {"demand", demand}, {"served", served},
             {"fleet", solution.at("fleet")}, {"metrics", totals},
@@ -203,8 +204,11 @@ Json solution_json(const Input& data, const PathCollection& paths,
             solution["capacity_level"][h][level] = std::round(values.at(layout.capacity + h * data.n_levels + level));
     for (int r = 0; r < data.n_od; ++r)
         for (int l = 0; l < data.n_l; ++l)
-            for (int m = 0; m < data.n_l; ++m)
-                solution["assignment"][r][l][m] = std::round(values.at(layout.assignment + (r * data.n_l + l) * data.n_l + m));
+            for (int m = 0; m < data.assignment_destinations(); ++m) {
+                const double value = std::round(values.at(layout.assignment_index(r,l,m)));
+                if (data.origin_assignment()) solution["assignment"][r][l] = value;
+                else solution["assignment"][r][l][m] = value;
+            }
     for (int u = 0; u < data.n_nodes(); ++u)
         for (int v = 0; v < data.n_nodes(); ++v)
             solution["airline"][u][v] = std::round(values.at(layout.airline + u * data.n_nodes() + v));
@@ -267,6 +271,22 @@ Json all_courier_result(const Input& data, const PathCollection& paths) {
 std::vector<double> solution_design(const Input& data, const Json& supplied) {
     const Json& solution = supplied.contains("_solution") ? supplied.at("_solution") : supplied;
     const DesignLayout layout(data);
+    if (supplied.contains("assignment_scope") && supplied.at("assignment_scope") != data.assignment_scope())
+        throw std::invalid_argument("Assignment scope does not match this model");
+    if (solution.contains("assignment_scope") && solution.at("assignment_scope") != data.assignment_scope())
+        throw std::invalid_argument("Solution assignment scope does not match this model");
+    const auto& assignments = solution.at("assignment");
+    if (!assignments.is_array() || assignments.size() != static_cast<std::size_t>(data.n_od))
+        throw std::invalid_argument("Wrong assignment OD dimension");
+    for (const auto& row : assignments) {
+        if (!row.is_array() || row.size() != static_cast<std::size_t>(data.n_l))
+            throw std::invalid_argument("Wrong assignment departure dimension");
+        for (const auto& cell : row) {
+            if (data.origin_assignment() ? !cell.is_number() :
+                (!cell.is_array() || cell.size() != static_cast<std::size_t>(data.n_l)))
+                throw std::invalid_argument("Assignment shape mismatch: K=1 requires [OD, departure]; legacy base-pair solutions are not a fixed design for this model");
+        }
+    }
     std::vector<double> design(layout.count, 0);
     for (int u = 0; u < data.n_nodes(); ++u) design[layout.facility + u] = solution.at("facility").at(u);
     for (int h = 0; h < data.n_h; ++h)
@@ -274,8 +294,8 @@ std::vector<double> solution_design(const Input& data, const Json& supplied) {
             design[layout.capacity + h * data.n_levels + level] = solution.at("capacity_level").at(h).at(level);
     for (int r = 0; r < data.n_od; ++r)
         for (int l = 0; l < data.n_l; ++l)
-            for (int m = 0; m < data.n_l; ++m)
-                design[layout.assignment + (r * data.n_l + l) * data.n_l + m] = solution.at("assignment").at(r).at(l).at(m);
+            for (int m = 0; m < data.assignment_destinations(); ++m)
+                design[layout.assignment_index(r,l,m)] = assignment_value(data,assignments,r,l,m);
     for (int u = 0; u < data.n_nodes(); ++u)
         for (int v = 0; v < data.n_nodes(); ++v)
             design[layout.airline + u * data.n_nodes() + v] = solution.at("airline").at(u).at(v);
@@ -356,8 +376,10 @@ void write_result(const std::filesystem::path& directory, const Input& data,
     for (int r = 0; r < data.n_od; ++r) {
         int departure = -1, destination = -1;
         for (int l = 0; l < data.n_l; ++l)
-            for (int b = 0; b < data.n_l; ++b)
-                if (solution.at("assignment").at(r).at(l).at(b).get<double>() > 0.5) { departure = l; destination = b; }
+            for (int b = 0; b < data.assignment_destinations(); ++b)
+                if (assignment_value(data,solution.at("assignment"),r,l,b) > 0.5) {
+                    departure = l; destination = data.origin_assignment() ? -1 : b;
+                }
         ods.row({data.od_ids[r], number(data.demand[r]), number(m.served[r]), number(m.first[r]), number(m.second[r]),
             number(solution.at("courier").at(r)), data.demand[r] > 0 ? number(m.served[r] / data.demand[r]) : "",
             departure < 0 ? "" : data.base_ids[departure], destination < 0 ? "" : data.base_ids[destination],

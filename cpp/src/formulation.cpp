@@ -30,7 +30,9 @@ std::vector<int> selected(std::size_t count, const std::vector<int>* supplied) {
 DesignLayout::DesignLayout(const Input& d) {
     capacity = d.n_nodes();
     assignment = capacity + d.n_h * d.n_levels;
-    airline = assignment + d.n_od * d.n_l * d.n_l;
+    n_l = d.n_l;
+    assignment_destinations = d.assignment_destinations();
+    airline = assignment + d.assignment_count();
     count = airline + d.n_nodes() * d.n_nodes();
 }
 Formulation design_model(const Input& d, bool integer, const FormulationStrengthening& strengthening) {
@@ -49,15 +51,15 @@ Formulation design_model(const Input& d, bool integer, const FormulationStrength
     const int N = d.n_nodes(), L = d.n_l;
     auto x = [](int i) { return i; };
     auto z = [&](int i, int s) { return f.layout.capacity + i * d.n_levels + s; };
-    auto a = [&](int r, int l, int b) { return f.layout.assignment + (r * L + l) * L + b; };
+    auto a = [&](int r, int l, int b) { return f.layout.assignment_index(r,l,b); };
     auto y = [&](int i, int j) { return f.layout.airline + i * N + j; };
     for (int i = 0; i < N; ++i) m.variable(label("facility", i), 0, 1, i < L ? d.base_cost[i] : 0, integer);
     for (int i = 0; i < d.n_h; ++i)
         for (int s = 0; s < d.n_levels; ++s)
             m.variable(label("capacity_level", i, s), 0, 1, d.slot_cost(i, s), integer);
     for (int r = 0; r < d.n_od; ++r)
-        for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b)
-            m.variable(label("assignment", r, l, b), 0, 1, 0, integer);
+        for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+            m.variable(label("assignment", r, l, d.origin_assignment() ? -1 : b), 0, 1, 0, integer);
     for (int i = 0; i < N; ++i) for (int j = 0; j < N; ++j)
         m.variable(label("airline", i, j), 0, 1, d.link_cost(i, j), integer);
     for (int i = 0; i < f.layout.count; ++i) {
@@ -71,18 +73,18 @@ Formulation design_model(const Input& d, bool integer, const FormulationStrength
     }
     for (int r = 0; r < d.n_od; ++r) {
         Coefficients sum;
-        for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b) sum.emplace_back(a(r,l,b), 1);
+        for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) sum.emplace_back(a(r,l,b), 1);
         m.row(label("assign", r), 'L', 1, std::move(sum));
-        for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b) {
+        for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
             m.row(label("assign_departure",r,l,b), 'L', 0, {{a(r,l,b),1},{x(l),-1}});
-            m.row(label("assign_return",r,l,b), 'L', 0, {{a(r,l,b),1},{x(b),-1}});
+            if (!d.origin_assignment()) m.row(label("assign_return",r,l,b), 'L', 0, {{a(r,l,b),1},{x(b),-1}});
         }
         if (strengthening.assignment_incident_clique) for (int j = 0; j < L; ++j) {
             // An OD selects at most one pair. Every selected pair incident to
             // base j requires that base; the (j,j) pair is counted only once.
             Coefficients incident{{x(j),-1}};
-            for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b)
-                if (l == j || b == j) incident.emplace_back(a(r,l,b),1);
+            for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+                if (l == j || (!d.origin_assignment() && b == j)) incident.emplace_back(a(r,l,b),1);
             m.row(label("assign_incident",r,j),'L',0,std::move(incident));
         }
         if (strengthening.shared_rho_joint && !strengthening.assignment_incident_clique)
@@ -92,7 +94,7 @@ Formulation design_model(const Input& d, bool integer, const FormulationStrength
                 // stronger incident clique is disabled, so every master point
                 // still has a feasible all-courier operating extension.
                 Coefficients departure{{x(l),-1}};
-                for (int b = 0; b < L; ++b) departure.emplace_back(a(r,l,b),1);
+                for (int b = 0; b < d.assignment_destinations(); ++b) departure.emplace_back(a(r,l,b),1);
                 m.row(label("assign_shared_rho_domain",r,l),'L',0,std::move(departure));
             }
     }
@@ -142,7 +144,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         f.strengthening_metadata["finite_idle_upper_bound"] = fleet_bound;
         f.strengthening_metadata["rho_upper"] = f.rho_upper;
     }
-    auto a = [&](int r, int l, int b) { return f.layout.assignment + (r * L + l) * L + b; };
+    auto a = [&](int r, int l, int b) { return f.layout.assignment_index(r,l,b); };
     auto z = [&](int i, int s) { return f.layout.capacity + i * d.n_levels + s; };
     auto y = [&](int i, int j) { return f.layout.airline + i * N + j; };
     if (fixed) {
@@ -205,9 +207,9 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     for (int l = 0; l < L; ++l) f.idle.push_back(m.variable(label("idle",l),0,fleet_bound));
     f.fleet = m.variable("fleet",0,fleet_bound,d.fleet_cost);
     for (int j = 0; j < S; ++j) f.head.push_back(m.variable(label("head",j),0,d.demand[paths.initial_segments[j].first_od]));
-    std::vector<int> v(R*L*L);
-    for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b)
-        v[(r*L+l)*L+b] = m.variable(label("v",r,l,b),0,1);
+    std::vector<int> v(d.assignment_count());
+    for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+        v[d.assignment_offset(r,l,b)] = m.variable(label("v",r,l,d.origin_assignment() ? -1 : b),0,1);
     for (int r = 0; r < R; ++r) f.courier.push_back(m.variable(label("courier",r),0,d.demand[r],d.ground_cost[r]));
     f.flow.assign(paths.service_paths.size(),-1);
     f.empty_flow.assign(paths.empty_paths.size(),-1);
@@ -251,16 +253,16 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         }
         m.cones.push_back({up,down,one,1});
     }
-    for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b) {
-        const int vr=v[(r*L+l)*L+b], ar=a(r,l,b);
+    for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
+        const int vr=v[d.assignment_offset(r,l,b)], ar=a(r,l,b);
         m.row(label("v_rho",r,l,b),'L',0,{{vr,1},{f.rho[l],-1}});
         m.row(label("v_assignment",r,l,b),'L',0,{{vr,1},{ar,-1}});
         m.row(label("v_lower",r,l,b),'G',-1,{{vr,1},{f.rho[l],-1},{ar,-1}});
     }
     if (strengthening.shared_rho_joint) for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) {
         Coefficients executed{{f.rho[l],-1}}, unexecuted{{f.rho[l],1},{l,-1}};
-        for (int b = 0; b < L; ++b) {
-            const int vr=v[(r*L+l)*L+b];
+        for (int b = 0; b < d.assignment_destinations(); ++b) {
+            const int vr=v[d.assignment_offset(r,l,b)];
             executed.emplace_back(vr,1);
             unexecuted.emplace_back(a(r,l,b),1);
             unexecuted.emplace_back(vr,-1);
@@ -315,9 +317,16 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
             for (int j:indices) f.double_rows[j*R+r]=row;
         }
     }
-    for (int l=0;l<L;++l) for (int b=0;b<L;++b) for (int r=0;r<R;++r) {
-        Coefficients row{{v[(r*L+l)*L+b],-d.demand[r]}};
-        for (int g:by_pair[l*L+b]) {
+    for (int l=0;l<L;++l) for (int b=0;b<d.assignment_destinations();++b) for (int r=0;r<R;++r) {
+        Coefficients row{{v[d.assignment_offset(r,l,b)],-d.demand[r]}};
+        // K=1 assigns only the departure base; physical return bases remain
+        // in the route catalogue and the closed-network balance equations.
+        std::vector<int> order_groups;
+        if (d.origin_assignment()) {
+            for (int m=0;m<L;++m)
+                order_groups.insert(order_groups.end(),by_pair[l*L+m].begin(),by_pair[l*L+m].end());
+        } else order_groups=by_pair[l*L+b];
+        for (int g:order_groups) {
             const int first=paths.initial_segments[f.lift_groups[g][0]].first_od;
             if (conditional_demand) {
                 const double coefficient = (first == r ? 1.0 : 0.0) +
@@ -328,7 +337,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
                 if (active) row.emplace_back(u[g*R+r],d.demand[r]*d.kappa(first,r));
             }
         }
-        m.row(label("orders",r,l,b),'E',0,std::move(row));
+        m.row(label("orders",r,l,d.origin_assignment() ? -1 : b),'E',0,std::move(row));
     }
     for (int r=0;r<R;++r) f.order_rows.push_back(m.row(label("demand",r),'E',d.demand[r],{{f.courier[r],1}}));
     for (int l=0;l<L;++l) f.balance_rows.push_back(m.row(label("balance",l),'E',0));

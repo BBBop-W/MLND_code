@@ -1,6 +1,8 @@
 """Public solve interface for the sole consecutive model."""
 
 from __future__ import annotations
+
+from src.model.assignment import assignment_scope
 import math
 import time
 from src.model.types import PlanningData, MODEL_VERSION
@@ -124,6 +126,7 @@ def solve(
         budget=time_limit,
         max_orders=data.max_orders,
         flow_policy=data.flow_policy,
+        assignment_scope=assignment_scope(data),
         effective_delta=data.effective_delta,
         enumeration_seconds=enumeration_seconds,
         enumeration_only_seconds=enumeration_only_seconds,

@@ -4,8 +4,8 @@
 
 namespace mlnd {
 
-// Input-only lower resource/cost allocations. Pair-indexed vectors use
-// (order * n_l + departure) * n_l + return, like DesignLayout::assignment.
+// Input-only lower resource/cost allocations. Assignment-indexed vectors use
+// Input::assignment_offset: (order, departure) for K=1 and base-pair for K=2.
 // No generated column is used to compute an extremum.
 struct AnalyticalMasterBounds {
     std::vector<double> unit_cost, unit_saving, slot_time;
@@ -42,7 +42,7 @@ struct CapacitySavingsNetwork {
     int nodes = 0, source = 0, sink = 0;
     double courier_cost = 0, numerical_margin = 0;
     std::vector<CapacitySavingsArc> arcs;
-    // Indexed by (order * L * L + departure * L + return) * H + delivery.
+    // Indexed by Input::assignment_offset(order, departure, return) * H + delivery.
     std::vector<double> unit_saving, slot_time, unit_cost;
     std::vector<bool> eligible;
     Json metadata;

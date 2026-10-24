@@ -27,6 +27,11 @@ def load_native_result(directory):
     directory = Path(directory)
     result = json.loads((directory / "result.json").read_text())
     solution = json.loads((directory / "solution.json").read_text())
+    scope = solution.pop("assignment_scope", None)
+    if scope is not None:
+        if result.get("assignment_scope", scope) != scope:
+            raise ValueError("Native result and solution assignment_scope disagree")
+        result["assignment_scope"] = scope
     records = json.loads((directory / "path_flows.json").read_text())
     if set(records) != {"segments", "missions", "relocations"}:
         raise ValueError(
@@ -98,6 +103,7 @@ def validate_native(directory, instance, *, max_orders=None):
     report = {
         "passed": operations["summary"]["checks"]["passed"],
         "max_orders": k,
+        "assignment_scope": operations["summary"]["assignment_scope"],
         "instance": str(instance.resolve()),
         "manifest_sha256": manifest_sha,
         "native_manifest_matches": True,
@@ -125,9 +131,19 @@ def load_solution_file(path):
     if path.suffix == ".npz":
         with np.load(path, allow_pickle=False) as source:
             return {key: source[key].copy() for key in source.files}
-    value = json.loads(path.read_text())
-    value = value.get("_solution", value)
-    return {key: np.asarray(item, dtype=float) for key, item in value.items()}
+    payload = json.loads(path.read_text())
+    value = payload.get("_solution", payload)
+    scope = value.get("assignment_scope", payload.get("assignment_scope"))
+    if "assignment_scope" in payload and payload["assignment_scope"] != scope:
+        raise ValueError("Solution wrapper and decision assignment_scope disagree")
+    result = {
+        key: np.asarray(item, dtype=float)
+        for key, item in value.items()
+        if key != "assignment_scope"
+    }
+    if scope is not None:
+        result["assignment_scope"] = scope
+    return result
 
 
 def save_json_result(directory, result):
@@ -219,9 +235,11 @@ def align_native_arc_bounds(built, *, check=None, tight_airline_bounds=False):
         "rows_checked": int(data.n_nodes**2),
         "changed_airline_coefficients": changed,
         "tight_airline_bounds": bool(tight_airline_bounds),
-        "formula": ("D for base-locker and locker-locker; (L-1)*D for base-base; 0 for forbidden/self arcs"
-                    if tight_airline_bounds else
-                    "D for base-locker; K*D for locker-locker; (L-1)*D for base-base; 0 for forbidden/self arcs"),
+        "formula": (
+            "D for base-locker and locker-locker; (L-1)*D for base-base; 0 for forbidden/self arcs"
+            if tight_airline_bounds
+            else "D for base-locker; K*D for locker-locker; (L-1)*D for base-base; 0 for forbidden/self arcs"
+        ),
     }
 
 
@@ -459,6 +477,7 @@ def gurobi_reference(
         BuildStopped,
         build_model,
         read_solution,
+        validate_design_arrays,
     )
 
     timings = {}
@@ -573,7 +592,7 @@ def gurobi_reference(
                     else {
                         key: value
                         for key, value in load_solution_file(fixed_design).items()
-                        if key in DESIGN_NAMES
+                        if key in (*DESIGN_NAMES, "assignment_scope")
                     }
                 )
                 initial = None if start is None else load_solution_file(start)
@@ -589,11 +608,14 @@ def gurobi_reference(
                     max_lifted_variables=max_model_variables,
                 )
                 formulation_alignment = align_native_arc_bounds(
-                    built, check=monitor.check, tight_airline_bounds=tight_airline_bounds
+                    built,
+                    check=monitor.check,
+                    tight_airline_bounds=tight_airline_bounds,
                 )
                 built.model.Params.OutputFlag = int(bool(log))
                 built.model.Params.LogFile = str((output / "solver.log").resolve())
                 if initial is not None and fixed is None:
+                    initial = validate_design_arrays(data, initial, source="warm_start")
                     for name in DESIGN_NAMES:
                         for key, variable in built.variables[name].items():
                             variable.Start = float(initial[name][key])

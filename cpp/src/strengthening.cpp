@@ -40,9 +40,9 @@ AnalyticalMasterBounds analytical_master_bounds(const Input& d) {
         throw std::invalid_argument("Invalid master-bound fleet cost or task cardinality");
     const int L = d.n_l, H = d.n_h, R = d.n_od;
     AnalyticalMasterBounds result;
-    result.unit_cost.resize(R * L * L);
-    result.unit_saving.resize(R * L * L);
-    result.pair_possible.resize(R * L * L);
+    result.unit_cost.resize(d.assignment_count());
+    result.unit_saving.resize(d.assignment_count());
+    result.pair_possible.resize(d.assignment_count());
     result.slot_time.resize(R);
     result.courier_cost = std::inner_product(d.demand.begin(), d.demand.end(), d.ground_cost.begin(), 0.0);
     std::vector<double> outbound(L, infinity), inbound(L, infinity);
@@ -50,6 +50,9 @@ AnalyticalMasterBounds analytical_master_bounds(const Input& d) {
         if (d.allowed_links(l, L + i)) outbound[l] = std::min(outbound[l], d.flight_times(l, L + i));
         if (d.allowed_links(L + i, l)) inbound[l] = std::min(inbound[l], d.flight_times(L + i, l));
     }
+    // An origin-only assignment can return to any base. A lower cost bound
+    // therefore minimizes the return access cost over all physical bases.
+    if (d.origin_assignment()) inbound[0] = *std::min_element(inbound.begin(),inbound.end());
     const double flight_and_busy_cost = d.flight_cost + d.fleet_cost;
     for (int r = 0; r < R; ++r) {
         double loaded_cost = infinity, slot_time = infinity;
@@ -65,8 +68,8 @@ AnalyticalMasterBounds analytical_master_bounds(const Input& d) {
         }
         result.slot_time[r] = std::isfinite(slot_time) ? lower_nonnegative(slot_time) : 0;
         double best_saving = 0;
-        for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b) {
-            const int index = (r * L + l) * L + b;
+        for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
+            const int index = d.assignment_offset(r,l,b);
             const bool possible = std::isfinite(loaded_cost) && std::isfinite(outbound[l]) && std::isfinite(inbound[b]);
             result.pair_possible[index] = possible;
             if (!possible) continue; // Absence of a required arc proves zero service.
@@ -96,14 +99,13 @@ Json add_master_strengthening(const Input& d, const PathCollection& paths, Formu
     if (theta < master.layout.count || theta >= static_cast<int>(m.variables.size()))
         throw std::invalid_argument("Master strengthening needs an operating-cost variable after the design");
     const auto bounds = analytical_master_bounds(d);
-    const int L = d.n_l;
     const std::size_t old_variables = m.variables.size(), old_rows = m.rows.size();
     const double margin = 1e-8 * (1 + bounds.courier_cost);
     Coefficients assignments{{theta, 1}};
     for (std::size_t j = 0; j < bounds.unit_saving.size(); ++j)
         if (bounds.unit_saving[j] > 0)
             assignments.emplace_back(master.layout.assignment + j,
-                                     d.demand[j / (L * L)] * bounds.unit_saving[j]);
+                                     d.demand[j / d.assignment_pool_count()] * bounds.unit_saving[j]);
     m.row("analytical_courier_savings_bound", 'G', bounds.courier_cost - margin, std::move(assignments));
 
     // For every task p, saving(p)<=sum_r n_rp*alpha_rb and
@@ -134,7 +136,7 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
     // Use the same domain checks as the analytical bounds. No generated path
     // or design-dependent reachability is used to exclude an occurrence.
     analytical_master_bounds(d);
-    const int L = d.n_l, H = d.n_h, G = d.n_od * L * L;
+    const int L = d.n_l, H = d.n_h, G = d.assignment_count();
     const DesignLayout layout(d);
     CapacitySavingsNetwork out;
     out.source = 0; out.sink = 1 + G + H; out.nodes = out.sink + 1;
@@ -148,8 +150,9 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
         if (d.allowed_links(l, L+i)) outbound[l] = std::min(outbound[l], d.flight_times(l, L+i));
         if (d.allowed_links(L+i, l)) inbound[l] = std::min(inbound[l], d.flight_times(L+i, l));
     }
-    for (int r = 0; r < d.n_od; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b) {
-        const int g = (r * L + l) * L + b;
+    if (d.origin_assignment()) inbound[0] = *std::min_element(inbound.begin(),inbound.end());
+    for (int r = 0; r < d.n_od; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
+        const int g = d.assignment_offset(r,l,b);
         if (!std::isfinite(outbound[l]) || !std::isfinite(inbound[b])) continue;
         for (int j = 0; j < H; ++j) {
             const int index = g * H + j;
@@ -179,13 +182,13 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
     double total_savings = 0;
     for (int r = 0; r < d.n_od; ++r) {
         double best = 0;
-        for (int l = 0; l < L; ++l) for (int b = 0; b < L; ++b)
-            best = std::max(best,alpha[(r*L+l)*L+b]);
+        for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+            best = std::max(best,alpha[d.assignment_offset(r,l,b)]);
         total_savings += d.demand[r]*best;
     }
     total_savings = upper_nonnegative(total_savings);
     for (int g = 0; g < G; ++g) {
-        const int r = g / (L*L), assignment = layout.assignment+g;
+        const int r = g / d.assignment_pool_count(), assignment = layout.assignment+g;
         if (alpha[g] > 0) out.arcs.push_back({out.source,1+g,0,{{assignment,upper_nonnegative(d.demand[r]*alpha[g])}}});
         for (int j = 0; j < H; ++j) if (out.unit_saving[g*H+j] > 0)
             out.arcs.push_back({1+g,1+G+j,0,{{assignment,upper_nonnegative(d.demand[r]*out.unit_saving[g*H+j])}}});
@@ -285,7 +288,7 @@ ResourceSavingsModel resource_savings_model(const Input& d,const CapacitySavings
                                            bool airline_bounds,bool tight_airline_bounds,
                                            bool od_airline_bounds) {
     const DesignLayout layout(d);
-    const int L=d.n_l, G=d.n_od*L*L, H=d.n_h, N=d.n_nodes();
+    const int L=d.n_l, G=d.assignment_count(), H=d.n_h, N=d.n_nodes();
     if (allocations.eligible.size()!=static_cast<std::size_t>(G*H) ||
         allocations.unit_saving.size()!=static_cast<std::size_t>(G*H) ||
         allocations.slot_time.size()!=static_cast<std::size_t>(G*H))
@@ -298,17 +301,20 @@ ResourceSavingsModel resource_savings_model(const Input& d,const CapacitySavings
     const int od_delivery=od_return+d.n_od*L;
     out.group_rhs.resize(G); out.locker_rhs.resize(H);
     for (int g=0;g<G;++g) {
-        out.group_rhs[g].emplace_back(layout.assignment+g,d.demand[g/(d.n_l*d.n_l)]);
+        out.group_rhs[g].emplace_back(layout.assignment+g,d.demand[g/d.assignment_pool_count()]);
         for (int j=0;j<H;++j) {
             const int k=g*H+j;
             if (allocations.eligible[k] && allocations.unit_saving[k]>0) {
                 ResourceSavingsOccurrence occurrence{g,j,allocations.unit_saving[k],allocations.slot_time[k],{}};
-                if (airline_bounds)
-                    occurrence.airline_resources={j,H+(g/L)%L,H+L+g%L};
+                const int r=g/d.assignment_pool_count(),l=(g/d.assignment_destinations())%L,b=g%L;
+                if (airline_bounds) {
+                    occurrence.airline_resources={j,H+l};
+                    if (!d.origin_assignment()) occurrence.airline_resources.push_back(H+L+b);
+                }
                 if (od_airline_bounds) {
-                    const int r=g/(L*L),l=(g/L)%L,b=g%L;
-                    occurrence.airline_resources.insert(occurrence.airline_resources.end(),
-                        {od_departure+r*L+l,od_return+r*L+b,od_delivery+r*H+j});
+                    occurrence.airline_resources.push_back(od_departure+r*L+l);
+                    if (!d.origin_assignment()) occurrence.airline_resources.push_back(od_return+r*L+b);
+                    occurrence.airline_resources.push_back(od_delivery+r*H+j);
                 }
                 out.occurrences.push_back(std::move(occurrence));
             }
@@ -364,6 +370,7 @@ ResourceSavingsModel resource_savings_model(const Input& d,const CapacitySavings
     }
     out.metadata={{"enabled",true},{"source","input_only_weighted_occurrence_lp_dual"},
         {"requires_path_catalogue",false},{"master_added_variables",0},
+        {"assignment_scope",d.assignment_scope()},{"return_gate_applied",!d.origin_assignment()},
         {"groups",G},{"lockers",H},{"occurrences",out.occurrences.size()},
         {"airline_bounds",airline_bounds},{"tight_airline_bounds",tight_airline_bounds},{"airline_resource_rows",out.airline_rhs.size()},
         {"aggregate_airline_resource_rows",aggregate_rows},

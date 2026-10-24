@@ -56,7 +56,7 @@ std::vector<double> design(const mlnd::Input& d,
     std::fill(result.begin(), result.begin() + d.n_nodes(), 1);
     for (int i = 0; i < d.n_h; ++i) result[layout.capacity + i] = 1;
     for (int r = 0; r < d.n_od; ++r)
-        result[layout.assignment + r * d.n_l * d.n_l] = (assignment >> r) & 1;
+        result[layout.assignment_index(r,0,0)] = (assignment >> r) & 1;
     for (std::size_t k = 0; k < arcs.size(); ++k)
         result[layout.airline + arcs[k].first * d.n_nodes() + arcs[k].second] = (mask >> k) & 1;
     return result;

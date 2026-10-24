@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 import math
 import numpy as np
+
+from src.model.assignment import saved_assignment_scope
 from scipy.stats import poisson
 
 from src.data.instances import to_planning_data
@@ -253,11 +255,13 @@ def build_operations(inputs, result, *, tolerance=5e-5):
     sol = result.get("_solution")
     if sol is None:
         raise ValueError("No saved incumbent to validate")
+    saved_scope = saved_assignment_scope(data, result)
+    origin_assignment = saved_scope == "origin"
     bases, h, n, r = data.n_l, data.n_h, data.n_nodes, data.n_od
     shapes = dict(
         facility=(n,),
         capacity_level=data.slot_counts.shape,
-        assignment=(r, bases, bases),
+        assignment=(r, bases) if origin_assignment else (r, bases, bases),
         airline=(n, n),
         rho=(bases,),
         idle=(bases,),
@@ -285,9 +289,12 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         check(key + "_binary", np.abs(values[key] - np.rint(values[key])))
         check(key + "_upper", values[key] - 1)
     check("capacity_install", np.abs(z.sum(axis=1) - x[bases:]))
-    check("single_assignment", a.sum(axis=(1, 2)) - 1)
-    check("assignment_departure", a - x[:bases][None, :, None])
-    check("assignment_return", a - x[:bases][None, None, :])
+    check("single_assignment", a.sum(axis=tuple(range(1, a.ndim))) - 1)
+    if origin_assignment:
+        check("assignment_departure", a - x[:bases][None, :])
+    else:
+        check("assignment_departure", a - x[:bases][None, :, None])
+        check("assignment_return", a - x[:bases][None, None, :])
     check("link_departure", y - x[:, None])
     check("link_return", y - x[None, :])
     check("forbidden_links", y * (~data.allowed_links))
@@ -449,7 +456,8 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         od = int(s["first_od"])
         hv = heads[sid]
         ev = etas[sid]
-        lam = float(data.demand @ a[:, b[0], b[1]])
+        assigned = a[:, b[0]] if origin_assignment else a[:, b[0], b[1]]
+        lam = float(data.demand @ assigned)
         qb = -math.expm1(-lam * data.effective_delta)
         checks_eta.extend(
             [
@@ -459,7 +467,7 @@ def build_operations(inputs, result, *, tolerance=5e-5):
             ]
         )
         checks_hbound.append(hv - data.demand[od])
-        targets = data.kappa[od] * data.demand * a[:, b[0], b[1]] * ev
+        targets = data.kappa[od] * data.demand * assigned * ev
         checks_starts.append(
             abs(branch[sid, None] + sum(branch[sid, j] for j in range(r)) - hv)
         )
@@ -468,8 +476,8 @@ def build_operations(inputs, result, *, tolerance=5e-5):
             checks_double.extend(abs(branch[sid, j] - targets[j]) for j in range(r))
     pool_rows = []
     for bl in range(bases):
-        for bm in range(bases):
-            aa = a[:, bl, bm]
+        for bm in (None,) if origin_assignment else range(bases):
+            aa = a[:, bl] if origin_assignment else a[:, bl, bm]
             hh = data.demand * aa
             lam = float(hh.sum())
             qb = -math.expm1(-lam * data.effective_delta)
@@ -484,7 +492,7 @@ def build_operations(inputs, result, *, tolerance=5e-5):
             actual_single = np.zeros(r)
             actual_double = np.zeros((r, r))
             for s in segments:
-                if tuple(s["b"]) == (bl, bm):
+                if s["b"][0] == bl and (origin_assignment or s["b"][1] == bm):
                     sid = int(s["id"])
                     od = int(s["first_od"])
                     actual_head[od] += heads[sid]
@@ -518,7 +526,11 @@ def build_operations(inputs, result, *, tolerance=5e-5):
     check(scope + "double_branches", checks_double)
     check("first_leg_order_balance", checks_head)
     check("task_reconstruction", checks_order)
-    expected = data.demand * np.sum(a * rho[None, :, None], axis=(1, 2))
+    expected = data.demand * (
+        np.sum(a * rho[None, :], axis=1)
+        if origin_assignment
+        else np.sum(a * rho[None, :, None], axis=(1, 2))
+    )
     check("served_order_identity", np.abs(served - expected))
     check("served_demand", served - data.demand)
     direct = data.demand - served
@@ -625,6 +637,7 @@ def build_operations(inputs, result, *, tolerance=5e-5):
     summary = dict(
         model_version="consecutive",
         flow_policy=data.flow_policy,
+        assignment_scope=saved_scope,
         objective=objective,
         demand=float(data.demand.sum()),
         served=float(served.sum()),

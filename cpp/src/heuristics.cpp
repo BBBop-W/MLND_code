@@ -44,7 +44,7 @@ std::vector<double> lifted_point(const Input& d, const PathCollection& paths,
     copy("courier", f.courier); copy("flow", f.flow); copy("empty_flow", f.empty_flow);
     x.at(f.fleet) = s.at("fleet");
     auto assignment = [&](int r, int l, int b) {
-        return design.at(f.layout.assignment + (r * d.n_l + l) * d.n_l + b);
+        return design.at(f.layout.assignment_index(r,l,b));
     };
     for (int l = 0; l < d.n_l; ++l) {
         const double indicator = f.strengthening.queue_perspective ? design[f.layout.facility+l] : 1;
@@ -53,8 +53,8 @@ std::vector<double> lifted_point(const Input& d, const PathCollection& paths,
         put(name("cone_one", l), indicator);
     }
     for (int r = 0; r < d.n_od; ++r)
-        for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.n_l; ++b)
-            put(name("v", r, l, b), assignment(r, l, b) * x[f.rho[l]]);
+        for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+            put(name("v", r, l, d.origin_assignment() ? -1 : b), assignment(r, l, b) * x[f.rho[l]]);
     for (std::size_t g = 0; g < f.lift_groups.size(); ++g) {
         const auto& group = f.lift_groups[g];
         const auto& segment = paths.initial_segments.at(group.front());
@@ -94,7 +94,7 @@ Json physical_residuals(const Input& d, const PathCollection& paths, const Json&
     auto equal = [&](const std::string& label, double a, double b) {
         check(label, std::abs(a - b), 1 + std::abs(a) + std::abs(b));
     };
-    std::vector<double> served(d.n_od), load(d.n_h), balance(d.n_l), by_pair(d.n_od * d.n_l * d.n_l);
+    std::vector<double> served(d.n_od), load(d.n_h), balance(d.n_l), by_pair(d.assignment_count());
     Matrix<double> arcs(d.n_nodes(), d.n_nodes());
     double busy = 0, operating = 0, opening = 0;
     const double total = std::accumulate(d.demand.begin(), d.demand.end(), 0.0);
@@ -147,7 +147,7 @@ Json physical_residuals(const Input& d, const PathCollection& paths, const Json&
         balance[p.b[0]] += flow; balance[p.b[1]] -= flow;
         for (auto [r, count] : physical.served_counts) {
             served[r] += flow * count;
-            by_pair[(r * d.n_l + p.b[0]) * d.n_l + p.b[1]] += flow * count;
+            by_pair[d.assignment_offset(r,p.b[0],p.b[1])] += flow * count;
         }
         for (auto [h, value] : physical.slot_times) load[h] += flow * value;
         for (auto [u, v, count] : physical.arc_counts) arcs(u, v) += flow * count;
@@ -191,9 +191,9 @@ Json physical_residuals(const Input& d, const PathCollection& paths, const Json&
         const double courier = s.at("courier").at(r);
         check("courier_lower", -courier); equal("demand_balance", served[r] + courier, d.demand[r]);
         operating += d.ground_cost[r] * courier;
-        for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.n_l; ++b)
-            equal("served_assignment_rho", by_pair[(r * d.n_l + l) * d.n_l + b],
-                  d.demand[r] * s.at("assignment").at(r).at(l).at(b).get<double>() * s.at("rho").at(l).get<double>());
+        for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+            equal("served_assignment_rho", by_pair[d.assignment_offset(r,l,b)],
+                  d.demand[r] * assignment_value(d,s.at("assignment"),r,l,b) * s.at("rho").at(l).get<double>());
     }
     for (int u = 0; u < d.n_nodes(); ++u) for (int v = 0; v < d.n_nodes(); ++v) {
         const double y = s.at("airline").at(u).at(v);

@@ -275,7 +275,7 @@ int main(int argc,char** argv) {
     try {
         if(argc>2) throw std::invalid_argument("Usage: branch_joint_cuts_probe [OUTPUT_JSON]");
         mlnd::Json out{{"cases",mlnd::Json::array()}};
-        for(int k:{1,2}) for(int l:{1,2}) for(bool sparse:{false,true}) out["cases"].push_back(exhaustive(k,l,sparse));
+        for(int k:{2}) for(int l:{1,2}) for(bool sparse:{false,true}) out["cases"].push_back(exhaustive(k,l,sparse));
         out["boundaries"]=boundaries();out["passed"]=true;out["solver_runs"]=0;
         if(argc==2) {std::ofstream file(argv[1]);if(!file)throw std::runtime_error("Cannot write branch/joint probe JSON");file<<out.dump(2)<<'\n';}
         std::cout<<out.dump(2)<<'\n';return 0;

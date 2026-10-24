@@ -11,6 +11,7 @@
 namespace mlnd {
 namespace {
 void validate(const Input& d) {
+    if (d.origin_assignment()) throw std::invalid_argument("Branch/joint certificates require base-pair assignment (K=2)");
     if(d.route_mode!="direct" || d.has_candidate_routes || d.flow_policy!="aggregate" ||
        d.max_orders<1 || d.max_orders>2)
         throw std::invalid_argument("Branch/joint cuts require direct aggregate K<=2");

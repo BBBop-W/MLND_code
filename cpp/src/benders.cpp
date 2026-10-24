@@ -447,10 +447,10 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
         face_core = *core;
         const DesignLayout layout(d);
         for (int j=layout.assignment;j<layout.airline;++j) face_core[j]=design[j];
-        for (int r=0;r<d.n_od;++r) for (int l=0;l<d.n_l;++l) for (int m=0;m<d.n_l;++m)
-            if (design[layout.assignment+(r*d.n_l+l)*d.n_l+m]==1) {
+        for (int r=0;r<d.n_od;++r) for (int l=0;l<d.n_l;++l) for (int m=0;m<d.assignment_destinations();++m)
+            if (design[layout.assignment_index(r,l,m)]==1) {
                 face_core[layout.facility+l]=1;
-                face_core[layout.facility+m]=1;
+                if (!d.origin_assignment()) face_core[layout.facility+m]=1;
             }
         validate_design(d,face_core,true);
         core = &face_core;
@@ -634,7 +634,8 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
                 for (int j : f.design_vars)
                     result.continuous_design.push_back(std::clamp(solved.values[j], 0.0, 1.0));
                 result.continuous_operating_point={{"rho",Json::array()},{"idle",Json::array()},
-                    {"v",Json::array()},{"v_order","r_then_departure_then_return"},
+                    {"v",Json::array()},{"v_order",d.origin_assignment()?"r_then_departure":"r_then_departure_then_return"},
+                    {"assignment_scope",d.assignment_scope()},
                     {"fleet",solved.values[f.fleet]}};
                 for (int j:f.rho) result.continuous_operating_point["rho"].push_back(solved.values[j]);
                 for (int j:f.idle) result.continuous_operating_point["idle"].push_back(solved.values[j]);
@@ -995,8 +996,9 @@ std::vector<double> initial_core(const Input& d) {
     std::fill(core.begin() + layout.capacity, core.begin() + layout.assignment, 0.5 / d.n_levels);
     for (int r = 0; r < d.n_od; ++r)
         for (int l = 0; l < d.n_l; ++l)
-            for (int m = 0; m < d.n_l; ++m)
-                core[layout.assignment + (r * d.n_l + l) * d.n_l + m] = (l == m ? .5 : .25) / (d.n_l * d.n_l + 1);
+            for (int m = 0; m < d.assignment_destinations(); ++m)
+                core[layout.assignment_index(r,l,m)] = d.origin_assignment() ? .25 / (d.n_l+1) :
+                    (l == m ? .5 : .25) / (d.n_l * d.n_l + 1);
     for (int u = 0; u < d.n_nodes(); ++u)
         for (int v = 0; v < d.n_nodes(); ++v)
             core[layout.airline + u * d.n_nodes() + v] = d.allowed_links(u, v) ? (u == v ? .25 : .125) : 0;
@@ -1006,19 +1008,19 @@ std::vector<double> initial_core(const Input& d) {
 std::vector<double> initial_design(const Input& d, const PathCollection& paths) {
     DesignLayout layout(d);
     std::vector<double> design(layout.count, 0);
-    std::vector<double> reposition(d.n_l * d.n_l, INFINITY), gains(d.n_od * d.n_l * d.n_l, 0);
+    std::vector<double> reposition(d.n_l * d.n_l, INFINITY), gains(d.assignment_count(), 0);
     for (const auto& p : paths.empty_paths)
         reposition[p.b[0] * d.n_l + p.b[1]] = std::min(reposition[p.b[0] * d.n_l + p.b[1]], p.cost + d.fleet_cost * p.time);
     for (const auto& p : paths.service_paths) {
         if (p.mode != "single") continue;
         double cost = p.cost + d.fleet_cost * p.time + (p.b[0] == p.b[1] ? 0 : reposition[p.b[1] * d.n_l + p.b[0]]);
-        int index = (p.first_od * d.n_l + p.b[0]) * d.n_l + p.b[1];
+        int index = d.assignment_offset(p.first_od,p.b[0],p.b[1]);
         gains[index] = std::max(gains[index], d.ground_cost[p.first_od] - cost);
     }
     std::vector<int> order(gains.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int a, int b) {
-        int ar = a / (d.n_l * d.n_l), br = b / (d.n_l * d.n_l);
+        int ar = a / d.assignment_pool_count(), br = b / d.assignment_pool_count();
         double sa = gains[a] * d.demand[ar], sb = gains[b] * d.demand[br];
         return std::make_tuple(-sa, -d.demand[ar], a) < std::make_tuple(-sb, -d.demand[br], b);
     });
@@ -1036,7 +1038,7 @@ std::vector<double> initial_design(const Input& d, const PathCollection& paths) 
     }
     for (const auto& s:paths.initial_segments)
         prefixes[{s.b[0],s.b[1],s.first_od}].push_back(s.id);
-    std::vector<std::vector<int>> pools(d.n_l*d.n_l);
+    std::vector<std::vector<int>> pools(d.assignment_pool_count());
     auto supported = [&](int l,int b,int first,const std::vector<int>& pool) {
         if (d.effective_delta()<=0) return true;
         if (d.flow_policy=="aggregate") {
@@ -1055,9 +1057,10 @@ std::vector<double> initial_design(const Input& d, const PathCollection& paths) 
         return false;
     };
     for (int index : order) {
-        int r = index / (d.n_l * d.n_l);
+        int r = index / d.assignment_pool_count();
         if (assigned[r] || gains[index] <= 0 || d.demand[r] <= 0) continue;
-        const int pair=index%(d.n_l*d.n_l),l=pair/d.n_l,b=pair%d.n_l;
+        const int pair=index%d.assignment_pool_count(),l=pair/d.assignment_destinations(),
+            b=d.origin_assignment() ? 0 : pair%d.n_l;
         auto trial=pools[pair]; trial.push_back(r);
         bool compatible=true;
         for (int first:trial) if (!supported(l,b,first,trial)) { compatible=false; break; }
@@ -1124,9 +1127,9 @@ Json cleanup_incumbent(const Input& d, const PathCollection& paths, const Json& 
     }
     for (int l = 0; l < d.n_l; ++l) {
         bool assigned = false;
-        for (int r = 0; r < d.n_od; ++r) for (int m = 0; m < d.n_l; ++m)
-            assigned = assigned || sol["assignment"][r][l][m].get<double>() != 0
-                                || sol["assignment"][r][m][l].get<double>() != 0;
+        for (int r = 0; r < d.n_od; ++r) for (int m = 0; m < d.assignment_destinations(); ++m)
+            assigned = assigned || assignment_value(d,sol["assignment"],r,l,m) != 0 ||
+                (!d.origin_assignment() && assignment_value(d,sol["assignment"],r,m,l) != 0);
         if (!used_nodes.count(l) && !assigned && sol["rho"][l].get<double>() == 0 && sol["idle"][l].get<double>() == 0)
             sol["facility"][l] = 0.0;
     }
@@ -1164,26 +1167,26 @@ Json cleanup_incumbent(const Input& d, const PathCollection& paths, const Json& 
 std::vector<double> neighbor_design(const Input& d, const PathCollection& paths, const Json& incumbent) {
     const DesignLayout layout(d);
     auto design = solution_design(d, incumbent);
-    std::vector<double> reposition(d.n_l * d.n_l, INFINITY), gains(d.n_od * d.n_l * d.n_l, 0);
+    std::vector<double> reposition(d.n_l * d.n_l, INFINITY), gains(d.assignment_count(), 0);
     for (const auto& p : paths.empty_paths)
         reposition[p.b[0] * d.n_l + p.b[1]] = std::min(reposition[p.b[0] * d.n_l + p.b[1]], p.cost + d.fleet_cost * p.time);
     for (const auto& p : paths.service_paths) {
         if (p.mode != "single") continue;
         double cost = p.cost + d.fleet_cost * p.time + (p.b[0] == p.b[1] ? 0 : reposition[p.b[1] * d.n_l + p.b[0]]);
-        int index = (p.first_od * d.n_l + p.b[0]) * d.n_l + p.b[1];
+        int index = d.assignment_offset(p.first_od,p.b[0],p.b[1]);
         gains[index] = std::max(gains[index], d.ground_cost[p.first_od] - cost);
     }
     std::vector<int> order(gains.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int a, int b) {
-        int ar = a / (d.n_l * d.n_l), br = b / (d.n_l * d.n_l);
+        int ar = a / d.assignment_pool_count(), br = b / d.assignment_pool_count();
         return std::make_tuple(-d.demand[ar], -gains[a], a) < std::make_tuple(-d.demand[br], -gains[b], b);
     });
     for (int index : order) {
-        int r = index / (d.n_l * d.n_l);
+        int r = index / d.assignment_pool_count();
         bool assigned = false;
-        for (int a = 0; a < d.n_l; ++a) for (int b = 0; b < d.n_l; ++b)
-            assigned = assigned || design[layout.assignment + (r * d.n_l + a) * d.n_l + b] != 0;
+        for (int a = 0; a < d.n_l; ++a) for (int b = 0; b < d.assignment_destinations(); ++b)
+            assigned = assigned || design[layout.assignment_index(r,a,b)] != 0;
         if (assigned || gains[index] <= 0 || d.demand[r] <= 0) continue;
         design[layout.assignment + index] = 1;
         std::fill(design.begin() + layout.facility, design.begin() + layout.capacity, 1);
@@ -1242,6 +1245,8 @@ InitialColumns initial_columns(const Input& d, PathCollection& paths,
 Json continuous_cg_result(const Input& d, PathCollection& paths, const SolverOptions& options,
                           const std::vector<double>* fixed_design) {
     if (!paths.support_complete) throw std::invalid_argument("Continuous CG requires complete physical support");
+    if (d.origin_assignment() && (options.assignment_support_cuts || options.double_support_cuts || options.joint_base_cost_cuts))
+        throw std::invalid_argument("K=1 origin assignment does not support base-pair assignment-support, double-support, or joint-base-cost cuts; disable these optional cuts");
     if (!options.column_generation && !paths.complete)
         throw std::invalid_argument("Full continuous recourse requires a complete path catalogue");
     if (!std::isfinite(options.seconds) || options.seconds < 0 || options.cg_max_columns < 1 ||

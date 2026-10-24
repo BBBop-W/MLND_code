@@ -17,6 +17,11 @@ inline FormulationStrengthening formulation_strengthening(const SolverOptions& o
 }
 struct DesignLayout {
     int facility = 0, capacity = 0, assignment = 0, airline = 0, count = 0;
+    int n_l = 0, assignment_destinations = 0;
+    int assignment_index(int r, int l, int m = 0) const {
+        return assignment + (r * n_l + l) * assignment_destinations +
+            (assignment_destinations == 1 ? 0 : m);
+    }
     explicit DesignLayout(const Input&);
 };
 struct Formulation {

@@ -46,7 +46,7 @@ std::vector<double> design(const mlnd::Input& d, int assignment_mask, bool close
     for (int i = 0; i < d.n_nodes(); ++i) result[layout.facility+i] = 1;
     for (int i = 0; i < d.n_h; ++i) result[layout.capacity+i] = 1;
     for (int r = 0; r < d.n_od; ++r)
-        result[layout.assignment+r*d.n_l*d.n_l] = (assignment_mask >> r) & 1;
+        result[layout.assignment_index(r,0,0)] = (assignment_mask >> r) & 1;
     for (int u = 0; u < d.n_nodes(); ++u) for (int v = 0; v < d.n_nodes(); ++v)
         result[layout.airline+u*d.n_nodes()+v] = d.allowed_links(u,v);
     return result;
@@ -88,12 +88,12 @@ std::vector<double> restore(const mlnd::Input& d, const mlnd::PathCollection& pa
         else head = out[old.head[group.front()]];
         double rate = 0;
         for (int r = 0; r < d.n_od; ++r)
-            rate += d.demand[r] * fixed[old.layout.assignment+(r*d.n_l+segment.b[0])*d.n_l+segment.b[1]];
+            rate += d.demand[r] * fixed[old.layout.assignment_index(r,segment.b[0],segment.b[1])];
         const double eta = rate > 0 ? -std::expm1(-d.effective_delta()*rate)/rate*head : 0;
         set("eta_"+suffix,eta);
         double cumulative = 0;
         for (int r = 0; r < d.n_od; ++r) {
-            const double alpha = fixed[old.layout.assignment+(r*d.n_l+segment.b[0])*d.n_l+segment.b[1]];
+            const double alpha = fixed[old.layout.assignment_index(r,segment.b[0],segment.b[1])];
             const double chain = head * std::exp(-d.effective_delta()*cumulative);
             set("u_"+suffix+"_"+std::to_string(r),alpha*eta);
             set("Z_"+suffix+"_"+std::to_string(r),chain);
@@ -161,7 +161,7 @@ mlnd::Json compare(const mlnd::Input& d, mlnd::PathCollection paths,
         const auto b = paths.initial_segments[j].b;
         double rate = 0;
         for (int r = 0; r < d.n_od; ++r)
-            rate += d.demand[r]*fixed[compact.layout.assignment+(r*d.n_l+b[0])*d.n_l+b[1]];
+            rate += d.demand[r]*fixed[compact.layout.assignment_index(r,b[0],b[1])];
         const double factor = rate > 0 ? -std::expm1(-d.effective_delta()*rate)/rate : 0;
         require(compact.segment_eta_factor[j] == factor,name+": stored eta factor is incorrect");
         require(eta[j] == heads[j]*factor,name+": public eta is not per segment");

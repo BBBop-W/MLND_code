@@ -339,8 +339,11 @@ int main(int argc,char** argv) {
         }
         stage="input_read"; stage_started=wall_time();
         data=read_input(input,k); have_input=true;
+        metadata["assignment_scope"]=data.assignment_scope();
+        if (data.origin_assignment() && (options.assignment_support_cuts || options.double_support_cuts || options.joint_base_cost_cuts))
+            throw std::invalid_argument("K=1 origin assignment requires disabling --assignment-support-cuts, --double-support-cuts, and --joint-base-cost-cuts");
         read_seconds=wall_time()-stage_started;
-        Json summary={{"name",data.name},{"max_orders",data.max_orders},{"n_l",data.n_l},
+        Json summary={{"assignment_scope",data.assignment_scope()},{"assignment_variables",data.assignment_count()},{"name",data.name},{"max_orders",data.max_orders},{"n_l",data.n_l},
                       {"n_h",data.n_h},{"n_od",data.n_od},{"input_read_seconds",read_seconds}};
         if(inspect) { std::cout<<summary.dump(2)<<'\n'; return 0; }
         metadata.update({{"max_orders",data.max_orders},{"name",data.name},
@@ -348,7 +351,8 @@ int main(int argc,char** argv) {
             {"flow_policy",data.flow_policy},{"effective_delta",data.effective_delta()},{"path_scope",data.route_mode}});
         options.progress->update_metadata(metadata);
         atomic_json_file(options.output/"input_reference.json",{{"instance_path",data.instance_path.string()},
-            {"manifest",data.manifest},{"model",data.model_json},{"max_orders",data.max_orders}});
+            {"manifest",data.manifest},{"model",data.model_json},{"max_orders",data.max_orders},
+            {"assignment_scope",data.assignment_scope()}});
         options.progress->record({{"event","phase_end"},{"stage",stage},{"seconds",read_seconds},{"instance",summary}});
         // This feasible baseline exists before any path enumeration or model
         // construction. A partial construction must never erase it.

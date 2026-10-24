@@ -46,7 +46,7 @@ std::vector<double> design(const Input& d,int assignment_mask,double airline_fra
     std::vector<double> out(layout.count,0);
     for (int i=0;i<d.n_nodes();++i) out[layout.facility+i]=1;
     for (int j=0;j<d.n_h;++j) out[layout.capacity+j*d.n_levels]=1;
-    for (int r=0;r<d.n_od;++r) out[layout.assignment+r*d.n_l*d.n_l]=(assignment_mask>>r)&1;
+    for (int r=0;r<d.n_od;++r) out[layout.assignment_index(r,0,0)]=(assignment_mask>>r)&1;
     for (int u=0;u<d.n_nodes();++u) for (int v=0;v<d.n_nodes();++v)
         out[layout.airline+u*d.n_nodes()+v]=airline_fraction*d.allowed_links(u,v);
     return out;
@@ -94,12 +94,12 @@ Json certify_mapping(const Input& d,bool require_second_exceptions=false) {
         for (auto [r,count]:p.served_counts) rate=std::min(rate,d.demand[r]/count);
         for (std::size_t k=0;k<p.deliveries.size();++k) {
             const int r=k==0?p.first_od:p.second_od;
-            const int group=(r*d.n_l+p.b[0])*d.n_l+p.b[1];
+            const int group=d.assignment_offset(r,p.b[0],p.b[1]);
             const auto found=occurrences.find(group*d.n_h+p.deliveries[k]);
             require(allocations.eligible[group*d.n_h+p.deliveries[k]],"OD support excluded a physical occurrence");
             if (found==occurrences.end()) continue; // Zero-saving occurrences need no auxiliary variable.
             const auto& occurrence=*found->second;
-            require(occurrence.airline_resources.size()==6,"An occurrence lacks an OD gate");
+            require(occurrence.airline_resources.size()==(d.origin_assignment()?4:6),"An occurrence lacks an OD gate");
             for (int a:occurrence.airline_resources) use[a]+=rate;
             const int delivery_row=old_rows+2*d.n_od*d.n_l+r*d.n_h+p.deliveries[k];
             const int loaded_link=layout.airline+(d.n_l+p.pickups[k])*d.n_nodes()+d.n_l+p.deliveries[k];
@@ -139,7 +139,7 @@ void add_actual_flow_gates(Formulation& f,const Input& d,const PathCollection& p
         std::map<int,int> counts;
         for (std::size_t k=0;k<p.deliveries.size();++k) {
             const int r=k==0?p.first_od:p.second_od;
-            const int g=(r*d.n_l+p.b[0])*d.n_l+p.b[1];
+            const int g=d.assignment_offset(r,p.b[0],p.b[1]);
             const auto found=occurrences.find(g*d.n_h+p.deliveries[k]);
             if (found==occurrences.end()) continue;
             for (int a:found->second->airline_resources) if (a>=first) ++counts[a];

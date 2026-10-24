@@ -49,7 +49,9 @@ def design(d, assignment=(1, 1), level=0, closed_link=None, all_closed=False):
         return result
     result["facility"][:] = 1
     result["capacity_level"][:, level] = 1
-    result["assignment"][:, 0, 0] = assignment
+    result["assignment"][(slice(None),) + (0,) * (result["assignment"].ndim - 1)] = (
+        assignment
+    )
     result["airline"][:] = d.allowed_links
     if closed_link:
         result["airline"][closed_link] = 0

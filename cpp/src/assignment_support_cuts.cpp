@@ -115,6 +115,7 @@ AssignmentSupportCache build_assignment_support_cache(const Input& d,
         const PathCollection& paths, double deadline) {
     const double started = wall_time();
     validate_domain(d);
+    if (d.origin_assignment()) throw std::invalid_argument("Assignment-support certificates require base-pair assignment (K=2)");
     if (std::isnan(deadline)) throw std::invalid_argument("Invalid assignment support deadline");
     AssignmentSupportCache cache;
     cache.n_od = d.n_od; cache.n_l = d.n_l; cache.n_nodes = d.n_nodes();
@@ -176,6 +177,7 @@ AssignmentSupportSeparation separate_assignment_support_cost(const Input& d,
         std::size_t max_cuts, double floor_threshold) {
     const double started = wall_time();
     validate_domain(d);
+    if (d.origin_assignment()) throw std::invalid_argument("Assignment-support certificates require base-pair assignment (K=2)");
     const DesignLayout layout(d);
     const int L = d.n_l, R = d.n_od, N = d.n_nodes();
     if (cache.n_l != L || cache.n_od != R || cache.n_nodes != N ||

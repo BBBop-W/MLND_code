@@ -33,11 +33,14 @@ def _validate_design_space(data, point, *, strict):
     x, z, a, y = (np.asarray(point[name]) for name in shapes(data))
     if not np.allclose(z.sum(axis=1), x[data.n_l :], atol=1e-10, rtol=0):
         raise ValueError("Capacity levels must sum to locker opening")
-    if np.any(a.sum(axis=(1, 2)) > 1 + 1e-10):
+    if np.any(a.sum(axis=tuple(range(1, a.ndim))) > 1 + 1e-10):
         raise ValueError("An OD cannot have more than one assignment")
-    if np.any(a > x[: data.n_l][None, :, None] + 1e-10) or np.any(
-        a > x[: data.n_l][None, None, :] + 1e-10
-    ):
+    activation = (
+        x[: data.n_l][None, :]
+        if a.ndim == 2
+        else np.minimum(x[: data.n_l][None, :, None], x[: data.n_l][None, None, :])
+    )
+    if np.any(a > activation + 1e-10):
         raise ValueError("Assignment exceeds base opening")
     allowed = np.asarray(data.allowed_links, dtype=bool)
     if np.any(np.abs(y[~allowed]) > 1e-10):
@@ -47,11 +50,9 @@ def _validate_design_space(data, point, *, strict):
     if strict:
         if np.any(x <= 0) or np.any(x >= 1) or np.any(z <= 0):
             raise ValueError("The core lies on a facility or capacity boundary")
-        if np.any(a <= 0) or np.any(a.sum(axis=(1, 2)) >= 1):
+        if np.any(a <= 0) or np.any(a.sum(axis=tuple(range(1, a.ndim))) >= 1):
             raise ValueError("The core lies on an assignment boundary")
-        if np.any(a >= x[: data.n_l][None, :, None]) or np.any(
-            a >= x[: data.n_l][None, None, :]
-        ):
+        if np.any(a >= activation):
             raise ValueError("The core lies on an assignment activation boundary")
         if np.any(y[allowed] <= 0) or np.any(
             y[allowed] >= np.minimum(x[:, None], x[None, :])[allowed]
@@ -74,8 +75,9 @@ class CorePoint:
 
     Open each facility independently with probability 1/2; conditionally choose
     a locker level uniformly and each permitted active-endpoint link with
-    probability 1/2. Each OD proposes uniformly one of L^2 base pairs or no
-    assignment, accepting a pair if its endpoints open. This full-support mean
+    probability 1/2. Each OD proposes uniformly one of L origins (K=1), or L^2
+    base pairs (K=2), or no assignment, accepting it if its required bases open.
+    This full-support mean
     belongs to ri(conv(X)). Updates retain positive initial mass indefinitely.
     """
 
@@ -84,9 +86,12 @@ class CorePoint:
         point = {name: np.zeros(shape) for name, shape in shapes(data).items()}
         point["facility"][:] = 0.5
         point["capacity_level"][:] = 0.5 / data.slot_counts.shape[1]
-        endpoint_probability = np.full((data.n_l, data.n_l), 0.25)
-        np.fill_diagonal(endpoint_probability, 0.5)
-        point["assignment"][:] = endpoint_probability / (data.n_l**2 + 1)
+        if data.max_orders == 1:
+            point["assignment"][:] = 0.5 / (data.n_l + 1)
+        else:
+            endpoint_probability = np.full((data.n_l, data.n_l), 0.25)
+            np.fill_diagonal(endpoint_probability, 0.5)
+            point["assignment"][:] = endpoint_probability / (data.n_l**2 + 1)
         link_probability = np.full((data.n_nodes, data.n_nodes), 0.125)
         np.fill_diagonal(link_probability, 0.25)
         point["airline"][:] = link_probability * data.allowed_links

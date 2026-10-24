@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 
 from src.data.instances import to_planning_data, pack_planning_data
+from src.model.assignment import assignment_scope
 from src.operations.export import export_operations
 from src.operations.validation import build_operations
 from .storage import save_inputs, save_solution, write_json, source_hashes
@@ -44,6 +45,7 @@ def run_case(
     manifest = dict(
         model_version="consecutive",
         flow_policy=planning.flow_policy,
+        assignment_scope=assignment_scope(planning),
         started_utc=utc_now(),
         status="running",
         input_hashes=save_inputs(data, output),
@@ -126,6 +128,7 @@ def run_case(
         summary = dict(
             model_version="consecutive",
             flow_policy=planning.flow_policy,
+            assignment_scope=assignment_scope(planning),
             accelerations=resolved_accelerations,
             passed=s["checks"]["passed"],
             objective=result["objective"],

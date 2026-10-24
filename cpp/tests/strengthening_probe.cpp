@@ -218,9 +218,11 @@ int main(int argc, char** argv) {
             std::all_of(legacy_resource_model.occurrences.begin(),legacy_resource_model.occurrences.end(),
                 [](const auto& o){return o.airline_resources.empty();}),
             "Airline relaxation switch does not preserve the locker-only model");
-        for (const auto& o:resource_model.occurrences)
-            require(o.airline_resources==std::vector<int>{o.locker,d.n_h+(o.group/d.n_l)%d.n_l,
-                d.n_h+d.n_l+o.group%d.n_l},"Occurrence is attached to the wrong airline gates");
+        for (const auto& o:resource_model.occurrences) {
+            std::vector<int> expected{o.locker,d.n_h+(o.group/d.assignment_destinations())%d.n_l};
+            if (!d.origin_assignment()) expected.push_back(d.n_h+d.n_l+o.group%d.n_l);
+            require(o.airline_resources==expected,"Occurrence is attached to the wrong airline gates");
+        }
         const auto paths = mlnd::enumerate_paths(d); // Validation oracle only.
         double max_cost_violation = -INFINITY, max_slot_violation = -INFINITY, max_ratio_violation = -INFINITY;
         double max_delivery_cost_violation=-INFINITY,max_delivery_slot_violation=-INFINITY;
@@ -228,7 +230,7 @@ int main(int argc, char** argv) {
         for (const auto& p : paths.service_paths) {
             double allocated = 0, minimum_slots = 0, courier = 0, actual_slots = 0;
             for (auto [r, count] : p.served_counts) {
-                const int index = (r * d.n_l + p.b[0]) * d.n_l + p.b[1];
+                const int index = d.assignment_offset(r,p.b[0],p.b[1]);
                 require(bounds.pair_possible[index], "A real task was incorrectly marked impossible");
                 allocated += count * bounds.unit_cost[index];
                 minimum_slots += count * bounds.slot_time[r];
@@ -245,7 +247,7 @@ int main(int argc, char** argv) {
             for (auto [j,load] : p.slot_times) actual_load[j]=load;
             for (std::size_t k=0;k<p.deliveries.size();++k) {
                 const int r=k==0?p.first_od:p.second_od,j=p.deliveries[k];
-                const int index=((r*d.n_l+p.b[0])*d.n_l+p.b[1])*d.n_h+j;
+                const int index=d.assignment_offset(r,p.b[0],p.b[1])*d.n_h+j;
                 require(network.eligible[index],"Capacity network excluded a real order occurrence");
                 delivery_allocated+=network.unit_cost[index];
                 delivery_load[j]+=network.slot_time[index];

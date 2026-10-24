@@ -60,8 +60,8 @@ std::vector<double> design(const Input& d,int choice0,int choice1,bool closed=fa
     if(closed) return x;
     std::fill(x.begin(),x.begin()+d.n_nodes(),1);
     for(int h=0;h<d.n_h;++h) x[l.capacity+h*d.n_levels]=1;
-    if(choice0>=0) x[l.assignment+choice0]=1;
-    if(choice1>=0) x[l.assignment+4+choice1]=1;
+    if(choice0>=0) x[l.assignment_index(0,choice0/d.n_l,choice0%d.n_l)]=1;
+    if(choice1>=0) x[l.assignment_index(1,choice1/d.n_l,choice1%d.n_l)]=1;
     for(int u=0;u<d.n_nodes();++u) for(int v=0;v<d.n_nodes();++v)
         x[l.airline+u*d.n_nodes()+v]=d.allowed_links(u,v);
     return x;

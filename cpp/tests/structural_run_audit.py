@@ -223,12 +223,17 @@ def production_curve(audit, directory, label, result):
 
 def design_for_cross_check(audit, solution, size, result, label):
     """Mirror only the documented DesignLayout ordering, not model logic."""
-    l, h, r = size["bases"], size["lockers"], size["orders"]
-    n = l + h
+    num_bases, num_lockers, num_orders = size["bases"], size["lockers"], size["orders"]
+    n = num_bases + num_lockers
     levels = solution.get("capacity_level", [])
     q = len(levels[0]) if levels and isinstance(levels[0], list) else 0
-    shapes = (("facility", (n,)), ("capacity_level", (h, q)),
-              ("assignment", (r, l, l)), ("airline", (n, n)))
+    scope = result.get("assignment_scope", solution.get("assignment_scope", "base_pair"))
+    origin = scope == "origin"
+    if not audit.check(scope in ("origin", "base_pair"), label + ": recognized assignment scope"):
+        return None
+    assignments = num_orders * num_bases if origin else num_orders * num_bases * num_bases
+    shapes = (("facility", (n,)), ("capacity_level", (num_lockers, q)),
+              ("assignment", (num_orders, num_bases) if origin else (num_orders, num_bases, num_bases)), ("airline", (n, n)))
 
     def flatten(value, shape):
         if not shape:
@@ -246,10 +251,10 @@ def design_for_cross_check(audit, solution, size, result, label):
         if not audit.check(part is not None and q > 0, label + ": exact binary layout " + name):
             return None
         design.extend(part)
-    expected_size = n + h * q + r * l * l + n * n
+    expected_size = n + num_lockers * q + assignments + n * n
     audit.check(len(design) == expected_size == result.get("master_structure", {}).get("design_binaries"),
                 label + ": design dimension matches master layout")
-    return design, n + h * q, n + h * q + r * l * l
+    return design, n + num_lockers * q, n + num_lockers * q + assignments
 
 
 def cross_check_benders_cuts(audit, candidates):
@@ -320,7 +325,7 @@ def cross_check_benders_cuts(audit, candidates):
                 maximum_signed_violation=maximum_signed,
                 maximum_positive_violation=max(0.0, maximum_signed) if maximum_signed is not None else None,
                 maximum_excess_over_tolerance=maximum_excess, worst_check=worst, pairs=pairs,
-                design_order=["facility", "capacity_level[h][level]", "assignment[r][l][b]", "airline[i][j]"],
+                design_order=["facility", "capacity_level[h][level]", "assignment[r][l] (origin) or assignment[r][l][b] (base_pair)", "airline[i][j]"],
                 comparator="validated feasible solution continuous_cost; not the unknown recourse optimum",
                 scope="necessary checks at this batch's validated final integer solutions; not a proof over all designs",
                 conditional_handling="stored globally gated affine coefficients evaluated unchanged on every matching-K/input solution",
@@ -429,7 +434,7 @@ def audit_production(audit, batch, roots):
             layout = design_for_cross_check(audit, read(directory / "solution.json"), size, result, label)
             if layout is not None:
                 design, start, end = layout
-                candidates.append(dict(id=label, group=(validation["manifest_sha256"], job["K"]),
+                candidates.append(dict(id=label, group=(validation["manifest_sha256"], job["K"], result.get("assignment_scope", "base_pair")),
                                        design=design, assignment_start=start, assignment_end=end,
                                        operating_cost=operating, result=result))
         rows.append(dict(id=label, status=progress.get("status"), audited=True, lower_bound=lo, upper_bound=up,

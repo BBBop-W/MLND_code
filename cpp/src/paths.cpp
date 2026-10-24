@@ -276,7 +276,7 @@ BranchSeedReport branch_covering_seed_paths(const Input& d, PathCollection& path
         const std::vector<double>* assignment_mask, double deadline) {
     if (!paths.support_complete) throw std::invalid_argument("Branch seed needs complete row support");
     if (assignment_mask) {
-        if (assignment_mask->size()!=static_cast<std::size_t>(d.n_od*d.n_l*d.n_l))
+        if (assignment_mask->size()!=static_cast<std::size_t>(d.assignment_count()))
             throw std::invalid_argument("Branch seed assignment mask has wrong size");
         for (double value:*assignment_mask)
             if (value!=0 && value!=1) throw std::invalid_argument("Branch seed assignment mask must be binary");
@@ -290,7 +290,7 @@ BranchSeedReport branch_covering_seed_paths(const Input& d, PathCollection& path
         return report.stopped;
     };
     auto assigned=[&](int r, BasePair b) {
-        return d.demand[r]>0 && (!assignment_mask || (*assignment_mask)[(r*d.n_l+b[0])*d.n_l+b[1]]!=0);
+        return d.demand[r]>0 && (!assignment_mask || (*assignment_mask)[d.assignment_offset(r,b[0],b[1])]!=0);
     };
     using Group=std::array<int,3>;
     using Branch=std::array<int,4>;
