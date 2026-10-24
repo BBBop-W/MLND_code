@@ -1,0 +1,207 @@
+{
+  "source": "tsl",
+  "raw_path": "/Users/songtaowang/Documents/MLND_code/Meituan-TSL/all_waybill_info_meituan_0322.csv",
+  "raw_file_sha256": "1d31aac21e17c11aec6ab0033d4040c03aea5bab1dfd60aa11e74d766bbd2c04",
+  "raw_rows": 654343,
+  "accepted_orders": 568546,
+  "excluded_unaccepted_rows": 85797,
+  "duplicate_day_order_keys": 0,
+  "coordinate_system": "local_km",
+  "source_coordinate_crs": "unspecified",
+  "coordinate_disclosure": "source latitude/longitude datum is not established by this adapter",
+  "projection_center_lon": 174.5675455,
+  "projection_center_lat": 45.879237,
+  "projection_rule": "median accepted pickup coordinates over all source days",
+  "selected_days": [
+    "20221017",
+    "20221018",
+    "20221019",
+    "20221020",
+    "20221021",
+    "20221022",
+    "20221023",
+    "20221024"
+  ],
+  "date_basis": "source_partition_dt",
+  "hour_basis": "Asia/Shanghai event timestamp",
+  "timestamp_date_mismatch_orders_all_days": 1758,
+  "timing_rule": "accepted non-prebook; positive platform <= grab <= fetch < arrive timestamps",
+  "valid_timing_rows": 546364,
+  "valid_dispatch_rows": 546364,
+  "pre_definition": "order creation/payment to fetch; includes waiting and preparation",
+  "post_definition": "fetch to arrival; includes travel and unobserved handoff/stops",
+  "dispatch_definition": "order creation to rider acceptance; unavailable in Nanshan",
+  "demand_rule": "all accepted source orders retained regardless of timing validity or prebooking",
+  "demand_exposure_hours": 8,
+  "candidate_hour_window": [
+    8,
+    24
+  ],
+  "demand_hour_window": [
+    12,
+    13
+  ],
+  "crop_center_local_km": [
+    -0.75,
+    3.25
+  ],
+  "crop_half_size_km": 2.8867513459481287,
+  "crop_bounds_local_km": {
+    "x_min": -3.6367513459481287,
+    "x_max": 2.1367513459481287,
+    "y_min": 0.36324865405187134,
+    "y_max": 6.136751345948129
+  },
+  "crop_rule": "both pickup and dropoff endpoints within inclusive square bounds",
+  "selected_date_orders": 568546,
+  "all_day_orders_in_area": 170681,
+  "candidate_orders_in_area": 162826,
+  "demand_orders_in_area": 17382,
+  "excluded_spatial_orders": 397865,
+  "valid_demand_timing_rows": 17207,
+  "raw_hourly_demand": 2172.75,
+  "aggregation": {
+    "method": "weighted_bisecting_kmeans_observed_joint_od_representatives",
+    "seed": 43,
+    "orders": 17382,
+    "unique_input_od": 17100,
+    "clusters": 50,
+    "assigned_orders": 17382,
+    "unassigned_orders": 0,
+    "smallest_cluster_orders": 153,
+    "largest_cluster_orders": 602,
+    "origin_distortion": {
+      "mean_km": 0.5068354725009118,
+      "rms_km": 0.6365619215218556,
+      "max_km": 3.375411606084563
+    },
+    "destination_distortion": {
+      "mean_km": 0.5772779472427708,
+      "rms_km": 0.6649147824577207,
+      "max_km": 2.5389313138869607
+    },
+    "joint_distortion": {
+      "mean_km": 0.8361045084093138,
+      "rms_km": 0.920501356795521,
+      "max_km": 3.375687933037674
+    }
+  },
+  "deadline_estimation": "OD post-fetch sample means shrunk with five observations of fitted distance prior",
+  "candidate_expansion": {
+    "old_hub_count": 10,
+    "new_hub_count": 20,
+    "old_hub_locations_preserved": true,
+    "pool_size": 40,
+    "pool_seed": 45,
+    "selection_steps": [
+      {
+        "site_id": "H10",
+        "pool_id": 28,
+        "selection_order": 1,
+        "x_km": 0.1391476176377189,
+        "y_km": 4.564565279999312,
+        "pool_cluster_observations": 4848,
+        "weighted_squared_distance_reduction_km2_observations": 11847.210698129196,
+        "weighted_nearest_rms_km": 0.5995826746515056
+      },
+      {
+        "site_id": "H11",
+        "pool_id": 11,
+        "selection_order": 2,
+        "x_km": -2.0039814372910656,
+        "y_km": 2.941185719999904,
+        "pool_cluster_observations": 6336,
+        "weighted_squared_distance_reduction_km2_observations": 10872.814780904471,
+        "weighted_nearest_rms_km": 0.5710617743839351
+      },
+      {
+        "site_id": "H12",
+        "pool_id": 32,
+        "selection_order": 3,
+        "x_km": 0.8253147056647419,
+        "y_km": 2.139681719999399,
+        "pool_cluster_observations": 7899,
+        "weighted_squared_distance_reduction_km2_observations": 8477.87067142205,
+        "weighted_nearest_rms_km": 0.5477937764470198
+      },
+      {
+        "site_id": "H13",
+        "pool_id": 34,
+        "selection_order": 4,
+        "x_km": 0.9869754856105669,
+        "y_km": 0.8114114800000112,
+        "pool_cluster_observations": 6919,
+        "weighted_squared_distance_reduction_km2_observations": 6311.634283289311,
+        "weighted_nearest_rms_km": 0.5298079752772588
+      },
+      {
+        "site_id": "H14",
+        "pool_id": 25,
+        "selection_order": 5,
+        "x_km": -0.13325777138800218,
+        "y_km": 2.131221399999403,
+        "pool_cluster_observations": 10468,
+        "weighted_squared_distance_reduction_km2_observations": 5126.10954642692,
+        "weighted_nearest_rms_km": 0.5147382100726212
+      },
+      {
+        "site_id": "H15",
+        "pool_id": 39,
+        "selection_order": 6,
+        "x_km": 1.9782521089405174,
+        "y_km": 0.9915272399992829,
+        "pool_cluster_observations": 8484,
+        "weighted_squared_distance_reduction_km2_observations": 4919.630587961363,
+        "weighted_nearest_rms_km": 0.4998483840373627
+      },
+      {
+        "site_id": "H16",
+        "pool_id": 24,
+        "selection_order": 7,
+        "x_km": -0.5746862481678396,
+        "y_km": 0.9595783999992664,
+        "pool_cluster_observations": 10218,
+        "weighted_squared_distance_reduction_km2_observations": 4826.992254384318,
+        "weighted_nearest_rms_km": 0.48479465702077784
+      },
+      {
+        "site_id": "H17",
+        "pool_id": 35,
+        "selection_order": 8,
+        "x_km": 1.4218166343475813,
+        "y_km": 4.860231199999509,
+        "pool_cluster_observations": 2373,
+        "weighted_squared_distance_reduction_km2_observations": 4158.177576592063,
+        "weighted_nearest_rms_km": 0.4714414948458037
+      },
+      {
+        "site_id": "H18",
+        "pool_id": 37,
+        "selection_order": 9,
+        "x_km": 1.5427134784103969,
+        "y_km": 2.6446292399995825,
+        "pool_cluster_observations": 9044,
+        "weighted_squared_distance_reduction_km2_observations": 3840.571468402072,
+        "weighted_nearest_rms_km": 0.4587631192945931
+      },
+      {
+        "site_id": "H19",
+        "pool_id": 2,
+        "selection_order": 10,
+        "x_km": -3.2196922019045653,
+        "y_km": 1.1757618399992293,
+        "pool_cluster_observations": 6863,
+        "weighted_squared_distance_reduction_km2_observations": 3126.6648983023874,
+        "weighted_nearest_rms_km": 0.4481766993293035
+      }
+    ],
+    "selection_method": "weighted BisectingKMeans observed representatives; lock original ten H; greedily add ten pool locations maximizing reduction in all observed endpoints' weighted squared nearest-H distance",
+    "selection_uses_solver_results": false,
+    "total_endpoint_observations": 325652,
+    "unique_endpoint_locations": 108960,
+    "before_weighted_nearest_rms_km": 0.6291894435822958,
+    "after_weighted_nearest_rms_km": 0.4481766993293035,
+    "market_reclustered": false,
+    "calibration_refit": false
+  }
+}

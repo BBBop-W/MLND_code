@@ -1,7 +1,11 @@
 {
-  "schema_version": 1,
-  "name": "baseline",
+  "schema_version": 2,
+  "model": "consecutive",
+  "name": "tsl_2l10h50od_capacity_alignment",
+  "max_orders": 2,
+  "flow_policy": "aggregate",
   "data": {
+    "input_path": "outputs/consecutive_real_comparison_20261015/instances/tsl",
     "instance_root": "data/instances/nanshan_nested_h120",
     "calibration": "data/model_inputs/calibration.json",
     "demand_hubs": 120,
@@ -12,55 +16,67 @@
     "days_per_year": 365,
     "hours_per_day": 12
   },
+  "operations": {
+    "drone_speed_kmh": 72.0,
+    "rider_minutes_per_km": null,
+    "operating_limit_minutes": 10.0,
+    "window_minutes": 0.5,
+    "deadline_minutes": null,
+    "deadline_multiplier": 1.0,
+    "slot_counts": [
+      8,
+      16,
+      24,
+      32,
+      40
+    ],
+    "slot_epsilon": 0.05,
+    "road_distance_factor": 1.25,
+    "route_mode": "direct"
+  },
+  "terminal": {
+    "self_pickup_removal_minutes": 5.0,
+    "self_pickup_receipt_minutes": 5.0,
+    "courier_removal_minutes": 2.0,
+    "courier_receipt_minutes": null
+  },
+  "compatibility": {
+    "mode": "distance",
+    "require_feasible_path": true,
+    "max_distance_km": 2.0,
+    "matrix": null
+  },
+  "choice": {
+    "beta0": -1.0,
+    "beta_distance": 0.0,
+    "beta_time": 0.06,
+    "beta_price": 0.35,
+    "beta_walk": 2.4,
+    "distance_difference_km": 0.0,
+    "time_difference_minutes": -10.0,
+    "price_difference_cny": -1.0,
+    "walking_distance_factor": 1.0,
+    "max_walk_km": 0.8
+  },
   "costs": {
-    "base_site_investment": 20000.0,
+    "base_investment": 479900.0,
     "locker_site_investment": 20000.0,
-    "swap_site_investment": 10000.0,
+    "compartment_investment": 5000.0,
+    "drone_investment": 50000.0,
+    "directed_route_investment_per_km": 11333.25,
     "flight_per_hour": 14.4,
-    "hover_per_hour": null,
+    "waiting_per_hour": 14.4,
     "rider_initial_charge": 5.76,
     "rider_included_distance_km": 3.0,
     "rider_additional_per_km": 1.62,
-    "feeder_rider_multiplier": 0.3,
-    "base_investment": 459900.0,
-    "cabinet_investment": 275940.0,
-    "swap_investment": 98550.0,
-    "drone_investment": 197100.0,
-    "directed_route_investment_per_km": 11333.25
-  },
-  "operations": {
-    "cabinet_capacity": 30.4,
-    "max_cabinets": 5,
-    "drone_speed_kmh": 72.0,
-    "battery_endurance_minutes": 8.333333333333334,
-    "swap_minutes": 3.0,
-    "pickup_minutes": 0.25,
-    "unloading_minutes": 0.25,
-    "road_distance_factor": 1.25,
-    "failure_probability": 0.1,
-    "rider_time_family": "exponential",
-    "rider_minutes_per_km": null,
-    "terminal_dispatch_minutes": null,
-    "deadline_multiplier": 1.0
-  },
-  "choice": {
-    "locker_asc": -1.0,
-    "delivery_time_coefficient": 0.06,
-    "price_coefficient": 0.35,
-    "walk_distance_coefficient": 2.4,
-    "home_eta_minutes": 30.0,
-    "locker_eta_minutes": 20.0,
-    "locker_discount_cny": 1.0,
-    "max_walk_km": 0.8
+    "feeder_rider_multiplier": 0.3
   },
   "solver": {
     "time_limit": 600.0,
     "threads": 1,
-    "mip_gap": null,
-    "mip_gap_abs": null,
-    "max_iterations": null,
+    "mip_gap": 0.005,
     "seed": 43,
-    "column_limit": 500000,
-    "graph_limit": 1000000
+    "max_iterations": 100,
+    "column_limit": 500000
   }
 }

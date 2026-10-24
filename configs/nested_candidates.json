@@ -1,7 +1,0 @@
-{
-  "name": "nested_candidates",
-  "data": {
-    "instance_root": "data/instances/nanshan_nested_candidates",
-    "demand_hubs": 120
-  }
-}

@@ -1,13 +1,5 @@
-"""Five comparison methods behind one solve interface."""
+"""The consecutive-delivery planning solvers."""
 
-from .methods import METHODS, Accelerations, get_method
+from .api import solve
 
-
-def solve(data, **options):
-    """Import optimization code only when an actual solve is requested."""
-    from .api import solve as run
-
-    return run(data, **options)
-
-
-__all__ = ["solve", "METHODS", "Accelerations", "get_method"]
+__all__ = ["solve"]

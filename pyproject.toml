@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlnd"
-version = "1.0.0"
-description = "Path-based drone delivery network design with closed queueing networks"
+version = "2.0.0"
+description = "Consecutive delivery network design with compatible order pairs and fixed mean resources"
 requires-python = ">=3.11"
 dependencies = [
   "gurobipy>=13.0",
   "numpy>=1.26",
   "scipy>=1.12",
-  "numba>=0.60",
   "pandas>=2.2",
   "matplotlib>=3.8",
   "Pillow>=10.0",
-  "requests>=2.31",
   "scikit-learn>=1.4",
+  "threadpoolctl>=3.0",
+  "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +29,6 @@ mlnd = "src.cli:main"
 include = ["src", "src.*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/current"]
+testpaths = ["tests/unit", "tests/integration"]
 addopts = "-ra"
 pythonpath = ["."]

@@ -1,32 +1,29 @@
-"""Destination-locker pickup probabilities and rider tariffs."""
+"""Fixed conditional choice attributes; all differences are pickup minus home."""
 
-from __future__ import annotations
 import numpy as np
+from scipy.special import expit
 from src.config import load_config
 
 
 def pickup_probability(distance_km, **choice):
+    """Evaluate the manuscript's distance, time, price and walking utility."""
     p = load_config(overrides={"choice": choice})["choice"]
-    distance = np.asarray(distance_km, dtype=float)
+    distance = np.asarray(distance_km, dtype=float) * p["walking_distance_factor"]
     if np.any(~np.isfinite(distance)) or np.any(distance < 0):
-        raise ValueError("Distance must be finite and nonnegative")
+        raise ValueError("Walking distance must be finite and nonnegative")
     utility = (
-        p["locker_asc"]
-        + p["delivery_time_coefficient"]
-        * (p["home_eta_minutes"] - p["locker_eta_minutes"])
-        + p["price_coefficient"] * p["locker_discount_cny"]
-        - p["walk_distance_coefficient"] * distance
+        p["beta0"]
+        - p["beta_distance"] * np.asarray(p["distance_difference_km"])
+        - p["beta_time"] * np.asarray(p["time_difference_minutes"])
+        - p["beta_price"] * np.asarray(p["price_difference_cny"])
+        - p["beta_walk"] * distance
     )
-    return np.where(
-        distance < p["max_walk_km"],
-        1.0 / (1.0 + np.exp(-np.clip(utility, -700.0, 700.0))),
-        0.0,
-    )
+    return np.where(distance <= p["max_walk_km"], expit(utility), 0.0)
 
 
 def rider_tariff(distance_km, config):
-    costs, operations = config["costs"], config["operations"]
-    road_distance = operations["road_distance_factor"] * np.asarray(distance_km)
+    costs = config["costs"]
+    distance = config["operations"]["road_distance_factor"] * np.asarray(distance_km)
     return costs["rider_initial_charge"] + costs[
         "rider_additional_per_km"
-    ] * np.maximum(0.0, road_distance - costs["rider_included_distance_km"])
+    ] * np.maximum(0.0, distance - costs["rider_included_distance_km"])

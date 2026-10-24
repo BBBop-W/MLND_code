@@ -1,227 +1,177 @@
-"""One-case and batch runs with immutable inputs and independent validation."""
+"""One model, one run lifecycle, explicit saved inputs and numerical evidence."""
 
+from __future__ import annotations
+from dataclasses import replace
+from copy import deepcopy
 from pathlib import Path
 import time
-import traceback
 
-from src.config import load_config
-from src.data.instances import load_instance
-from src.data.demand import audit_instances, describe_demand
+from src.data.instances import to_planning_data, pack_planning_data
 from src.operations.export import export_operations
+from src.operations.validation import build_operations
+from .storage import save_inputs, save_solution, write_json, source_hashes
 from .progress import RunMonitor, utc_now
-from src.solvers import solve
-from src.solvers.methods import get_method
-from .plan import build_plan
-from .status import runtime, summarize
-from .storage import (
-    save_inputs,
-    save_solution,
-    write_json,
-    snapshot_sources,
-    snapshot_calibration,
-    verify_sources,
-    sha256,
-    load_inputs,
-)
+from .status import runtime
+from src.solvers.methods import resolve_accelerations
+from src.solvers.algorithm import _phase
 
 
 def run_case(
-    hubs,
+    data,
     output,
     *,
-    config=None,
     method="benders_cg",
-    options=None,
-    input_path=None,
-    expected_demand_signature=None,
+    time_limit=600,
+    threads=1,
+    seed=43,
+    mip_gap=1e-4,
+    column_limit=500000,
+    max_iterations=1000,
+    make_report=True,
+    accelerations=None,
 ):
-    """Use a new case directory. Parameter overrides are saved before solving."""
+    from src.solvers.api import solve
+
+    resolved_accelerations = resolve_accelerations(method, accelerations)
     output = Path(output).resolve()
-    if output.exists():
-        raise FileExistsError(f"Preserving existing run: {output}")
-    specification = get_method(method)
-    configuration = load_config(config)
-    settings = dict(configuration["solver"], **(options or {}))
-    configuration["solver"] = settings
-    # Validate the combined settings, including CLI overrides, before writing files.
-    configuration = load_config(overrides=configuration)
-    data = load_inputs(input_path) if input_path else load_instance(hubs, configuration)
-    demand = describe_demand(data, expected_demand_signature)
-    output.mkdir(parents=True)
-    started = time.perf_counter()
+    if output.exists() and any(output.iterdir()):
+        raise ValueError(f"Output directory must be new or empty: {output}")
+    planning = to_planning_data(data)
+    if not isinstance(data, dict):
+        data = pack_planning_data(planning)
+    output.mkdir(parents=True, exist_ok=True)
+    fingerprint = source_hashes()
     manifest = dict(
-        schema=1,
-        model_version=data.get("model_version", "path_cqn_v1"),
+        model_version="consecutive",
+        flow_policy=planning.flow_policy,
         started_utc=utc_now(),
         status="running",
+        input_hashes=save_inputs(data, output),
+        source_hashes=fingerprint,
         runtime=runtime(),
-        method=method,
-        method_spec=specification.describe(),
-        solver=settings,
-        demand=demand,
-        output=str(output),
-        input_source=str(input_path) if input_path else None,
+        options=dict(
+            method=method,
+            time_limit=time_limit,
+            threads=threads,
+            seed=seed,
+            mip_gap=mip_gap,
+            column_limit=column_limit,
+            max_iterations=max_iterations,
+            accelerations=resolved_accelerations,
+        ),
     )
     write_json(output / "manifest.json", manifest)
-    result = None
-    phase = "preparation"
+    started = time.perf_counter()
+    runner_timings = dict(
+        checkpoint_validation=0.0,
+        checkpoint_write=0.0,
+        progress_io=0.0,
+        final_validation=0.0,
+    )
     try:
-        saved_config = (
-            configuration
-            if input_path is None
-            else {
-                "input_mode": "saved_arrays",
-                "source": str(Path(input_path).resolve()),
-                "model_config": data.get("provenance", {}).get("resolved_config"),
-                "solver": settings,
-            }
-        )
-        write_json(output / "config.json", saved_config)
-        manifest["inputs"] = save_inputs(data, output)
-        manifest["sources"] = snapshot_sources(output)
-        manifest["calibration"] = snapshot_calibration(output, data=data)
-        write_json(output / "manifest.json", manifest)
-        phase = "solve"
         with RunMonitor(output) as monitor:
+
+            def checkpoint(candidate):
+                if candidate.get("_solution") is not None:
+                    with _phase(runner_timings, "checkpoint_validation"):
+                        checked = build_operations(data, candidate)
+                    if checked["summary"]["checks"]["passed"]:
+                        with _phase(runner_timings, "checkpoint_write"):
+                            monitor.checkpoint(candidate)
+
+            def progress(record):
+                with _phase(runner_timings, "progress_io"):
+                    monitor.progress(record)
+
             result = solve(
-                data,
+                planning,
                 method=method,
-                **settings,
-                log_dir=output,
-                progress=monitor.progress,
-                checkpoint=monitor.checkpoint,
+                time_limit=time_limit,
+                threads=threads,
+                seed=seed,
+                mip_gap=mip_gap,
+                column_limit=column_limit,
+                max_iterations=max_iterations,
+                accelerations=resolved_accelerations,
+                progress=progress,
+                checkpoint=checkpoint,
                 stop_requested=monitor.stop_requested,
             )
-            save_solution(result, output)
-        verify_sources(manifest["sources"])
-        for name, digest in result.get("source_sha256", {}).items():
-            record = manifest["sources"].get(f"src/{name}")
-            if record is None or record["sha256"] != digest:
-                raise RuntimeError(
-                    f"Solver source fingerprint differs from its snapshot: {name}"
+        with _phase(runner_timings, "final_validation"):
+            operations = build_operations(data, result)
+        s = operations["summary"]
+        result.update(
+            {
+                k: s[k]
+                for k in (
+                    "served",
+                    "direct",
+                    "fleet",
+                    "task_flights",
+                    "continued_orders",
+                    "slot_total",
+                    "opened",
                 )
-        phase = "validation"
-        if result.get("construction_complete") is False:
-            reason = result.get("termination_reason") or "construction_incomplete"
-            summary = dict(
-                case=output.name,
-                method=method,
-                status="failed",
-                passed=False,
-                failed_phase="construction",
-                construction_complete=False,
-                termination_reason=reason,
-                error={
-                    "type": "IncompleteConstruction",
-                    "message": f"Complete model construction did not finish: {reason}",
-                },
-                solver_status=result.get("status"),
-                **{
-                    key: result.get(key)
-                    for key in ("objective", "bound", "gap", "wall", "budget")
-                },
-                output=str(output),
-            )
-        elif result.get("_solution") is None:
-            summary = dict(
-                case=output.name,
-                method=method,
-                status="no_incumbent",
-                passed=False,
-                termination_reason=result.get("termination_reason"),
-                solver_status=result.get("status"),
-                bound=result.get("bound"),
-                wall=result.get("wall"),
-                output=str(output),
-            )
-        else:
-            operations = export_operations(data, result, output)
-            summary = summarize(data, result, operations["summary"]["checks"], output)
-    except Exception as error:
-        detail = dict(
-            type=type(error).__name__,
-            message=str(error),
-            traceback=traceback.format_exc(),
+            }
         )
-        write_json(output / "error.json", detail)
+        result["wall"] = time.perf_counter() - started
+        result["runner_timings"] = runner_timings
+        result["input_hashes"] = manifest["input_hashes"]
+        save_solution(result, output)
+        export_operations(data, result, output)
+        if source_hashes() != fingerprint:
+            raise RuntimeError(
+                "Source changed during the run; results are not from a frozen version"
+            )
         summary = dict(
-            case=output.name,
-            status="failed",
-            passed=False,
-            failed_phase=phase,
-            error=detail,
+            model_version="consecutive",
+            flow_policy=planning.flow_policy,
+            accelerations=resolved_accelerations,
+            passed=s["checks"]["passed"],
+            objective=result["objective"],
+            bound=result.get("bound"),
+            gap=result.get("gap"),
+            pricing_complete=result.get("pricing_complete"),
+            path_scope=result.get("path_scope"),
+            termination_reason=result.get("termination_reason"),
+            served=s["served"],
+            task_flights=s["task_flights"],
+            continued_orders=s["continued_orders"],
+            wall=result["wall"],
             output=str(output),
         )
-        if result is not None:
-            summary.update(
-                {
-                    k: result.get(k)
-                    for k in ("objective", "bound", "gap", "served", "fleet")
-                }
-            )
-    summary["total_wall"] = time.perf_counter() - started
-    summary["demand_input"] = demand
-    write_json(output / "summary.json", summary)
-    manifest.update(
-        status=summary["status"],
-        passed=summary["passed"],
-        finished_utc=utc_now(),
-        total_wall=summary["total_wall"],
-    )
-    manifest["artifacts"] = {
-        str(p.relative_to(output)): {"bytes": p.stat().st_size, "sha256": sha256(p)}
-        for p in sorted(output.rglob("*"))
-        if p.is_file() and p != output / "manifest.json"
-    }
-    write_json(output / "manifest.json", manifest)
-    return summary
+        write_json(output / "summary.json", summary)
+        if make_report:
+            from src.reporting.report import run
+
+            run(output)
+        manifest.update(status="completed", finished_utc=utc_now(), passed=True)
+        write_json(output / "manifest.json", manifest)
+        return summary
+    except BaseException as exc:
+        manifest.update(
+            status="failed",
+            finished_utc=utc_now(),
+            passed=False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        write_json(output / "manifest.json", manifest)
+        raise
 
 
-def run_batch(
-    hubs, output, *, config=None, methods=("benders_cg",), options=None, progress=None
-):
-    output = Path(output).resolve()
-    if output.exists():
-        raise FileExistsError(f"Preserving existing experiment batch: {output}")
-    plan = build_plan(hubs, methods, config=config, options=options, output=output)
-    demand_audit = audit_instances([case["hubs"] for case in plan["cases"]], config)
-    output.mkdir(parents=True)
-    batch = {
-        "started_utc": utc_now(),
-        "plan": plan,
-        "demand_audit": demand_audit,
-        "runs": [],
-    }
-    write_json(output / "batch_manifest.json", batch)
-    for case in plan["cases"]:
-        if (output / "STOP").exists():
-            batch["stopped"] = True
-            break
-        try:
-            row = run_case(
-                case["hubs"],
-                case["output"],
-                config=config,
-                method=case["method"],
-                options=options,
-                expected_demand_signature=demand_audit["expected_signature"],
-            )
-        except Exception as error:
-            row = {
-                "hubs": case["hubs"],
-                "method": case["method"],
-                "passed": False,
-                "status": "setup_failed",
-                "error": str(error),
-            }
-        batch["runs"].append(row)
-        batch["passed"] = all(r["passed"] for r in batch["runs"])
-        write_json(output / "batch_manifest.json", batch)
-        if progress:
-            progress(row)
-    batch["finished_utc"] = utc_now()
-    batch["passed"] = len(batch["runs"]) == len(plan["cases"]) and all(
-        r["passed"] for r in batch["runs"]
-    )
-    write_json(output / "batch_manifest.json", batch)
-    return batch
+def compare(data, output, **options):
+    """Run K=1 and K=2 against identical market inputs and explicit scenario costs."""
+    output = Path(output)
+    planning = to_planning_data(data)
+    rows = []
+    for k in (1, 2):
+        p = replace(planning, max_orders=k)
+        case = deepcopy(data) if isinstance(data, dict) else {}
+        metadata = case.get("metadata", {})
+        if "resolved_config" in metadata:
+            metadata["resolved_config"]["max_orders"] = k
+        metadata.setdefault("run_overrides", {})["max_orders"] = k
+        case.update(pack_planning_data(p, metadata=metadata))
+        rows.append(dict(max_orders=k, **run_case(case, output / f"K{k}", **options)))
+    write_json(output / "comparison.json", rows)
+    return rows

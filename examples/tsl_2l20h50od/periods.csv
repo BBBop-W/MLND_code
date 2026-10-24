@@ -1,0 +1,2 @@
+period_id,start_hour,end_hour,dates,exposure_hours,order_count,total_rate_per_hour
+h12_13,12,13,20221017;20221018;20221019;20221020;20221021;20221022;20221023;20221024,8,17382,2172.75

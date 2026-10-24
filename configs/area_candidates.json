@@ -1,7 +1,0 @@
-{
-  "name": "area_candidates",
-  "data": {
-    "instance_root": "data/instances/nanshan_area_candidates",
-    "demand_hubs": 120
-  }
-}

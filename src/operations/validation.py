@@ -1,417 +1,654 @@
-"""Independent operating, capacity and financial reconciliation."""
+"""Reconstruct saved physical paths, balances and costs independently of solvers."""
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
+import math
 import numpy as np
-from src.model.network import network
-from .arrays import _plain, _array, _broadcast, _maximum
-from .routes import _trace
+from scipy.stats import poisson
+
+from src.data.instances import to_planning_data
+from src.model.locker_capacity import occupancy_limits
 
 
-def build_operations(data, result):
-    """Return all operating tables and independently verified constraint errors."""
-    L, H, K, D = (int(data[k]) for k in ("n_l", "n_h", "n_k", "n_od"))
-    net = network(data)
-    sol = result.get("_solution", result)
-    missions = result.get("_missions", result.get("missions", []))
-    relocations = result.get("_relocations", result.get("relocations", []))
-    levels = np.asarray(data["capacity_levels"], float)
-    S = len(levels)
-    facility = _array(sol["facility"], (L + H + K,), "facility")
-    z = _array(sol["capacity_level"], (H, S), "capacity_level")
-    alpha = _array(sol["assignment"], (D, L, L), "assignment")
-    rho = _array(sol["rho"], (L,), "rho")
-    idle = _array(sol["idle"], (L,), "idle")
-    airline = _array(sol["airline"], (net["count"],), "airline")
-    demand = _array(data["demand"], (D,), "demand")
-    capacity = _array(data["level_capacity"], (H, S), "level_capacity")
-    level_cost = _array(data["level_cost"], (H, S), "level_cost")
-    fleet = float(sol.get("fleet", result.get("fleet", float("nan"))))
-    if not np.isfinite(fleet):
-        raise ValueError("Finite explicit continuous fleet size is required")
-    served_pair = np.zeros((D, L, L))
-    service_ll, empty_ll = np.zeros((L, L)), np.zeros((L, L))
-    locker_load = np.zeros((H, 2))
-    link_service, link_empty = np.zeros(net["count"]), np.zeros(net["count"])
-    weighted = defaultdict(lambda: np.zeros(D))
-    pickup_flow = np.zeros(D)
-    components = defaultdict(float)
-    site_specs = (
-        ("base", "base_site_cost", L, facility[:L]),
-        ("locker", "hub_site_cost", H, facility[L : L + H]),
-        ("swap", "swap_site_cost", K, facility[L + H :]),
+def _scalar(value, name):
+    array = np.asarray(value)
+    if array.ndim != 0:
+        raise ValueError(f"{name} must be a scalar")
+    result = float(array)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
+
+
+def _index(value, name, upper=None):
+    number = _scalar(value, name)
+    if isinstance(value, (bool, np.bool_)) or number != int(number) or number < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
+    integer = int(number)
+    if upper is not None and integer >= upper:
+        raise ValueError(f"{name} is outside the candidate set")
+    return integer
+
+
+def _cached(path, expected):
+    """Compare saved numeric fields to independently reconstructed coefficients."""
+    for key, value in expected.items():
+        actual = np.asarray(path[key], dtype=float)
+        wanted = np.asarray(value, dtype=float)
+        if (
+            actual.shape != wanted.shape
+            or not np.isfinite(actual).all()
+            or not np.allclose(actual, wanted, rtol=1e-10, atol=1e-12)
+        ):
+            raise ValueError(f"Cached {key} disagrees with the physical path")
+
+
+def _routes(data, path):
+    legs = tuple(
+        tuple(_index(v, "route node", data.n_nodes) for v in leg)
+        for leg in path["legs"]
     )
-    site_costs = [
-        dict(
-            component=name,
-            parameter=key,
-            opened_locations=int(np.sum(opened > 0.5)),
-            cny_per_hour=float(_broadcast(data.get(key, 0.0), count, key) @ opened),
-        )
-        for name, key, count, opened in site_specs
-    ]
-    site_totals = {row["component"]: row["cny_per_hour"] for row in site_costs}
-    costs = dict(
-        base_fixed=float(_broadcast(data["base_cost"], L, "base_cost") @ facility[:L])
-        + site_totals["base"],
-        locker_fixed=float(np.sum(level_cost * z)) + site_totals["locker"],
-        swap_fixed=float(
-            _broadcast(data["swap_cost"], K, "swap_cost") @ facility[L + H :]
-        )
-        + site_totals["swap"],
-        link_fixed=float(net["fees"] @ airline),
-        fleet=float(data["fleet_cost"]) * fleet,
-        first_rider=0.0,
-        terminal_rider=0.0,
-        service_flight=0.0,
-        aerial_wait=0.0,
-        empty_flight=0.0,
-    )
-    checks = {}
-    binary = np.r_[facility, z.ravel(), alpha.ravel(), airline]
-    checks["binary_integrality_error"] = _maximum(abs(binary - np.rint(binary)))
-    checks["binary_domain_violation"] = _maximum(np.r_[-binary, binary - 1])
-    checks["capacity_installation_error"] = _maximum(
-        abs(z.sum(axis=1) - facility[L : L + H])
-    )
-    checks["assignment_count_violation"] = _maximum(alpha.sum(axis=(1, 2)) - 1)
-    checks["assignment_source_violation"] = _maximum(alpha.sum(axis=2) - facility[:L])
-    checks["assignment_return_violation"] = _maximum(alpha.sum(axis=1) - facility[:L])
-    if data.get("same_base_service", False):
-        checks["same_base_assignment_violation"] = _maximum(
-            abs(alpha[:, ~np.eye(L, dtype=bool)])
-        )
-    checks["rho_opening_violation"] = _maximum(np.r_[-rho, rho - facility[:L]])
-    checks["nonnegative_resource_violation"] = _maximum(np.r_[-idle, -fleet])
-    checks["idle_cone_violation"] = _maximum(
-        np.sqrt(4 + (idle + rho) ** 2) - (idle + 2 - rho)
-    )
-    u, v = net["uv"].T
-    checks["link_endpoint_violation"] = _maximum(
-        np.r_[airline - facility[u], airline - facility[v]]
-    )
-    if "last_rider_cost" in data:
-        expected_terminal = (1 - np.asarray(data["pickup_share"])) * np.asarray(
-            data["last_rider_cost"]
-        )
-        checks["terminal_cost_reconstruction_error"] = _maximum(
-            abs(expected_terminal - np.asarray(data["terminal_cost"]))
-        )
-    if "last_ground_time" in data and "terminal_dispatch_time" in data:
-        expected_terminal_time = np.asarray(data["last_ground_time"]) + float(
-            data["terminal_dispatch_time"]
-        )
-        checks["terminal_time_reconstruction_error"] = _maximum(
-            abs(expected_terminal_time - np.asarray(data["terminal_time"]))
-        )
-    coefficient_error = battery_violation = delivery_violation = 0.0
-    min_reliability = 1.0
-    path_rows, segment_rows = [], []
-    for is_service, records, loads in (
-        (True, missions, link_service),
-        (False, relocations, link_empty),
+    b = tuple(_index(v, "base", data.n_l) for v in path["b"])
+    if len(b) != 2 or any(v < 0 or v >= data.n_l for v in b):
+        raise ValueError("Invalid endpoint base pair")
+    if not legs or any(not leg for leg in legs):
+        raise ValueError("Every path must have nonempty flight legs")
+    arcs = Counter()
+    times = []
+    for k, leg in enumerate(legs):
+        if not leg or len(set(leg)) != len(leg):
+            raise ValueError("Each flight leg must be an elementary route")
+        if k and legs[k - 1][-1] != leg[0]:
+            raise ValueError("Disconnected flight legs")
+        if any(v < 0 or v >= data.n_nodes for v in leg):
+            raise ValueError("Route node is outside the candidate network")
+        if (
+            data.candidate_routes is not None
+            and len(leg) > 1
+            and leg not in data.candidate_routes
+        ):
+            raise ValueError("Route is absent from the supplied finite route set")
+        if (
+            data.candidate_routes is None
+            and data.route_mode == "direct"
+            and len(leg) > 2
+        ):
+            raise ValueError("Multi-arc route in a direct-flight instance")
+        duration = 0.0
+        for u, v in zip(leg, leg[1:]):
+            if not data.allowed_links[u, v]:
+                raise ValueError("Path traverses a forbidden link")
+            duration += data.flight_times[u, v]
+            arcs[u, v] += 1
+        times.append(duration)
+    return b, legs, arcs, times
+
+
+def _segment(data, segment):
+    """Validate every retained first leg, including zero-flow ones."""
+    sid = _index(segment["id"], "segment id")
+    b, legs, _, times = _routes(data, segment)
+    r = _index(segment["first_od"], "first OD", data.n_od)
+    i = _index(segment["pickup"], "pickup locker", data.n_h)
+    j = _index(segment["delivery"], "delivery locker", data.n_h)
+    if (
+        len(legs) != 2
+        or i == j
+        or legs[0][0] != b[0]
+        or legs[0][-1] != data.n_l + i
+        or legs[1][-1] != data.n_l + j
     ):
-        for index, record in enumerate(records):
-            flow = float(record["flow"])
-            if not np.isfinite(flow) or flow < 0:
-                raise ValueError("Path flows must be finite and nonnegative")
+        raise ValueError("Invalid shared first-leg endpoints or stages")
+    if times[1] + 1e-12 < data.effective_delta:
+        raise ValueError("First loaded flight is shorter than the common window")
+    mean = float(data.rider_mean[r, i])
+    wait = mean * math.exp(-times[0] / mean) if mean else 0.0
+    if times[0] + wait + times[1] + data.receipt_mean[r, j] > data.deadline[r] + 1e-12:
+        raise ValueError("Shared first leg violates its first order's mean deadline")
+    _cached(segment, dict(t0=times[0], t1=times[1]))
+    return dict(segment, id=sid, b=b, first_od=r, pickup=i, delivery=j, legs=legs)
+
+
+def _physical(data, path, *, empty=False):
+    """Recompute directly from node routes, without model resource functions."""
+    b, legs, arcs, times = _routes(data, path)
+    if legs[0][0] != b[0] or legs[-1][-1] != b[1]:
+        raise ValueError("Path does not connect its endpoint bases")
+    saved_arcs = tuple(
+        tuple(_index(v, "arc count or node") for v in entry)
+        for entry in path["arc_counts"]
+    )
+    if saved_arcs != tuple((u, v, count) for (u, v), count in sorted(arcs.items())):
+        raise ValueError("Cached arc_counts disagree with route traversals")
+    flight = float(sum(times))
+    if empty:
+        if len(legs) != 1 or b[0] == b[1]:
+            raise ValueError("Empty repositioning must connect distinct bases")
+        if flight > data.operating_limit + 1e-8:
+            raise ValueError("Empty path exceeds the operating-time limit")
+        _cached(
+            path, dict(flight_time=flight, time=flight, cost=data.flight_cost * flight)
+        )
+        return dict(
+            b=b,
+            arcs=arcs,
+            flight=flight,
+            time=flight,
+            wait=0.0,
+            cost=data.flight_cost * flight,
+            slots={},
+            orders=[],
+        )
+    pickups = tuple(_index(v, "pickup locker", data.n_h) for v in path["pickups"])
+    deliveries = tuple(
+        _index(v, "delivery locker", data.n_h) for v in path["deliveries"]
+    )
+    ods = (
+        (_index(path["first_od"], "first OD", data.n_od),)
+        if path.get("second_od") is None
+        else (
+            _index(path["first_od"], "first OD", data.n_od),
+            _index(path["second_od"], "second OD", data.n_od),
+        )
+    )
+    k = len(ods)
+    if len(legs) != 2 * k + 1 or len(pickups) != k or len(deliveries) != k:
+        raise ValueError("Incorrect service-stage count")
+    if path.get("mode") != ("single" if k == 1 else "double") or k > data.max_orders:
+        raise ValueError("Invalid service mode")
+    if any(r < 0 or r >= data.n_od for r in ods):
+        raise ValueError("Invalid OD index")
+    for n, (i, j) in enumerate(zip(pickups, deliveries)):
+        if not (0 <= i < data.n_h and 0 <= j < data.n_h) or i == j:
+            raise ValueError("Invalid pickup/delivery locker pair")
+        if (
+            legs[2 * n][-1] != data.n_l + i
+            or legs[2 * n + 1][0] != data.n_l + i
+            or legs[2 * n + 1][-1] != data.n_l + j
+        ):
+            raise ValueError("Flight routes violate pickup/delivery precedence")
+    delta = data.effective_delta
+    if times[1] + 1e-9 < delta:
+        raise ValueError("First loaded flight is shorter than the common window")
+    if k == 2 and (delta <= 0 or data.kappa[ods[0], ods[1]] <= 0):
+        raise ValueError("Ineligible consecutive OD pair")
+    r1 = float(data.rider_mean[ods[0], pickups[0]])
+    w1 = r1 * math.exp(-times[0] / r1) if r1 > 0 else 0.0
+    waits = [w1]
+    pickups_mean = [times[0] + w1]
+    if k == 2:
+        r2 = float(data.rider_mean[ods[1], pickups[1]])
+        w2 = (
+            r2 * math.exp(-times[2] / r2) * (-math.expm1(-delta / r2)) / (delta / r2)
+            if r2 > 0
+            else 0.0
+        )
+        waits.append(w2)
+        pickups_mean.append(times[2] + delta / 2 + w2)
+    slots = defaultdict(float)
+    orders = []
+    cost = data.flight_cost * flight + data.waiting_cost * sum(waits)
+    for n, (r, i, j, q) in enumerate(zip(ods, pickups, deliveries, pickups_mean)):
+        deposited = q + times[2 * n + 1]
+        received = deposited + data.receipt_mean[r, j]
+        if received > data.deadline[r] + 1e-8:
+            raise ValueError(f"Order {n + 1} exceeds its own mean receipt deadline")
+        slots[i] += q
+        slots[j] += deposited + data.removal_mean[r, j]
+        cost += data.first_cost[r, i] + data.terminal_cost[r, j]
+        orders.append(
+            dict(
+                od=r,
+                position=n + 1,
+                pickup=int(i),
+                delivery=int(j),
+                pickup_hours=float(q),
+                receipt_hours=float(received),
+                deadline_hours=float(data.deadline[r]),
+            )
+        )
+    duration = flight + sum(waits)
+    if duration > data.operating_limit + 1e-8:
+        raise ValueError("Service path exceeds the mean operating-time limit")
+    counts = tuple(
+        tuple(_index(v, "served count or OD") for v in row)
+        for row in path["served_counts"]
+    )
+    if counts != tuple(sorted(Counter(ods).items())):
+        raise ValueError("Cached served_counts disagree with the order occurrences")
+    _cached(
+        path,
+        dict(
+            flight_time=flight,
+            time=duration,
+            wait=sum(waits),
+            cost=cost,
+            pickup_times=pickups_mean,
+            delivery_times=[order["receipt_hours"] for order in orders],
+            slot_times=tuple(sorted(slots.items())),
+        ),
+    )
+    return dict(
+        b=b,
+        arcs=arcs,
+        flight=flight,
+        time=float(duration),
+        wait=float(sum(waits)),
+        cost=float(cost),
+        slots=dict(slots),
+        orders=orders,
+    )
+
+
+def build_operations(inputs, result, *, tolerance=5e-5):
+    tolerance = _scalar(tolerance, "tolerance")
+    if tolerance < 0:
+        raise ValueError("tolerance must be nonnegative")
+    data = to_planning_data(inputs)
+    if result.get("model_version") != "consecutive":
+        raise ValueError("Results must belong to consecutive")
+    if result.get("flow_policy", "prefix") != data.flow_policy:
+        raise ValueError("Result flow_policy disagrees with its saved inputs")
+    sol = result.get("_solution")
+    if sol is None:
+        raise ValueError("No saved incumbent to validate")
+    bases, h, n, r = data.n_l, data.n_h, data.n_nodes, data.n_od
+    shapes = dict(
+        facility=(n,),
+        capacity_level=data.slot_counts.shape,
+        assignment=(r, bases, bases),
+        airline=(n, n),
+        rho=(bases,),
+        idle=(bases,),
+    )
+    values = {}
+    errors = {}
+    physical_errors = []
+
+    def check(name, violation):
+        a = np.asarray(violation, float)
+        if not np.isfinite(a).all():
+            raise ValueError(f"Nonfinite validation residual: {name}")
+        errors[name] = float(max(0.0, np.max(a, initial=0.0)))
+
+    for key, shape in shapes.items():
+        value = np.asarray(sol[key], float)
+        if value.shape != shape or not np.isfinite(value).all():
+            raise ValueError(f"Invalid saved {key} shape or nonfinite values")
+        values[key] = value
+        check(key + "_nonnegative", -value)
+    x, z, a, y, rho, idle = (values[key] for key in shapes)
+    fleet = _scalar(sol["fleet"], "fleet")
+    check("fleet_nonnegative", -fleet)
+    for key in ("facility", "capacity_level", "assignment", "airline"):
+        check(key + "_binary", np.abs(values[key] - np.rint(values[key])))
+        check(key + "_upper", values[key] - 1)
+    check("capacity_install", np.abs(z.sum(axis=1) - x[bases:]))
+    check("single_assignment", a.sum(axis=(1, 2)) - 1)
+    check("assignment_departure", a - x[:bases][None, :, None])
+    check("assignment_return", a - x[:bases][None, None, :])
+    check("link_departure", y - x[:, None])
+    check("link_return", y - x[None, :])
+    check("forbidden_links", y * (~data.allowed_links))
+    check("availability_open", rho - x[:bases])
+    check("availability_upper", rho - 1)
+    check("idle_inventory_cone", rho - idle * (1 - rho))
+    head = np.asarray(sol.get("head", []), float)
+    eta = np.asarray(sol.get("eta", []), float)
+    segments = [_segment(data, segment) for segment in result.get("_segments", [])]
+    if (
+        head.shape != (len(segments),)
+        or eta.shape != head.shape
+        or not np.isfinite(head).all()
+        or not np.isfinite(eta).all()
+    ):
+        raise ValueError("Saved first-leg arrays disagree with segments")
+    check("head_nonnegative", -head)
+    check("eta_nonnegative", -eta)
+    heads = {int(s["id"]): float(head[k]) for k, s in enumerate(segments)}
+    etas = {int(s["id"]): float(eta[k]) for k, s in enumerate(segments)}
+    segment_map = {int(s["id"]): s for s in segments}
+    if len(segment_map) != len(segments):
+        raise ValueError("Duplicate first-leg identifiers")
+    branch = defaultdict(float)
+    outflow, inflow, loads, link_load = (
+        np.zeros(bases),
+        np.zeros(bases),
+        np.zeros(h),
+        np.zeros((n, n)),
+    )
+    served, first, second, receipt_weight = (np.zeros(r) for _ in range(4))
+    service_time = empty_time = service_cost = empty_cost = single_tasks = (
+        double_tasks
+    ) = empty_tasks = 0.0
+    path_rows, order_rows, arc_rows = [], [], []
+    traversal_bounds = {kind: np.zeros((n, n)) for kind in ("service", "empty")}
+    for kind, records in [
+        ("service", result.get("_missions", [])),
+        ("empty", result.get("_relocations", [])),
+    ]:
+        flow_array = np.asarray(
+            sol.get("flow" if kind == "service" else "empty_flow", []), float
+        )
+        if flow_array.ndim != 1 or not np.isfinite(flow_array).all():
+            raise ValueError("Path flows must be a finite one-dimensional array")
+        check(kind + "_flow_nonnegative", -flow_array)
+        check(kind + "_negative_flow_total", np.maximum(-flow_array, 0).sum())
+        reconstructed_flow = np.zeros_like(flow_array)
+        seen = set()
+        for record in records:
+            path = record["path"]
+            flow = _scalar(record["flow"], "path flow")
+            pid = _index(path["id"], "path id")
+            if (
+                pid in seen
+                or pid < 0
+                or pid >= len(flow_array)
+                or not math.isfinite(flow)
+            ):
+                raise ValueError("Duplicate or invalid saved path identifier/flow")
+            seen.add(pid)
+            reconstructed_flow[pid] = flow
+            try:
+                q = _physical(data, path, empty=kind == "empty")
+                if kind == "service":
+                    sid = _index(path["segment_id"], "segment id")
+                    segment = segment_map[sid]
+                    if (
+                        tuple(segment["b"]) != q["b"]
+                        or segment["first_od"] != path["first_od"]
+                        or segment["pickup"] != path["pickups"][0]
+                        or segment["delivery"] != path["deliveries"][0]
+                        or tuple(map(tuple, segment["legs"]))
+                        != tuple(map(tuple, path["legs"][:2]))
+                    ):
+                        raise ValueError(
+                            "Service path disagrees with its shared first leg"
+                        )
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                physical_errors.append(f"{kind} {pid}: {exc}")
+                continue
+            for (u, v), count in q["arcs"].items():
+                traversal_bounds[kind][u, v] = max(traversal_bounds[kind][u, v], count)
+            # Zero records still undergo structural and cached-coefficient checks.
+            # Every positive flow, however small, contributes to all resources.
             if flow == 0:
                 continue
-            tr = _trace(data, record, service=is_service)
-            l, m = tr["l"], tr["m"]
-            for flat, count in tr["arc_counts"].items():
-                e = int(net["lookup"][flat])
-                if e < 0:
-                    raise ValueError("Physical path uses a noncandidate link")
-                loads[e] += flow * count
-            for component, time in tr["components"].items():
-                components[component] += flow * time
-            coefficient_error = max(
-                coefficient_error, max(tr["coefficient_errors"].values(), default=0.0)
-            )
-            battery_violation = max(battery_violation, tr["battery_violation"])
-            delivery_violation = max(delivery_violation, tr["delivery_violation"])
-            min_reliability = min(min_reliability, tr["joint_reliability"])
-            fly = sum(s["flight_hours"] for s in tr["segments"])
-            if is_service:
-                od, i, j = tr["od"], tr["i"], tr["j"]
-                service_ll[l, m] += flow
-                served_pair[od, l, m] += flow
-                locker_load[i, 0] += flow
-                locker_load[j, 1] += flow
-                pickup_flow[od] += flow * tr["pickup_share"]
-                for field in (
-                    "time",
-                    "first_rider",
-                    "prefix",
-                    "wait",
-                    "terminal",
-                    "mean_delivery",
-                    "quantile_delivery",
-                ):
-                    weighted[field][od] += flow * tr[field]
-                weighted["fly"][od] += flow * fly
-                for field, duration in tr["components"].items():
-                    weighted[field][od] += flow * duration
-                costs["first_rider"] += flow * tr["first_cost"]
-                costs["terminal_rider"] += flow * tr["terminal_cost"]
-                costs["service_flight"] += flow * fly * float(data["drone_time_cost"])
-                costs["aerial_wait"] += (
-                    flow * tr["wait"] * float(data.get("hover_cost", 0.0))
+            b = q["b"]
+            outflow[b[0]] += flow
+            inflow[b[1]] += flow
+            for (u, v), count in q["arcs"].items():
+                link_load[u, v] += flow * count
+                arc_rows.append(
+                    dict(
+                        kind=kind, path=pid, u=u, v=v, traversals_per_hour=flow * count
+                    )
                 )
+            if kind == "empty":
+                empty_time += flow * q["time"]
+                empty_cost += flow * q["cost"]
+                empty_tasks += flow
             else:
-                empty_ll[l, m] += flow
-                costs["empty_flight"] += flow * fly * float(data["drone_time_cost"])
+                sid = int(path["segment_id"])
+                s = path.get("second_od")
+                branch[sid, s] += flow
+                service_time += flow * q["time"]
+                service_cost += flow * q["cost"]
+                if s is None:
+                    single_tasks += flow
+                else:
+                    double_tasks += flow
+                for i, t in q["slots"].items():
+                    loads[i] += flow * t
+                for order in q["orders"]:
+                    od = order["od"]
+                    served[od] += flow
+                    receipt_weight[od] += flow * order["receipt_hours"]
+                    (first if order["position"] == 1 else second)[od] += flow
+                    order_rows.append(dict(path=pid, flow_per_hour=flow, **order))
             path_rows.append(
                 dict(
-                    kind="service" if is_service else "reposition",
-                    index=index,
-                    od=tr["od"],
-                    l=l,
-                    m=m,
-                    i=tr["i"],
-                    j=tr["j"],
+                    kind=kind,
+                    path=pid,
+                    departure=b[0],
+                    return_base=b[1],
+                    mode=path.get("mode", "empty"),
                     flow_per_hour=flow,
-                    duration_minutes=60 * tr["time"],
-                    operating_cost_per_mission=tr["operating_cost"],
-                    mean_delivery_minutes=(
-                        60 * tr["mean_delivery"] if is_service else None
-                    ),
-                    delivery_quantile_minutes=(
-                        60 * tr["quantile_delivery"] if is_service else None
-                    ),
-                    joint_reliability=tr["joint_reliability"],
-                    battery_interval_minutes=[
-                        60 * t for t in tr["battery_interval_consumptions"]
-                    ],
-                    legs=tr["legs"],
+                    flight_minutes=60 * q["flight"],
+                    mean_operating_minutes=60 * q["time"],
+                    mean_wait_minutes=60 * q["wait"],
+                    unit_cost=q["cost"],
                 )
             )
-            segment_rows.extend(
+        check(kind + "_flow_storage", np.abs(flow_array - reconstructed_flow))
+        check(
+            kind + "_flow_storage_total", np.abs(flow_array - reconstructed_flow).sum()
+        )
+        check(kind + "_record_flow_nonnegative", -reconstructed_flow)
+    check("base_balance", np.abs(outflow - inflow))
+    check("fleet_budget", idle.sum() + service_time + empty_time - fleet)
+    thresholds = occupancy_limits(data.slot_counts, data.slot_epsilon[:, None])
+    installed_limit = (thresholds * z).sum(axis=1)
+    check("locker_load", loads - installed_limit)
+    check("closed_link_use", link_load * (1 - y))
+    activation = float(data.demand.sum()) * (
+        traversal_bounds["service"] + (bases - 1) * traversal_bounds["empty"]
+    )
+    check("link_activation_bound", link_load - activation * y)
+    checks_head = []
+    checks_eta = []
+    checks_single = []
+    checks_double = []
+    checks_starts = []
+    checks_order = []
+    checks_hbound = []
+    for s in segments:
+        sid = int(s["id"])
+        b = tuple(s["b"])
+        od = int(s["first_od"])
+        hv = heads[sid]
+        ev = etas[sid]
+        lam = float(data.demand @ a[:, b[0], b[1]])
+        qb = -math.expm1(-lam * data.effective_delta)
+        checks_eta.extend(
+            [
+                abs(lam * ev - qb * hv),
+                ev - data.effective_delta * hv,
+                ev - min(1, data.effective_delta * data.demand[od]),
+            ]
+        )
+        checks_hbound.append(hv - data.demand[od])
+        targets = data.kappa[od] * data.demand * a[:, b[0], b[1]] * ev
+        checks_starts.append(
+            abs(branch[sid, None] + sum(branch[sid, j] for j in range(r)) - hv)
+        )
+        if data.flow_policy == "prefix":
+            checks_single.append(abs(branch[sid, None] - (hv - targets.sum())))
+            checks_double.extend(abs(branch[sid, j] - targets[j]) for j in range(r))
+    pool_rows = []
+    for bl in range(bases):
+        for bm in range(bases):
+            aa = a[:, bl, bm]
+            hh = data.demand * aa
+            lam = float(hh.sum())
+            qb = -math.expm1(-lam * data.effective_delta)
+            pi = hh / lam if lam else np.zeros(r)
+            theta = (
+                np.linalg.solve(np.eye(r) + qb * pi[:, None] * data.kappa.T, hh)
+                if lam
+                else hh
+            )
+            actual_head = np.zeros(r)
+            continuation = np.zeros(r)
+            actual_single = np.zeros(r)
+            actual_double = np.zeros((r, r))
+            for s in segments:
+                if tuple(s["b"]) == (bl, bm):
+                    sid = int(s["id"])
+                    od = int(s["first_od"])
+                    actual_head[od] += heads[sid]
+                    continuation += hh * data.kappa[od] * etas[sid]
+                    actual_single[od] += branch[sid, None]
+                    actual_double[od] += [branch[sid, j] for j in range(r)]
+            checks_head.extend(np.abs(actual_head + continuation - hh * rho[bl]))
+            checks_order.extend(np.abs(actual_head - rho[bl] * theta))
+            if data.flow_policy == "aggregate":
+                # Reconstruct task rates directly from the fixed pool demand,
+                # independently of saved head/eta lifts or solver row assembly.
+                targets_double = rho[bl] * theta[:, None] * qb * data.kappa * pi
+                targets_single = rho[bl] * theta - targets_double.sum(axis=1)
+                checks_single.extend(np.abs(actual_single - targets_single))
+                checks_double.extend(np.abs(actual_double - targets_double).ravel())
+            pool_rows.append(
                 dict(
-                    kind="service" if is_service else "reposition",
-                    path_index=index,
-                    flow_per_hour=flow,
-                    **s,
+                    departure=bl,
+                    return_base=bm,
+                    offered_orders_per_hour=lam,
+                    continuation_probability=qb,
+                    reconstructed_tasks_per_hour=float(theta.sum()),
+                    executed_tasks_per_hour=float(actual_head.sum()),
                 )
-                for s in tr["segments"]
             )
-    served = served_pair.sum(axis=(1, 2))
-    total = float(served.sum())
-    if data.get("same_base_service", False):
-        checks["same_base_service_violation"] = _maximum(
-            service_ll[~np.eye(L, dtype=bool)]
-        )
-    expected = demand[:, None, None] * alpha * rho[None, :, None]
-    checks["assignment_service_error"] = _maximum(abs(served_pair - expected))
-    checks["served_demand_violation"] = _maximum(served - demand)
-    checks["base_flow_balance_error"] = _maximum(
-        abs((service_ll + empty_ll).sum(axis=1) - (service_ll + empty_ll).sum(axis=0))
+    check("head_upper", checks_hbound)
+    check("eta_identity_and_bounds", checks_eta)
+    check("first_leg_task_flow", checks_starts)
+    scope = "aggregate_" if data.flow_policy == "aggregate" else ""
+    check(scope + "single_branches", checks_single)
+    check(scope + "double_branches", checks_double)
+    check("first_leg_order_balance", checks_head)
+    check("task_reconstruction", checks_order)
+    expected = data.demand * np.sum(a * rho[None, :, None], axis=(1, 2))
+    check("served_order_identity", np.abs(served - expected))
+    check("served_demand", served - data.demand)
+    direct = data.demand - served
+    if "courier" in sol:
+        saved_courier = np.asarray(sol["courier"], dtype=float)
+        if saved_courier.shape != (r,) or not np.isfinite(saved_courier).all():
+            raise ValueError("Invalid courier flow array")
+        check("courier_nonnegative", -saved_courier)
+        check("courier_order_identity", np.abs(saved_courier - direct))
+    costs = dict(
+        bases=float(data.base_cost @ x[:bases]),
+        lockers=float(np.sum(data.slot_cost * z)),
+        links=float(np.sum(data.link_cost * y)),
+        fleet=data.fleet_cost * fleet,
+        service=service_cost,
+        repositioning=empty_cost,
+        direct_courier=float(data.ground_cost @ direct),
     )
-    checks["locker_capacity_violation"] = _maximum(
-        locker_load.sum(axis=1) - (capacity * z).sum(axis=1)
-    )
-    checks["link_activation_violation"] = _maximum(
-        link_service + link_empty - net["upper"] * airline
-    )
-    checks["coefficient_reconstruction_error"] = coefficient_error
-    checks["battery_quantile_violation_hours"] = battery_violation
-    checks["delivery_quantile_violation_hours"] = delivery_violation
-    checks["joint_reliability_shortfall"] = max(
-        0.0, 1 - float(data["epsilon"]) - min_reliability
-    )
-    actual_occupancy = float(idle.sum()) + sum(components.values())
-    checks["fleet_occupancy_violation"] = max(0.0, actual_occupancy - fleet)
-    costs["direct_rider"] = float(np.dot(demand - served, data["ground"]))
     objective = sum(costs.values())
-    checks["objective_reconstruction_error"] = abs(
-        objective - float(result["objective"])
+    saved_objective = _scalar(result["objective"], "objective")
+    if result.get("gap") is not None:
+        check("gap_nonnegative", -_scalar(result["gap"], "gap"))
+    check(
+        "objective_relative",
+        abs(objective - saved_objective) / (1 + abs(objective)),
     )
-    for field, actual in (
-        ("served", total),
-        ("fleet", fleet),
-        ("airline_fixed_cost", costs["link_fixed"]),
-    ):
-        if field in result:
-            checks["saved_" + field + "_error"] = abs(actual - float(result[field]))
-    if "hub_count" in sol:
-        checks["saved_cabinet_count_error"] = _maximum(
-            abs(np.asarray(sol["hub_count"]) - z @ levels)
-        )
-    if "empty" in sol:
-        checks["saved_empty_flow_error"] = _maximum(
-            abs(np.asarray(sol["empty"]) - empty_ll)
-        )
-    if "airline_load" in result or "airline_load" in sol:
-        saved = result.get("airline_load", sol.get("airline_load"))
-        checks["saved_link_load_error"] = _maximum(
-            abs(np.asarray(saved) - link_service - link_empty)
-        )
-    if result.get("bound") is not None:
-        checks["bound_above_incumbent"] = max(0.0, float(result["bound"]) - objective)
-    checks["passed"] = all(
-        v <= (1e-3 if "objective" in k or "cost" in k else 1e-4)
-        for k, v in checks.items()
-    )
-    direct = np.asarray(
-        data.get(
-            "direct_postfetch_hours",
-            data.get("direct_rider_hours", data["delivery_deadline"]),
-        ),
-        float,
-    )
-    observed = np.asarray(
-        data.get("observed_postfetch_hours", np.full(D, np.nan)), float
-    )
-    observed_count = np.asarray(data.get("observed_postfetch_count", np.zeros(D)), int)
-    od_rows = []
-    for od in range(D):
-        row = dict(
-            od=od,
-            origin=int(data["od_origin"][od]),
-            destination=int(data["od_destination"][od]),
-            demand_per_hour=float(demand[od]),
-            served_per_hour=float(served[od]),
-            direct_per_hour=float(demand[od] - served[od]),
-            pickup_per_hour=float(pickup_flow[od]),
-            home_per_hour=float(served[od] - pickup_flow[od]),
-            direct_postfetch_minutes=60 * float(direct[od]),
-            observed_postfetch_minutes=(
-                60 * float(observed[od]) if np.isfinite(observed[od]) else None
-            ),
-            observed_count=int(observed_count[od]),
-            deadline_minutes=60 * float(data["delivery_deadline"][od]),
-        )
-        for key, values in weighted.items():
-            row[key + "_minutes"] = (
-                60 * float(values[od]) / served[od] if served[od] > 0 else None
-            )
-        od_rows.append(row)
-    bases = [
-        dict(
-            base=l,
-            open=int(facility[l] > 0.5),
-            rho=float(rho[l]),
-            idle=float(idle[l]),
-            service_out=float(service_ll[l].sum()),
-            service_in=float(service_ll[:, l].sum()),
-            empty_out=float(empty_ll[l].sum()),
-            empty_in=float(empty_ll[:, l].sum()),
-        )
-        for l in range(L)
-    ]
-    lockers = [
-        dict(
-            locker=i,
-            open=int(facility[L + i] > 0.5),
-            count=float(z[i] @ levels),
-            capacity=float(capacity[i] @ z[i]),
-            pickup=float(locker_load[i, 0]),
-            delivery=float(locker_load[i, 1]),
-            utilization=(
-                float(locker_load[i].sum() / (capacity[i] @ z[i]))
-                if capacity[i] @ z[i] > 0
-                else 0.0
-            ),
-        )
-        for i in range(H)
-    ]
-    airlines = [
-        dict(
-            link=e,
-            u=int(u),
-            v=int(v),
-            open=int(airline[e] > 0.5),
-            service_flow_per_hour=float(link_service[e]),
-            empty_flow_per_hour=float(link_empty[e]),
-            total_flow_per_hour=float(link_service[e] + link_empty[e]),
-            fee_per_hour=float(net["fees"][e]),
-            flight_minutes=60 * float(data["flight_times"][u, v]),
-        )
-        for e, (u, v) in enumerate(net["uv"])
-    ]
-    summary = dict(
-        name=data.get("name", "path model"),
-        objective=objective,
-        solver={
-            k: result.get(k)
-            for k in (
-                "method",
-                "status",
-                "gap",
-                "bound",
-                "wall",
-                "total_wall",
-                "termination_reason",
-            )
-        },
-        demand=float(demand.sum()),
-        served=total,
-        served_fraction=total / float(demand.sum()) if demand.sum() else 0.0,
-        opened=dict(
-            bases=int(np.sum(facility[:L] > 0.5)),
-            lockers=int(np.sum(facility[L : L + H] > 0.5)),
-            swaps=int(np.sum(facility[L + H :] > 0.5)),
-        ),
-        cabinet_total=float(np.sum(z @ levels)),
-        open_links=int(np.sum(airline > 0.5)),
-        used_links=int(np.sum(link_service + link_empty > 1e-6)),
+    for key, expected_value in dict(
+        served=served.sum(),
+        demand=data.demand.sum(),
         fleet=fleet,
-        fleet_occupancy=actual_occupancy,
-        fleet_slack=fleet - actual_occupancy,
-        service_flow_by_base_pair=service_ll,
-        empty_flow_by_base_pair=empty_ll,
-        cross_base_service=float(total - np.trace(service_ll)),
-        empty_flow=float(empty_ll.sum()),
-        min_joint_reliability=min_reliability,
-        time_averages_minutes={
-            k: 60 * float(v.sum()) / total if total else None
-            for k, v in weighted.items()
-        },
-        direct_postfetch_average_minutes=(
-            60 * float(direct @ served) / total if total else None
+        opening_cost=sum(costs[k] for k in ("bases", "lockers", "links")),
+        continuous_cost=sum(
+            costs[k] for k in ("fleet", "service", "repositioning", "direct_courier")
         ),
-        observed_postfetch_average_minutes=(
-            60
-            * float(observed[np.isfinite(observed)] @ served[np.isfinite(observed)])
-            / float(served[np.isfinite(observed)].sum())
-            if served[np.isfinite(observed)].sum() > 0
-            else None
-        ),
-        terminal_dispatch_minutes=60 * float(data.get("terminal_dispatch_time", 0.0)),
-        model_parameters={
-            k: data.get(k)
-            for k in (
-                "epsilon",
-                "battery_time",
-                "rider_time_family",
-                "hover_cost",
-                "drone_time_cost",
+    ).items():
+        if result.get(key) is not None:
+            check("reported_" + key, abs(_scalar(result[key], key) - expected_value))
+    if result.get("bound") is not None:
+        bound = _scalar(result["bound"], "bound")
+        check("bound_above_incumbent", bound - objective)
+        if result.get("gap") is not None:
+            expected_gap = max(0.0, saved_objective - bound) / max(
+                1.0, abs(saved_objective)
             )
-        },
-        site_cost_parameters={key: data.get(key, 0.0) for _, key, _, _ in site_specs},
-        terminal_calibration=data.get("provenance", {}).get(
-            "calibration", data.get("terminal_calibration", {})
+            check("reported_gap", abs(_scalar(result["gap"], "gap") - expected_gap))
+    passed = max(errors.values(), default=0) <= tolerance and not physical_errors
+    capacities = (data.slot_counts * z).sum(axis=1)
+    tables = dict(
+        costs=[dict(component=k, cny_per_hour=float(v)) for k, v in costs.items()],
+        fleet=[
+            dict(component=k, drones=float(v))
+            for k, v in dict(
+                idle=idle.sum(),
+                service=service_time,
+                repositioning=empty_time,
+                slack=fleet - idle.sum() - service_time - empty_time,
+            ).items()
+        ],
+        bases=[
+            dict(
+                base=i,
+                opened=bool(x[i] > 0.5),
+                availability=float(rho[i]),
+                idle=float(idle[i]),
+                outflow=float(outflow[i]),
+                inflow=float(inflow[i]),
+            )
+            for i in range(bases)
+        ],
+        lockers=[
+            dict(
+                locker=i,
+                opened=bool(x[bases + i] > 0.5),
+                compartments=float(capacities[i]),
+                mean_occupancy=float(loads[i]),
+                mean_threshold=float(installed_limit[i]),
+                potential_overflow_probability=float(
+                    poisson.sf(int(round(capacities[i])), loads[i])
+                ),
+                allowed_probability=float(data.slot_epsilon[i]),
+            )
+            for i in range(h)
+        ],
+        orders=[
+            dict(
+                od=i,
+                demand_per_hour=float(data.demand[i]),
+                drone_per_hour=float(served[i]),
+                direct_per_hour=float(direct[i]),
+                first_per_hour=float(first[i]),
+                second_per_hour=float(second[i]),
+                mean_receipt_minutes=float(60 * receipt_weight[i] / served[i])
+                if served[i] > 0
+                else None,
+                deadline_minutes=float(60 * data.deadline[i]),
+            )
+            for i in range(r)
+        ],
+        pools=pool_rows,
+        paths=path_rows,
+        order_paths=order_rows,
+        links=arc_rows,
+    )
+    summary = dict(
+        model_version="consecutive",
+        flow_policy=data.flow_policy,
+        objective=objective,
+        demand=float(data.demand.sum()),
+        served=float(served.sum()),
+        direct=float(direct.sum()),
+        single_tasks=single_tasks,
+        double_tasks=double_tasks,
+        task_flights=single_tasks + double_tasks,
+        continued_orders=double_tasks,
+        empty_tasks=empty_tasks,
+        fleet=fleet,
+        slot_total=float(capacities.sum()),
+        opened=dict(
+            bases=int(np.sum(x[:bases] > 0.5)), lockers=int(np.sum(x[bases:] > 0.5))
         ),
-        checks=checks,
+        checks=dict(
+            passed=passed,
+            tolerance=tolerance,
+            residuals=errors,
+            physical_errors=physical_errors,
+        ),
     )
-    fleet_rows = [dict(component="idle", drones=float(idle.sum()))]
-    fleet_rows += [dict(component=k, drones=v) for k, v in components.items()]
-    fleet_rows.append(dict(component="fleet_slack", drones=fleet - actual_occupancy))
-    return _plain(
-        dict(
-            summary=summary,
-            tables=dict(
-                bases=bases,
-                lockers=lockers,
-                airlines=airlines,
-                od_times=od_rows,
-                paths=path_rows,
-                costs=[dict(component=k, cny_per_hour=v) for k, v in costs.items()],
-                site_costs=site_costs,
-                fleet=fleet_rows,
-            ),
-            segments=segment_rows,
-        )
-    )
+    payload = dict(summary=summary, tables=tables)
+    if passed:
+        from .detail import enrich_operations
+
+        enrich_operations(inputs, data, result, payload)
+    return payload

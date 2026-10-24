@@ -1,0 +1,431 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "tsl_2l20h50od",
+  "frozen_local_date": "2026-10-16",
+  "status": "frozen_derived_benchmark",
+  "source_instance": "outputs/tsl_h20_temporary_20261015/instance",
+  "dimensions": {
+    "bases": 2,
+    "hubs": 20,
+    "ods": 50
+  },
+  "model": "consecutive",
+  "flow_policy": "aggregate",
+  "route_mode": "direct",
+  "max_orders_cases": [
+    1,
+    2
+  ],
+  "total_demand_per_hour": 2172.75,
+  "retained_kappa_pairs": 851,
+  "frozen_input_hashes": {
+    "input_arrays.npz": "cf2461aa994bd0e02d2fea851f9230aaf79e028b6088448250ad0cea1dbc9bbb",
+    "input_metadata.json": "216b2a3293372d162ff25f71a2d02244aa4b43bf80681adc0af12889b5f58b62"
+  },
+  "copied_files": {
+    "input_arrays.npz": {
+      "source": "outputs/tsl_h20_temporary_20261015/instance/input_arrays.npz",
+      "sha256": "cf2461aa994bd0e02d2fea851f9230aaf79e028b6088448250ad0cea1dbc9bbb",
+      "byte_identical": true
+    },
+    "input_metadata.json": {
+      "source": "outputs/tsl_h20_temporary_20261015/instance/input_metadata.json",
+      "sha256": "216b2a3293372d162ff25f71a2d02244aa4b43bf80681adc0af12889b5f58b62",
+      "byte_identical": true
+    },
+    "metadata.json": {
+      "source": "outputs/tsl_h20_temporary_20261015/instance/metadata.json",
+      "sha256": "35d9eb99ae9980b684b83d94182b6b4f26c216c74f4d7d7e13ba44d82994b13e",
+      "byte_identical": true
+    },
+    "resolved_config.json": {
+      "source": "outputs/tsl_h20_temporary_20261015/instance/resolved_config.json",
+      "sha256": "6fff11405a8308de32940fa210c38356b89294a3ca1849635147af5c2be0c90d",
+      "byte_identical": true
+    },
+    "candidate_sites.csv": {
+      "source": "outputs/tsl_h20_temporary_20261015/candidate_sites.csv",
+      "sha256": "cf8376a926cefb6d8f928a7ccf7c37f081e40778bae35cfcb0c25fc83f585fa9",
+      "byte_identical": true
+    },
+    "source_instance_protocol.json": {
+      "source": "outputs/tsl_h20_temporary_20261015/instance_protocol.json",
+      "sha256": "3416a1de58a6433cdfc5eb6a4c4eca6f8c8eb9e42ac92c0b10b0e006f91dc13c",
+      "byte_identical": true
+    },
+    "source_instance_audit.json": {
+      "source": "outputs/tsl_h20_temporary_20261015/instance_audit.json",
+      "sha256": "a733d403ac4c91371d28c4f8739e1ed80f658ece1940445efb8ea4f940b1c8d2",
+      "byte_identical": true
+    }
+  },
+  "config_snapshot": {
+    "path": "configs/tsl_20h_benchmark.json",
+    "sha256": "894aeb77c271038a358bce6748c8c165cc3289ef3be8442709d1949b20cbf437",
+    "exact_replay_requires_input_without_physical_config": true
+  },
+  "protocol": {
+    "time_limit_seconds": 600,
+    "threads": 1,
+    "seed": 43,
+    "mip_gap": 0.005,
+    "column_limit": 500000,
+    "max_iterations": 100,
+    "allowed_case_difference": [
+      "max_orders",
+      "metadata recording max_orders"
+    ],
+    "fixed": [
+      "OD definitions and demand",
+      "map extent and candidate coordinates",
+      "kappa",
+      "all physical durations and paths domain",
+      "choice and cost coefficients",
+      "cabinet capacities"
+    ],
+    "prohibited_for_algorithm_comparison": [
+      "prepare/regenerate market",
+      "recluster OD",
+      "add/remove/move candidates",
+      "recompute kappa",
+      "change prices or capacity",
+      "apply physical scenario overrides"
+    ],
+    "required_reporting": [
+      "feasible incumbent",
+      "certified bound",
+      "gap",
+      "pricing_complete",
+      "catalogue_complete",
+      "termination_reason",
+      "wall time",
+      "service volume",
+      "source/input hashes"
+    ],
+    "reference_result_status": "Historical full_path results are saved references; algorithm modifications must record fresh source hashes."
+  },
+  "reference_runs": {
+    "h10_K1": {
+      "path": "outputs/tsl_parameter_comparison_20261015/runs/K1",
+      "max_orders": 1,
+      "method": "full_path",
+      "options": {
+        "method": "full_path",
+        "time_limit": 600.0,
+        "threads": 1,
+        "seed": 43,
+        "mip_gap": 0.005,
+        "column_limit": 500000,
+        "max_iterations": 100
+      },
+      "summary": {
+        "model_version": "consecutive",
+        "flow_policy": "aggregate",
+        "passed": true,
+        "objective": 11189.427456310948,
+        "bound": 11134.807511025334,
+        "gap": 0.004881388748341029,
+        "pricing_complete": true,
+        "path_scope": "direct",
+        "termination_reason": "gap_limit",
+        "served": 1277.462627183917,
+        "task_flights": 1277.4626271839165,
+        "continued_orders": 0.0,
+        "wall": 1.8252343750209548,
+        "output": "/Users/songtaowang/Documents/MLND_code/outputs/tsl_parameter_comparison_20261015/runs/K1"
+      },
+      "catalogue_complete": true,
+      "catalogue_counts": {
+        "segments": 514,
+        "service": 320,
+        "empty": 2
+      },
+      "input_hashes": {
+        "input_arrays.npz": "3e5df8b599772e2d18ba441de1863518315b544e1f6392f22ce9d63811fbdde3",
+        "input_metadata.json": "bdbf89337d985770e2bd74be72ccdf8a4775cb40d471792b02cd828b9fb0c311"
+      },
+      "evidence_hashes": {
+        "result.json": "5517a0a3ee1ac29f668d0406545090bd76ba58301ba1c82c2a0cdb8c6ec510de",
+        "summary.json": "563ee3acbfdc908b4d356738c76c592b3fbd59f07963a2f4d14070223e79bde0",
+        "manifest.json": "21ca34a282ca48e5bd1845d33fd95c00dd981f3d86c37a8dee38b78ffbd02066"
+      },
+      "is_algorithm_benchmark_reference": false,
+      "interpretation": "Feasible incumbent and certified bound for this saved solve; not a certified exact optimum."
+    },
+    "h10_K2": {
+      "path": "outputs/tsl_parameter_comparison_20261015/runs/K2",
+      "max_orders": 2,
+      "method": "full_path",
+      "options": {
+        "method": "full_path",
+        "time_limit": 600.0,
+        "threads": 1,
+        "seed": 43,
+        "mip_gap": 0.005,
+        "column_limit": 500000,
+        "max_iterations": 100
+      },
+      "summary": {
+        "model_version": "consecutive",
+        "flow_policy": "aggregate",
+        "passed": true,
+        "objective": 11072.917386119036,
+        "bound": 10873.631952896634,
+        "gap": 0.017997554417973433,
+        "pricing_complete": true,
+        "path_scope": "direct",
+        "termination_reason": "time_limit",
+        "served": 1306.036475506412,
+        "task_flights": 915.4933073671136,
+        "continued_orders": 390.54316813929887,
+        "wall": 601.6420637079864,
+        "output": "/Users/songtaowang/Documents/MLND_code/outputs/tsl_parameter_comparison_20261015/runs/K2"
+      },
+      "catalogue_complete": true,
+      "catalogue_counts": {
+        "segments": 514,
+        "service": 4746,
+        "empty": 2
+      },
+      "input_hashes": {
+        "input_arrays.npz": "3e5df8b599772e2d18ba441de1863518315b544e1f6392f22ce9d63811fbdde3",
+        "input_metadata.json": "2b546b38cfbdc23b87f850c85c7179da819b7871492ea6435d4f3d79f703cccc"
+      },
+      "evidence_hashes": {
+        "result.json": "a270ba53eac8d64220719575f51504b501c9c4a9785bd4128362b438d2d94727",
+        "summary.json": "893c6ae83116bc1591dc322d5e752ceaca39156b2b7c019e4ceef60b45f20000",
+        "manifest.json": "f718239fbed22482179a733a09d5e0a82b9867fcbc3812a05d3f1b347f394d5d"
+      },
+      "is_algorithm_benchmark_reference": false,
+      "interpretation": "Feasible incumbent and certified bound for this saved solve; not a certified exact optimum."
+    },
+    "h20_K1": {
+      "path": "outputs/tsl_h20_temporary_20261015/runs/K1",
+      "max_orders": 1,
+      "method": "full_path",
+      "options": {
+        "method": "full_path",
+        "time_limit": 600.0,
+        "threads": 1,
+        "seed": 43,
+        "mip_gap": 0.005,
+        "column_limit": 500000,
+        "max_iterations": 100
+      },
+      "summary": {
+        "model_version": "consecutive",
+        "flow_policy": "aggregate",
+        "passed": true,
+        "objective": 9975.777995699167,
+        "bound": 9925.913612019607,
+        "gap": 0.004998545847858472,
+        "pricing_complete": true,
+        "path_scope": "direct",
+        "termination_reason": "gap_limit",
+        "served": 1782.2615702031853,
+        "task_flights": 1782.261570203185,
+        "continued_orders": 0.0,
+        "wall": 7.0061464169994,
+        "output": "/Users/songtaowang/Documents/MLND_code/outputs/tsl_h20_temporary_20261015/runs/K1"
+      },
+      "catalogue_complete": true,
+      "catalogue_counts": {
+        "segments": 1722,
+        "service": 1101,
+        "empty": 2
+      },
+      "input_hashes": {
+        "input_arrays.npz": "cf2461aa994bd0e02d2fea851f9230aaf79e028b6088448250ad0cea1dbc9bbb",
+        "input_metadata.json": "ac5da4e7409aeade713352d3b444a430341f0215cfc3e28c2ef2a630e4f5fb9e"
+      },
+      "evidence_hashes": {
+        "result.json": "e692cd065d154e02b11397c3e90cd198439aaa063832fc53a88aec2b9f31723c",
+        "summary.json": "c5743f5f9174bd3a6d2adedef8803560e19113f8c50a0afec51ca5377367e6ca",
+        "manifest.json": "72271e835529140b29bb548d94910ab665672bad4aeed5fc157c2c997fbb5ce7"
+      },
+      "is_algorithm_benchmark_reference": true,
+      "interpretation": "Feasible incumbent and certified bound for this saved solve; not a certified exact optimum."
+    },
+    "h20_K2": {
+      "path": "outputs/tsl_h20_temporary_20261015/runs/K2",
+      "max_orders": 2,
+      "method": "full_path",
+      "options": {
+        "method": "full_path",
+        "time_limit": 600.0,
+        "threads": 1,
+        "seed": 43,
+        "mip_gap": 0.005,
+        "column_limit": 500000,
+        "max_iterations": 100
+      },
+      "summary": {
+        "model_version": "consecutive",
+        "flow_policy": "aggregate",
+        "passed": true,
+        "objective": 12281.735634108287,
+        "bound": 9514.167124773645,
+        "gap": 0.2253401792535474,
+        "pricing_complete": true,
+        "path_scope": "direct",
+        "termination_reason": "time_limit",
+        "served": 310.6847893015546,
+        "task_flights": 215.78122665488314,
+        "continued_orders": 94.90356264667142,
+        "wall": 611.1069598750328,
+        "output": "/Users/songtaowang/Documents/MLND_code/outputs/tsl_h20_temporary_20261015/runs/K2"
+      },
+      "catalogue_complete": true,
+      "catalogue_counts": {
+        "segments": 1718,
+        "service": 36264,
+        "empty": 2
+      },
+      "input_hashes": {
+        "input_arrays.npz": "cf2461aa994bd0e02d2fea851f9230aaf79e028b6088448250ad0cea1dbc9bbb",
+        "input_metadata.json": "05c44e3d9d4e318f8ae9fec9b68591474437f3e11c4b7d845fd1302f02e9668e"
+      },
+      "evidence_hashes": {
+        "result.json": "de4350ec4db1add7a6873ddebf5c7ca567a9f43cea16a1980cb6c41af558127e",
+        "summary.json": "e53e46477d87023dd9d615c69a25904deb94a9a613e0a0bbb967e4a0fe4820f8",
+        "manifest.json": "d1aad6c59d524e44d56017e2e3b8a08091c7de671d0c471a6ec3dbdb3df74509"
+      },
+      "is_algorithm_benchmark_reference": true,
+      "interpretation": "Feasible incumbent and certified bound for this saved solve; not a certified exact optimum."
+    }
+  },
+  "verification": {
+    "passed": true,
+    "copies_byte_identical": true,
+    "all_physical_fields_equal_source_and_both_saved_cases": true,
+    "field_checks": {
+      "source": {
+        "n_l": true,
+        "n_h": true,
+        "delta": true,
+        "operating_limit": true,
+        "fleet_cost": true,
+        "flight_cost": true,
+        "waiting_cost": true,
+        "name": true,
+        "candidate_routes": true,
+        "route_mode": true,
+        "flow_policy": true,
+        "model_version": true,
+        "od_pairs": true,
+        "n_od": true,
+        "demand": true,
+        "flight_times": true,
+        "rider_mean": true,
+        "first_cost": true,
+        "terminal_cost": true,
+        "receipt_mean": true,
+        "removal_mean": true,
+        "ground_cost": true,
+        "deadline": true,
+        "base_cost": true,
+        "slot_counts": true,
+        "slot_cost": true,
+        "slot_epsilon": true,
+        "link_cost": true,
+        "kappa": true,
+        "allowed_links": true,
+        "bases": true,
+        "hubs": true,
+        "origins": true,
+        "destinations": true,
+        "od_origin": true,
+        "od_destination": true,
+        "pickup_share": true,
+        "last_rider_cost": true,
+        "last_rider_mean": true
+      },
+      "K1": {
+        "n_l": true,
+        "n_h": true,
+        "delta": true,
+        "operating_limit": true,
+        "fleet_cost": true,
+        "flight_cost": true,
+        "waiting_cost": true,
+        "name": true,
+        "candidate_routes": true,
+        "route_mode": true,
+        "flow_policy": true,
+        "model_version": true,
+        "od_pairs": true,
+        "n_od": true,
+        "demand": true,
+        "flight_times": true,
+        "rider_mean": true,
+        "first_cost": true,
+        "terminal_cost": true,
+        "receipt_mean": true,
+        "removal_mean": true,
+        "ground_cost": true,
+        "deadline": true,
+        "base_cost": true,
+        "slot_counts": true,
+        "slot_cost": true,
+        "slot_epsilon": true,
+        "link_cost": true,
+        "kappa": true,
+        "allowed_links": true,
+        "bases": true,
+        "hubs": true,
+        "origins": true,
+        "destinations": true,
+        "od_origin": true,
+        "od_destination": true,
+        "pickup_share": true,
+        "last_rider_cost": true,
+        "last_rider_mean": true
+      },
+      "K2": {
+        "n_l": true,
+        "n_h": true,
+        "delta": true,
+        "operating_limit": true,
+        "fleet_cost": true,
+        "flight_cost": true,
+        "waiting_cost": true,
+        "name": true,
+        "candidate_routes": true,
+        "route_mode": true,
+        "flow_policy": true,
+        "model_version": true,
+        "od_pairs": true,
+        "n_od": true,
+        "demand": true,
+        "flight_times": true,
+        "rider_mean": true,
+        "first_cost": true,
+        "terminal_cost": true,
+        "receipt_mean": true,
+        "removal_mean": true,
+        "ground_cost": true,
+        "deadline": true,
+        "base_cost": true,
+        "slot_counts": true,
+        "slot_cost": true,
+        "slot_epsilon": true,
+        "link_cost": true,
+        "kappa": true,
+        "allowed_links": true,
+        "bases": true,
+        "hubs": true,
+        "origins": true,
+        "destinations": true,
+        "od_origin": true,
+        "od_destination": true,
+        "pickup_share": true,
+        "last_rider_cost": true,
+        "last_rider_mean": true
+      }
+    },
+    "source_and_K1_and_K2_only_allowed_differences": [
+      "max_orders",
+      "metadata"
+    ]
+  }
+}

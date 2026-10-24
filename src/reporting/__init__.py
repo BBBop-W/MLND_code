@@ -1,1 +1,1 @@
-"""Saved-case reports, geographic maps, and operating composition figures."""
+"""Validated cost, workload, receipt-time and geographic reports."""

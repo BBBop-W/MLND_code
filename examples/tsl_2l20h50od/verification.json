@@ -1,0 +1,20 @@
+{
+  "schema": "consecutive-csv/1",
+  "passed": true,
+  "reference_exact_match": true,
+  "reference_files": {
+    "input_arrays.npz": "cf2461aa994bd0e02d2fea851f9230aaf79e028b6088448250ad0cea1dbc9bbb",
+    "input_metadata.json": "216b2a3293372d162ff25f71a2d02244aa4b43bf80681adc0af12889b5f58b62"
+  },
+  "snapshot_fields": 41,
+  "arrays_compared": 25,
+  "dimensions": {
+    "n_l": 2,
+    "n_h": 20,
+    "n_od": 50
+  },
+  "demand_per_hour": 2172.75,
+  "nonzero_kappa": 851,
+  "cases_change_max_orders_only": true,
+  "solver_run": false
+}

@@ -1,6 +1,5 @@
-"""Canonical instance assembly, calibration and raw-order preprocessing."""
+"""Observed market preparation and the consecutive planning contract."""
 
-from .instances import configure, load_instance
-from .choice import pickup_probability
+from .instances import load_instance, load_saved, to_planning_data, pack_planning_data
 
-__all__ = ["configure", "load_instance", "pickup_probability"]
+__all__ = ["load_instance", "load_saved", "to_planning_data", "pack_planning_data"]

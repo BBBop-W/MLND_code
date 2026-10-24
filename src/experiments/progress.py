@@ -2,10 +2,12 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import signal
 import shutil
+import time
 
-from .storage import write_json, save_solution
+from .storage import write_json, save_solution, json_payload
 
 
 def utc_now():
@@ -19,6 +21,8 @@ class RunMonitor:
         self.count = 0
         self.handlers = {}
         self.stage = "benders"
+        self._next_stop_poll = float("-inf")
+        self.started = time.perf_counter()
 
     def __enter__(self):
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -34,17 +38,32 @@ class RunMonitor:
         self.requested = True
 
     def stop_requested(self):
-        return (
-            self.requested
-            or (self.output / "STOP").exists()
-            or (self.output.parent / "STOP").exists()
-        )
+        # Solver/model-building callbacks can call this millions of times.
+        # Signals remain immediate; file polling has at most 50 ms latency.
+        # Once observed, a stop remains active even if its file is removed.
+        if self.requested:
+            return True
+        now = time.monotonic()
+        if now < self._next_stop_poll:
+            return False
+        self._next_stop_poll = now + 0.05
+        file_requested = (self.output / "STOP").exists() or (
+            self.output.parent / "STOP"
+        ).exists()
+        if file_requested:
+            self.requested = True
+        return self.requested
 
     def progress(self, record):
-        write_json(
-            self.output / "progress.json",
-            {"utc": utc_now(), "stage": self.stage, **record},
-        )
+        event = {
+            "utc": utc_now(),
+            "elapsed": time.perf_counter() - self.started,
+            "stage": self.stage,
+            **record,
+        }
+        write_json(self.output / "progress.json", event)
+        with (self.output / "progress.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(json_payload(event), allow_nan=False) + "\n")
 
     def checkpoint(self, result):
         if result.get("_solution") is None:

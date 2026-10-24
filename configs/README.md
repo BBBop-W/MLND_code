@@ -1,100 +1,110 @@
-# Model parameters
+# Consecutive-delivery scenario inputs
 
-`default.json` is the production baseline. Every experiment loads this file,
-then deep-merges a partial JSON configuration or explicit overrides. Unknown
-keys and invalid units/ranges are rejected. No previous result directory is
-used as a parameter source.
+`default.json` is the default full configuration, schema 2, model `consecutive`.
+Partial JSON configurations merge into it; unknown keys fail immediately.
+The current default loads the frozen real TSL market with 2 base candidates,
+10 locker-site candidates and 50 aggregate ODs, without resampling or demand scaling.
+Future parameter comparisons use only its K=1 and K=2 cases, with `full_path`;
+the capacity-alignment change itself does not run optimization.
+Algorithm experiments instead replay the fixed `data/benchmarks/tsl_2l20h50od`
+input using `--input` without a physical `--config`. `tsl_20h_benchmark.json` is
+its parameter/provenance snapshot; passing that full snapshot as an override
+would rebuild physical inputs and re-screen compatibility. The benchmark README
+provides exact replay and independent input-hash verification commands.
+An explicit `hubs` argument instead loads the canonical CSV candidate family;
+`data.demand_hubs` controls the fixed OD market independently of facilities.
 
-- `data`: canonical instance family, processed calibration manifest, demand multiplier.
-- `depreciation`: 5 years, 365 operating days per year, 12 operating hours per day.
-- `costs`: fixed investment in CNY, plus operating and courier costs.
-- `operations`: capacities, travel/handling times, reliability and rider-time family.
-- `choice`: destination-locker pickup utility and maximum pickup distance.
-- `solver`: time limit, threads, random seed, optional MIP tolerances and iteration limit.
+The default is an explicit planning scenario, not an empirical calibration of
+consecutive acceptance: distance-compatible OD pairs are proposed before physical screening,
+the acceptance window is 0.5 minutes, and each physical cabinet contains 8 compartments.
+At each locker site, install 1–5 cabinets (8/16/24/32/40 compartments) or do not open
+the site (zero cabinets). The five choices are alternative total capacities, not
+five independent increments that can be combined. Site investment is charged once.
+`compatibility.mode` accepts `all`, `none`, `distance`, or `matrix`. Distance mode
+uses the first customer's location to the next merchant; it is a stated spatial
+rule, not an estimated probability. Matrix mode requires an OD-by-OD matrix in
+[0, 1]. `max_orders: 1` sets the model's effective acceptance window to zero.
 
-Fixed investments are the **equivalent capital corresponding to the latest
-validated hourly coefficients**, including the rounding used in that experiment.
-They are not new purchase-price estimates. Each is divided by the depreciation
-operating hours (21,900 by default):
+`compatibility.require_feasible_path` defaults to true: retain a proposed pair
+only when a complete feasible double-order route exists in the fixed candidate
+network. Retained fractional coefficients are unchanged. Screening uses K=2
+physics for both K comparisons and records support per base pair. It does not
+promise feasibility under every subsequent facility/base-pair choice. Saved
+snapshots replay without screening unless explicitly requested.
 
-| Asset | Equivalent investment | Hourly coefficient |
-|---|---:|---:|
-| Base equipment | 459,900 CNY/base | 21.00 |
-| Cabinet equipment | 275,940 CNY/cabinet | 12.60 |
-| Swap equipment | 98,550 CNY/station | 4.50 |
-| Drone | 197,100 CNY/drone | 9.00 |
-| Directed route | 11,333.25 CNY/km | 0.5175 |
-| Base / locker site setup, each | 20,000 CNY/site | 0.913242 |
-| Swap site setup | 10,000 CNY/site | 0.456621 |
+`flow_policy` defaults to `aggregate`, the requested relaxation: reconstructed
+single and ordered-pair task totals still equal their fixed rates times common
+base availability, but their first routes may differ by full task type. `prefix`
+retains the attachment's per-first-route branch proportions. This is a route
+information relaxation, not proof of an online policy. A policy-only override
+preserves all physical arrays and the saved compatibility matrix. Old snapshots
+without this field use `prefix`.
 
-Site setup is charged once per location; cabinet equipment is charged per unit.
-Changing depreciation updates all fixed hourly coefficients consistently.
-`flight_per_hour` and `hover_per_hour` are operating CNY/drone-hour. A null
-hover cost uses the flight operating rate. Courier fares are CNY/order and
-CNY/road-kilometer; the road-distance factor is applied before the included
-kilometers are deducted. First/last-mile fares use `feeder_rider_multiplier`.
+All configuration times are minutes; model arrays use hours. Ground-cost and
+feeder-tariff arrays from saved inputs are retained when available, including
+cluster-mean nonlinear courier tariffs. Infrastructure, flight and waiting costs
+come from the explicit scenario. Investment is divided by the product of the
+three depreciation factors. Locker site cost is charged once through the selected
+capacity level; compartment investment is charged per physical slot.
 
-Model durations are in hours. Configuration action times are in minutes.
-Null `rider_minutes_per_km` and `terminal_dispatch_minutes` use the stored fits.
-The rider slope controls first/last-mile travel; the historical OD delivery
-benchmark remains separately calibrated. `deadline_multiplier` changes the
-service deadline without changing the matched courier benchmark.
+The current depreciation factors already equal 5 years × 365 days/year × 12
+operating hours/day = 21,900 operating hours. Do not depreciate an hourly cost again.
+The user-specified equipment prices are 40,000 CNY per 8-slot cabinet and
+50,000 CNY per drone. The per-compartment input is therefore 5,000 CNY; cabinet
+equipment depreciates to 1.826484 CNY/hour and a drone to 2.283105 CNY/hour.
+The retained 20,000 CNY site investment is charged once per open locker site.
+Other infrastructure investments remain inherited model-equivalent values.
+The current full parameter inventory and five-year cost conversion are in
+`outputs/tsl_parameter_review_20261015/PARAMETERS.md`.
 
-Example partial sensitivity configuration:
+When a future solve is requested, use `python main.py compare --method full_path
+--out outputs/NEW_TSL_COMPARISON` to apply the current defaults to both K cases.
+An explicit old `--input` without `--config configs/default.json` deliberately
+replays its old saved capacities; old experiment artifacts remain unchanged.
 
-```json
-{
-  "name": "capacity_90_percent",
-  "operations": {"cabinet_capacity": 27.36},
-  "solver": {"time_limit": 1800, "threads": 4}
-}
-```
+Terminal removal and final receipt are independent inputs:
 
-```python
-from src.config import load_config
-from src.data import load_instance
+- Self pickup defaults to 5 minutes to removal and 5 minutes to receipt.
+- Courier removal defaults to 2 minutes. A null courier receipt value means this
+  removal delay plus calibrated locker-to-customer travel, an explicit assumption.
+- Setting `courier_receipt_minutes` provides a separate total receipt mean.
+- Receipt before removal is rejected. No historical removal time is relabeled as
+  receipt time. Both terminal modes are mixed with the fixed pickup probability.
 
-config = load_config("configs/default.json", overrides={"solver": {"seed": 43}})
-data = load_instance(120, config)
-```
+Choice uses `beta0 - beta_distance * distance_difference_km - beta_time *
+time_difference_minutes - beta_price * price_difference_cny - beta_walk *
+walking_distance`. Attribute differences mean self pickup minus home delivery.
+The default time difference (-10 minutes), price difference (-1 CNY), zero distance
+coefficient and walking factor 1 are explicit scenario assumptions. Attributes
+may be scalar or broadcastable OD-by-locker arrays. Probability is zero outside
+`max_walk_km`; the boundary itself is included.
 
-`solver.column_limit` (default 500,000) stops full-path enumeration before an
-oversized model is built. `solver.graph_limit` (default 1,000,000) similarly
-limits state-graph arcs for the direct arc formulation. A null value disables
-that guard. These guards do not silently remove paths or arcs. Pricing backend
-and acceleration defaults belong to the five method profiles in
-`src/solvers/methods.py`; all methods use the same model parameters.
+A null `rider_minutes_per_km` reads the saved or verified calibration slope.
+Its exponential distribution is a working assumption; only the mean is fitted.
+A null `deadline_minutes` reads the saved/verified per-OD post-fetch benchmark;
+`deadline_multiplier` applies explicitly. Missing evidence raises an error.
 
-## Keep demand independent of candidate counts
+`route_mode: direct` fixes each leg to a direct flight. `simple` permits simple
+L/H-network routes; it can be much larger. Saved `candidate_routes`, when present,
+define the supplied route set exactly. The default operating-time limit is
+10 minutes of mean complete flight-plus-waiting time, from departure from a base
+through the final return to a base, including all pickup waits. A double-order
+task shares this one limit across both orders. Customer pickup or final courier
+delivery after drone deposit, pre-dispatch idle time, and recharge time are not
+part of this duration. There is no explicit battery capacity, state of charge,
+or power/energy chance constraint; the mean-duration cap is only a time-based
+endurance proxy, not a guarantee that every realized mission finishes within
+10 minutes. There are no E facilities or swapping operations.
 
-The default is `data.demand_hubs: 120`. All candidate sizes use the complete
-H120 demand market, its OD coordinates/order, rider costs and OD delivery-time
-calibration: 11,427 OD pairs and 8,196.7143 orders/hour. `--hubs` selects the
-candidate facilities only. An OD outside the candidate-site extent remains in
-the objective, with direct-rider service for any demand not served by drones.
+Every converted input saves the complete resolved configuration, source hashes,
+and field-specific source/assumption notes. A new-model snapshot replays exactly
+with `load_saved(path)` or a solver-only override. Physical overrides merge over
+the saved resolved scenario, preserving other choices; changing only `max_orders`
+keeps every physical coefficient unchanged. Without saved scenario metadata,
+physical updates require a complete explicit configuration. Demand and deadline
+multipliers are reapplied to their original values exactly once.
 
-```json
-{"data": {"demand_hubs": 120, "demand_scale": 1.0}}
-```
-
-Set `demand_hubs` to another available size (e.g. 24) to fix a different market
-for every candidate size. Set it explicitly to `null` to use each candidate
-instance's own geographic crop and demand; `configs/geographic.json` provides
-that historical mode. `demand_scale` changes volumes without changing OD pairs.
-
-```sh
-python main.py audit-demand --hubs 11 24 43 68 87 120
-python main.py audit-demand --config configs/geographic.json
-```
-
-These commands load and compare data without optimization. Batch runs audit
-fixed demand before solving, then check each case against the same fingerprint.
-The check includes OD identities, coordinates, volumes, rider baseline costs
-and delivery benchmarks; matching only the total number of orders is not enough.
-Demand source, counts, baseline cost and fingerprint are recorded in saved runs.
-
-The existing candidate sets were reclustered separately within different
-geographic crops; their L/E counts and locations also vary. Fixing demand does
-not make these facility sets nested or turn them into an experiment that changes
-only H while holding all other candidates fixed. Historical input files and
-saved-run replay retain their original demand definitions.
+`prepare_orders` writes only to a new output directory (normally
+`outputs/prepared/...`), with independent `n_l`, `n_h` and `n_od`. It preserves raw
+order multiplicities, aggregates joint 4D OD tuples, reports clustering distortion,
+and rejects writes into original data or manuscript directories.
