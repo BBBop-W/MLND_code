@@ -1,8 +1,12 @@
 # MLND consecutive delivery network
 
+当前工作分支为 `codex/k1-algorithm`，后续算法开发和对照实验限定 K=1，显式传入 `--k 1` / `--max-orders 1`。连续接单需求预处理及首段一致性原型完整保存在 `codex/generalized-demand-20261026`（`cfa7841`）；本分支从已验证的 K=1 三下标基线 `da5591f` 建立，保留公共求解器及已有报告接口。
+
+优先阅读 [K=1 算法入口与历史试验索引](docs/k1_algorithm_history_20261026.md)。C++ 本分支使用独立目录构建：`make -C cpp -j2 BUILD_DIR=build-k1`，运行 `cpp/build-k1/mlnd_cpp`，避免误用其他分支留在 `cpp/build/` 中的二进制。标准实例默认可能为 K=2，不能省略 K 参数。
+
 本项目的模型标识为 `consecutive`，研究基地、柜点、航线、订单分配和无人机运营流量的联合规划。Python / Gurobi 与 C++ / CPLEX 使用共同的物理路径、时间、柜格和闭排队网络口径。
 
-本分支 `codex/k1-origin-assignment` 仅调整 **K=1 的订单分配**：每个 OD 最多指定一个出发基地，返回基地由运营路径选择。同一 OD 可以通过不同路径返回不同基地，所有基地仍满足无人机流量平衡。K=2 保留 OD 到出发—返回基地对的分配、既有连续接单需求重构及 `aggregate` / `prefix` 规则。公式、旧新模型的关系和兼容边界见 [K=1 起点分配说明](docs/k1_origin_assignment.md)。
+本分支继承 `codex/k1-origin-assignment` 的 **K=1 订单分配**：每个 OD 最多指定一个出发基地，返回基地由运营路径选择。同一 OD 可以通过不同路径返回不同基地，所有基地仍满足无人机流量平衡。保留的 K=2 公共实现使用 OD 到出发—返回基地对的分配、既有连续接单需求重构及 `aggregate` / `prefix` 规则。公式、旧新模型的关系和兼容边界见 [K=1 起点分配说明](docs/k1_origin_assignment.md)。
 
 | 模式 | 二元分配 | 路径的物理端点 | 对照含义 |
 |---|---|---|---|
@@ -30,13 +34,13 @@ python -m ruff check src tests main.py
 ## 运行与复查
 
 ```sh
-python main.py run --method benders_cg --seconds 120 --out outputs/new_run
+python main.py run --method benders_cg --max-orders 1 --seconds 120 --out outputs/new_run
 python main.py validate outputs/new_run
 python main.py report outputs/new_run
 python main.py status outputs/new_run
 python main.py stop outputs/new_run
 
-# 在同一市场和场景上比较连续/非连续服务
+# 历史 K=1/K=2 运营对照入口；本分支新的算法试验使用上面的 K=1 run
 python main.py compare --input outputs/new_run --seconds 120 --out outputs/comparison
 
 # 比较已经保存的多算法实验，不重新求解
@@ -58,12 +62,12 @@ Python 入口中，`full_path` 是小实例完整路径 MISOCP 基准；`benders
 
 ```sh
 python data/benchmarks/tsl_2l20h50od/verify.py
-python main.py compare --input data/benchmarks/tsl_2l20h50od \
+python main.py run --input data/benchmarks/tsl_2l20h50od --max-orders 1 \
   --method benders_cg --seconds 600 --threads 1 --seed 43 --gap 0.005 \
-  --out outputs/NEW_TSL_20H_ALGORITHM
+  --out outputs/NEW_TSL_20H_K1_ALGORITHM
 ```
 
-这一入口只回放冻结输入并切换 K；不要同时传完整物理 `--config`，以免重建参数和 κ。默认场景仍是原来的 10H 参数调整入口，20H 算法基准与其分开。原始订单和论文不参与算法修改。
+这一入口只回放冻结输入并显式使用 K=1；不要同时传完整物理 `--config`，以免重建参数和 κ。默认场景仍是原来的 10H 参数调整入口，20H 算法基准与其分开。原始订单和论文不参与算法修改。
 
 Python 参考实现的定价在完整有限目录上扫描；C++ 使用精确服务阶段标号 CG，仅预处理首段/分支支持，完整路径按需动态生成；贪心初始列、证书与输出定义见 [隐式 CG 框架](docs/implicit_cg.md)。K=1 不保留零续单窗口的冗余递推变量，并采用本分支的起点需求池。K=2 的 aggregate 策略下，同一基地对和第一 OD 的需求递推变量按组共享，保留逐首段实际流量关联；递推变量精简的证明和松弛边界见算法说明。Python 的目录、时间或构模规模超限会返回有效的全骑手基线及明确停止原因，不会把截断目录当成完整模型。报告需同时读取 incumbent、bound、gap、pricing_complete、path_scope 和 termination_reason。
 
