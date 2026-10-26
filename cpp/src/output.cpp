@@ -144,12 +144,20 @@ Json package(const Input& data, const PathCollection& paths, Json solution) {
     const double demand = std::accumulate(data.demand.begin(), data.demand.end(), 0.0);
     const double served = std::accumulate(m.served.begin(), m.served.end(), 0.0);
     const Json totals = metric_json(data, solution, m);
-    return {{"assignment_scope", data.assignment_scope()}, {"model_version", data.model_version}, {"flow_policy", data.flow_policy},
+    Json result={{"assignment_scope", data.assignment_scope()}, {"model_version", data.model_version}, {"flow_policy", data.flow_policy},
             {"objective", m.opening() + m.continuous()}, {"continuous_cost", m.continuous()},
             {"opening_cost", m.opening()}, {"demand", demand}, {"served", served},
             {"fleet", solution.at("fleet")}, {"metrics", totals},
             {"_solution", std::move(solution)}, {"_segments", paths.initial_segments},
             {"_missions", std::move(missions)}, {"_relocations", std::move(relocations)}};
+    if(data.preprocessed_demand) {
+        result["demand_formulation"]="preprocessed";
+        result["preprocessed_demand"]=data.preprocessed_demand_report;
+        result["first_leg_consistency"]=data.first_leg_consistency;
+        if(data.first_leg_consistency)
+            result["first_leg_consistency_diagnostics"]=data.first_leg_support_report;
+    }
+    return result;
 }
 
 void json_file(const std::filesystem::path& path, const Json& data, int indent = 2) {
@@ -315,7 +323,12 @@ void write_result(const std::filesystem::path& directory, const Input& data,
     json_file(directory / "path_flows.json", {{"segments", result.at("_segments")},
               {"missions", result.at("_missions")}, {"relocations", result.at("_relocations")}}, -1);
     json_file(directory / "input_reference.json", {{"instance_path", data.instance_path.string()},
-              {"manifest", data.manifest}, {"model", data.model_json}, {"max_orders", data.max_orders}});
+              {"manifest", data.manifest}, {"model", data.model_json}, {"max_orders", data.max_orders},
+              {"assignment_scope",data.assignment_scope()},
+              {"first_leg_consistency",data.first_leg_consistency},
+              {"demand_formulation",result.value("demand_formulation",std::string("lifted"))}});
+    if(data.preprocessed_demand && !data.preprocessed_demand_report.is_null())
+        json_file(directory / "preprocessed_demand.json",data.preprocessed_demand_report);
     const Metrics m = metrics(data, paths, solution);
     const Json totals = metric_json(data, solution, m);
     json_file(directory / "metrics.json", totals);

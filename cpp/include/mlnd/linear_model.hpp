@@ -47,6 +47,9 @@ struct SolverOptions {
     // Integer recourse only: exact fixed-assignment elimination and gated
     // dual cuts. Free/fractional strengthening retains the lifted model.
     bool conditional_demand = false;
+    // Fixed generalized-task reconstruction, shared by full-path and Benders.
+    bool preprocessed_demand = false;
+    bool first_leg_consistency = false;
     // Joint convexification of the integer design/operating model. Disabled
     // by default so frozen baseline experiments remain reproducible.
     bool assignment_incident_clique = false, shared_rho_joint = false;

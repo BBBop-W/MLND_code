@@ -31,6 +31,34 @@ bool eligible_loaded_occurrence(const Input& d,int r,int i,int j) {
     return loaded<=d.operating_limit+1e-12 &&
         loaded+d.receipt_mean(r,j)<=d.deadline[r]+1e-12;
 }
+
+// Bound served occurrences of raw OD r departing from l. In the generalized
+// task model, an occurrence can be the head r or the second order of another
+// head h. Only the head owns a departure assignment. In particular, an AA
+// task contributes twice: once in head_rates[A], once in pair_rates(A,A).
+Coefficients occurrence_assignment_supply(const Input& d,const DesignLayout& layout,int group) {
+    if (!d.preprocessed_demand)
+        return {{layout.assignment+group,d.demand.at(group/d.assignment_pool_count())}};
+    if (d.head_rates.size()!=static_cast<std::size_t>(d.n_od) ||
+        d.pair_rates.values.size()!=static_cast<std::size_t>(d.n_od*d.n_od))
+        throw std::invalid_argument("Generalized occurrence bounds need fixed head and pair rates");
+    const int r=group/d.n_l,l=group%d.n_l;
+    Coefficients supply;
+    for (int h=0;h<d.n_od;++h) {
+        const double rate=d.pair_rates(h,r)+(h==r?d.head_rates[r]:0.0);
+        if (!std::isfinite(rate) || rate<0)
+            throw std::invalid_argument("Generalized occurrence supplies must be finite and nonnegative");
+        if (rate>0) supply.emplace_back(layout.assignment_index(h,l),rate);
+    }
+    return supply;
+}
+
+Coefficients scaled_supply(const Coefficients& supply,double scale) {
+    Coefficients result;
+    for (auto [j,c]:supply) if (c>0 && scale>0)
+        result.emplace_back(j,upper_nonnegative(c*scale));
+    return result;
+}
 }
 
 AnalyticalMasterBounds analytical_master_bounds(const Input& d) {
@@ -102,10 +130,12 @@ Json add_master_strengthening(const Input& d, const PathCollection& paths, Formu
     const std::size_t old_variables = m.variables.size(), old_rows = m.rows.size();
     const double margin = 1e-8 * (1 + bounds.courier_cost);
     Coefficients assignments{{theta, 1}};
-    for (std::size_t j = 0; j < bounds.unit_saving.size(); ++j)
-        if (bounds.unit_saving[j] > 0)
-            assignments.emplace_back(master.layout.assignment + j,
-                                     d.demand[j / d.assignment_pool_count()] * bounds.unit_saving[j]);
+    std::map<int,double> savings;
+    for (std::size_t g = 0; g < bounds.unit_saving.size(); ++g)
+        if (bounds.unit_saving[g] > 0)
+            for (auto [j,c]:occurrence_assignment_supply(d,master.layout,g))
+                savings[j]+=c*bounds.unit_saving[g];
+    for (auto [j,c]:savings) assignments.emplace_back(j,upper_nonnegative(c));
     m.row("analytical_courier_savings_bound", 'G', bounds.courier_cost - margin, std::move(assignments));
 
     // For every task p, saving(p)<=sum_r n_rp*alpha_rb and
@@ -123,6 +153,7 @@ Json add_master_strengthening(const Input& d, const PathCollection& paths, Formu
     return {{"enabled", true}, {"source", "input_only_direct_flight_cost_and_resource_allocations"},
             {"catalogue_complete", paths.complete}, {"requires_path_catalogue", false},
             {"master_form", "design_binaries_plus_operating_cost"}, {"resource_bounds", resource_bounds},
+            {"assignment_supply_scope",d.preprocessed_demand?"generalized_order_occurrences":"own_od_assignment"},
             {"locker_cut_enabled", capacity_cut},
             {"locker_cut_reason", capacity_cut ? "analytically_valid_over_entire_path_domain" :
                  (resource_bounds ? "positive_savings_with_zero_slot_lower_bound" : "disabled")},
@@ -188,10 +219,10 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
     }
     total_savings = upper_nonnegative(total_savings);
     for (int g = 0; g < G; ++g) {
-        const int r = g / d.assignment_pool_count(), assignment = layout.assignment+g;
-        if (alpha[g] > 0) out.arcs.push_back({out.source,1+g,0,{{assignment,upper_nonnegative(d.demand[r]*alpha[g])}}});
+        const auto supply=occurrence_assignment_supply(d,layout,g);
+        if (alpha[g] > 0) out.arcs.push_back({out.source,1+g,0,scaled_supply(supply,alpha[g])});
         for (int j = 0; j < H; ++j) if (out.unit_saving[g*H+j] > 0)
-            out.arcs.push_back({1+g,1+G+j,0,{{assignment,upper_nonnegative(d.demand[r]*out.unit_saving[g*H+j])}}});
+            out.arcs.push_back({1+g,1+G+j,0,scaled_supply(supply,out.unit_saving[g*H+j])});
     }
     for (int j = 0; j < H; ++j) {
         CapacitySavingsArc arc{1+G+j,out.sink,zero_load[j] ? total_savings : 0,{}};
@@ -203,6 +234,7 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
     }
     out.metadata = {{"enabled",true},{"source","input_only_occurrence_delivery_relaxation"},
         {"requires_path_catalogue",false},{"nodes",out.nodes},{"arcs",out.arcs.size()},
+        {"assignment_supply_scope",d.preprocessed_demand?"generalized_order_occurrences":"own_od_assignment"},
         {"zero_load_lockers",std::count(zero_load.begin(),zero_load.end(),true)},
         {"zero_load_sink_constant",total_savings},{"numerical_margin",out.numerical_margin}};
     return out;
@@ -301,7 +333,7 @@ ResourceSavingsModel resource_savings_model(const Input& d,const CapacitySavings
     const int od_delivery=od_return+d.n_od*L;
     out.group_rhs.resize(G); out.locker_rhs.resize(H);
     for (int g=0;g<G;++g) {
-        out.group_rhs[g].emplace_back(layout.assignment+g,d.demand[g/d.assignment_pool_count()]);
+        out.group_rhs[g]=occurrence_assignment_supply(d,layout,g);
         for (int j=0;j<H;++j) {
             const int k=g*H+j;
             if (allocations.eligible[k] && allocations.unit_saving[k]>0) {
@@ -371,6 +403,7 @@ ResourceSavingsModel resource_savings_model(const Input& d,const CapacitySavings
     out.metadata={{"enabled",true},{"source","input_only_weighted_occurrence_lp_dual"},
         {"requires_path_catalogue",false},{"master_added_variables",0},
         {"assignment_scope",d.assignment_scope()},{"return_gate_applied",!d.origin_assignment()},
+        {"assignment_supply_scope",d.preprocessed_demand?"generalized_order_occurrences":"own_od_assignment"},
         {"groups",G},{"lockers",H},{"occurrences",out.occurrences.size()},
         {"airline_bounds",airline_bounds},{"tight_airline_bounds",tight_airline_bounds},{"airline_resource_rows",out.airline_rhs.size()},
         {"aggregate_airline_resource_rows",aggregate_rows},

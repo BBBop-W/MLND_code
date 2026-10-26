@@ -1,5 +1,6 @@
 #include "mlnd/benders.hpp"
 #include "mlnd/output.hpp"
+#include "mlnd/preprocessed_demand.hpp"
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -29,6 +30,10 @@ int main(int argc,char** argv) {
         if(method=="full_path") return "fixed_design";
         return method=="benders_cg"?"fixed_design_cg":"fixed_design_benders_full";
     };
+    auto demand_formulation=[&]() -> std::string {
+        return options.preprocessed_demand ? "preprocessed" :
+            options.conditional_demand ? "conditional" : "lifted";
+    };
     auto compact_result=[](const Json& source) {
         Json compact=Json::object();
         for(auto it=source.begin();it!=source.end();++it)
@@ -55,7 +60,7 @@ int main(int argc,char** argv) {
             result["any_model_constructed"]=options.progress->summary().at("solver_models_built").get<std::size_t>()>0;
             result["preprocessing_complete"]=preprocessing_complete;
             result["failed_during_construction"]=stage=="model_record_construction"||stage=="cplex_model_construction"||
-                stage=="cplex_column_insertion"||stage=="path_enumeration"||stage=="path_support";
+                stage=="cplex_column_insertion"||stage=="path_enumeration"||stage=="path_support"||stage=="demand_preprocessing";
             result["construction_complete"]=result.at("any_model_constructed").get<bool>()&&
                 !result.at("failed_during_construction").get<bool>();
             result["support_complete"]=paths.support_complete;
@@ -67,8 +72,8 @@ int main(int argc,char** argv) {
             if(!result.contains("bound")) result["bound"]=nullptr;
             if(!result.contains("gap")) result["gap"]=nullptr;
             result["input_read_seconds"]=read_seconds;
-            result["support_preprocessing_seconds"]=method=="benders_cg"?preprocessing_seconds:0.0;
-            result["enumeration_seconds"]=method=="benders_cg"?0.0:preprocessing_seconds;
+            result["support_preprocessing_seconds"]=method=="benders_cg"&&!options.preprocessed_demand?preprocessing_seconds:0.0;
+            result["enumeration_seconds"]=method=="benders_cg"&&!options.preprocessed_demand?0.0:preprocessing_seconds;
             result["failed_phase_seconds"]=details.contains("pipeline_stage")?Json(nullptr):
                 Json(stage_started>0?wall_time()-stage_started:0);
             result["wall_before_output"]=wall_time()-started;
@@ -128,10 +133,12 @@ int main(int argc,char** argv) {
             else if(key=="--method") method=argument();
             else if(key=="--demand-formulation") {
                 const auto value=argument();
-                if(value!="lifted" && value!="conditional")
-                    throw std::invalid_argument("--demand-formulation expects lifted or conditional");
+                if(value!="lifted" && value!="conditional" && value!="preprocessed")
+                    throw std::invalid_argument("--demand-formulation expects lifted, conditional, or preprocessed");
                 options.conditional_demand=value=="conditional";
+                options.preprocessed_demand=value=="preprocessed";
             }
+            else if(key=="--first-leg-consistency") options.first_leg_consistency=true;
             else if(key=="--tight-airline-bounds") options.tight_airline_bounds=true;
             else if(key=="--structural-strengthening") {
                 options.assignment_incident_clique=options.shared_rho_joint=options.queue_perspective=true;
@@ -251,7 +258,7 @@ int main(int argc,char** argv) {
             else if(key=="--help") {
                 std::cout<<"mlnd_cpp --input INSTANCE --k 1|2 --out NEW_DIRECTORY "
                            "[--method full_path|benders_cg|benders_full] [--seconds 600] "
-                           "[--demand-formulation lifted|conditional] "
+                           "[--demand-formulation lifted|conditional|preprocessed] [--first-leg-consistency] "
                            "[--structural-strengthening] [--assignment-incident-clique] [--shared-rho-joint] [--queue-perspective] "
                            "[--tight-airline-bounds] [--topology-cuts] [--topology-seconds 2] [--topology-cut-limit 1000] "
                            "[--od-airline-bounds] "
@@ -285,6 +292,8 @@ int main(int argc,char** argv) {
             throw std::invalid_argument("Unsupported method");
         if(options.conditional_demand && method=="full_path")
             throw std::invalid_argument("Conditional demand is an integer-recourse Benders mode; full_path remains lifted");
+        if(options.first_leg_consistency && !options.preprocessed_demand)
+            throw std::invalid_argument("--first-leg-consistency requires --demand-formulation preprocessed");
         if(!std::isfinite(options.seconds)||options.seconds<=0||!std::isfinite(options.gap)||options.gap<0
            ||options.threads<1||options.max_iterations<1||options.cg_max_columns<1
            ||!std::isfinite(options.cg_duality_tolerance)||options.cg_duality_tolerance<=0
@@ -318,7 +327,8 @@ int main(int argc,char** argv) {
             if(std::filesystem::exists(options.output/"result.json") || std::filesystem::exists(options.output/"progress.jsonl"))
                 throw std::invalid_argument("Output already contains a run; use a new directory");
             metadata={{"solver","CPLEX"},{"engine","cpp"},{"requested_method",method},{"method",result_method()},
-                {"demand_formulation",options.conditional_demand?"conditional":"lifted"},
+                {"demand_formulation",demand_formulation()},
+                {"first_leg_consistency",options.first_leg_consistency},
                 {"structural_strengthening",{{"assignment_incident_clique",options.assignment_incident_clique},
                     {"shared_rho_joint",options.shared_rho_joint},{"queue_perspective",options.queue_perspective}}},
                 {"od_airline_bounds",options.od_airline_bounds},
@@ -339,9 +349,15 @@ int main(int argc,char** argv) {
         }
         stage="input_read"; stage_started=wall_time();
         data=read_input(input,k); have_input=true;
+        data.first_leg_consistency=options.first_leg_consistency;
+        if(options.preprocessed_demand) {
+            if((data.max_orders!=1 && data.max_orders!=2) || data.flow_policy!="aggregate")
+                throw std::invalid_argument("Preprocessed demand requires --k 1 or --k 2 and aggregate flow policy");
+            data.preprocessed_demand=true;
+        }
         metadata["assignment_scope"]=data.assignment_scope();
         if (data.origin_assignment() && (options.assignment_support_cuts || options.double_support_cuts || options.joint_base_cost_cuts))
-            throw std::invalid_argument("K=1 origin assignment requires disabling --assignment-support-cuts, --double-support-cuts, and --joint-base-cost-cuts");
+            throw std::invalid_argument("Origin assignment requires disabling legacy base-pair assignment-support, double-support, and joint-base-cost cuts");
         read_seconds=wall_time()-stage_started;
         Json summary={{"assignment_scope",data.assignment_scope()},{"assignment_variables",data.assignment_count()},{"name",data.name},{"max_orders",data.max_orders},{"n_l",data.n_l},
                       {"n_h",data.n_h},{"n_od",data.n_od},{"input_read_seconds",read_seconds}};
@@ -360,11 +376,16 @@ int main(int argc,char** argv) {
             auto baseline=all_courier_result(data,paths);
             baseline["construction_complete"]=false; baseline["support_complete"]=false;
             baseline["catalogue_complete"]=false; baseline["solved"]=false;
+            baseline["generated_columns"]={{"service",0},{"empty",0}};
+            baseline["generated_columns_scope"]="before_model_construction";
             baseline["feasibility_basis"]="all_courier_construction";
             baseline["max_orders"]=data.max_orders; baseline["name"]=data.name;
             options.progress->checkpoint(baseline,"before_preprocessing");
         }
-        const bool implicit_paths=method=="benders_cg";
+        // The fixed task rates use minimum physical route costs and common
+        // departure support. Enumerate their full domain once; Benders-CG
+        // still inserts only selected columns into each recourse model.
+        const bool implicit_paths=method=="benders_cg" && !options.preprocessed_demand;
         stage=implicit_paths?"path_support":"path_enumeration"; stage_started=wall_time();
         options.progress->guard(stage);
         options.progress->record({{"event","phase_start"},{"stage",stage}});
@@ -375,6 +396,18 @@ int main(int argc,char** argv) {
             ?prepare_path_support(data,options.progress->remaining(),{},path_progress)
             :enumerate_paths(data,path_column_limit==0?std::nullopt:std::optional<std::size_t>(path_column_limit),
                              options.progress->remaining(),{},path_progress);
+        if(options.preprocessed_demand) {
+            options.progress->guard("demand_preprocessing");
+            const double demand_started=wall_time();
+            preprocess_generalized_demand(data,paths);
+            data.preprocessed_demand_report["seconds"]=wall_time()-demand_started;
+            if(data.first_leg_consistency)
+                data.first_leg_support_report=first_leg_support(data,paths);
+            options.progress->record({{"event","demand_preprocessed"},{"stage","demand_preprocessing"},
+                {"seconds",data.preprocessed_demand_report.at("seconds")},
+                {"accepted_pairs",data.preprocessed_demand_report.at("accepted_pairs")},
+                {"max_conservation_error",data.preprocessed_demand_report.at("max_conservation_error")}});
+        }
         preprocessing_seconds=wall_time()-stage_started;
         preprocessing_complete=true;
         options.progress->record({{"event","phase_end"},{"stage",stage},{"seconds",preprocessing_seconds},
@@ -406,7 +439,7 @@ int main(int argc,char** argv) {
         stage="output_finalization"; stage_started=wall_time();
         synchronize_result_paths(data,paths,result);
         result["solver"]="CPLEX";
-        result["demand_formulation"]=options.conditional_demand?"conditional":"lifted";
+        result["demand_formulation"]=demand_formulation();
         result["tight_airline_bounds"]=options.tight_airline_bounds;
         result["od_airline_bounds"]=options.od_airline_bounds;
         { IloEnv env; IloCplex probe(env); result["solver_version"]=probe.getVersion(); env.end(); }
@@ -439,9 +472,15 @@ int main(int argc,char** argv) {
         result["input_manifest_sha256"]=sha256_file(input/"manifest.json");
         result["catalogue"]={{"segments",paths.initial_segments.size()},{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
         result["path_storage"]=implicit_paths?"generated_columns_only":"complete_catalogue";
+        result["pricing_domain"]=options.preprocessed_demand && method=="benders_cg"
+            ? "complete_preprocessing_catalogue_with_exact_label_pricing"
+            : implicit_paths ? "implicit_complete_physical_domain" : "complete_catalogue";
         result["catalogue_complete"]=paths.complete;
         result["support_complete"]=paths.support_complete;
-        result["generated_columns"]={{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
+        if(!result.contains("generated_columns")) {
+            result["generated_columns"]={{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
+            result["generated_columns_scope"]=method=="full_path"?"full_path_model":"registered_generated_catalogue";
+        }
         result["input_read_seconds"]=read_seconds;
         result["support_preprocessing_seconds"]=implicit_paths?preprocessing_seconds:0.0;
         result["enumeration_seconds"]=implicit_paths?0.0:preprocessing_seconds;

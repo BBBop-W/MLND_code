@@ -9,6 +9,7 @@
 #include "mlnd/heuristics.hpp"
 #include "mlnd/dual_workspace.hpp"
 #include "mlnd/conditional_cut.hpp"
+#include "mlnd/preprocessed_demand.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -513,7 +514,7 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
     while (remaining(deadline) > 0) {
         ++result.iterations;
         Json iteration = {{"iteration", result.iterations}, {"service_columns", f.service_indices.size()},
-                          {"demand_formulation",conditional?"conditional":"lifted"},
+                          {"demand_formulation",d.preprocessed_demand?"preprocessed":conditional?"conditional":"lifted"},
                           {"structural_strengthening",f.strengthening_metadata},
                           {"empty_columns", f.empty_indices.size()}, {"certified", false},
                           {"model_size",{{"variables",f.matrix.variables.size()},{"linear_rows",f.matrix.rows.size()},
@@ -1017,11 +1018,38 @@ std::vector<double> initial_design(const Input& d, const PathCollection& paths) 
         int index = d.assignment_offset(p.first_od,p.b[0],p.b[1]);
         gains[index] = std::max(gains[index], d.ground_cost[p.first_od] - cost);
     }
+    if (d.preprocessed_demand) {
+        // Score the whole fixed collection of tasks headed by r. An incoming
+        // second order need not have its own assignment at this departure.
+        std::map<std::array<int,3>,double> costs;
+        for (const auto& p:paths.service_paths) {
+            const double cost=p.cost+d.fleet_cost*p.time+
+                (p.b[0]==p.b[1]?0:reposition[p.b[1]*d.n_l+p.b[0]]);
+            const std::array<int,3> key{p.first_od,p.b[0],p.second_od};
+            auto [it,added]=costs.emplace(key,cost);
+            if(!added) it->second=std::min(it->second,cost);
+        }
+        std::fill(gains.begin(),gains.end(),0);
+        for(int r=0;r<d.n_od;++r) for(int l=0;l<d.n_l;++l) {
+            if(d.head_rates[r]<=0 || !d.common_origin_support(r,l)) continue;
+            double saving=0; bool supported=true;
+            auto add=[&](int s,double rate) {
+                if(rate<=0) return;
+                const auto it=costs.find({r,l,s});
+                if(it==costs.end() || !std::isfinite(it->second)) { supported=false; return; }
+                saving+=rate*(d.ground_cost[r]+(s<0?0:d.ground_cost[s])-it->second);
+            };
+            add(-1,d.single_rates[r]);
+            for(int s=0;s<d.n_od;++s) add(s,d.pair_rates(r,s));
+            if(supported) gains[d.assignment_offset(r,l)]=std::max(0.0,saving)/d.head_rates[r];
+        }
+    }
     std::vector<int> order(gains.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [&](int a, int b) {
         int ar = a / d.assignment_pool_count(), br = b / d.assignment_pool_count();
-        double sa = gains[a] * d.demand[ar], sb = gains[b] * d.demand[br];
+        double sa = gains[a] * (d.preprocessed_demand?d.head_rates[ar]:d.demand[ar]),
+               sb = gains[b] * (d.preprocessed_demand?d.head_rates[br]:d.demand[br]);
         return std::make_tuple(-sa, -d.demand[ar], a) < std::make_tuple(-sb, -d.demand[br], b);
     });
     std::vector<bool> assigned(d.n_od, false);
@@ -1040,6 +1068,23 @@ std::vector<double> initial_design(const Input& d, const PathCollection& paths) 
         prefixes[{s.b[0],s.b[1],s.first_od}].push_back(s.id);
     std::vector<std::vector<int>> pools(d.assignment_pool_count());
     auto supported = [&](int l,int b,int first,const std::vector<int>& pool) {
+        if(d.preprocessed_demand) {
+            if(!d.common_origin_support(first,l)) return false;
+            if(!d.first_leg_consistency) return true;
+            // The optional physical first-leg consistency policy requires
+            // all positive branches to share one first-delivery route.
+            std::map<std::vector<int>,std::set<int>> grouped;
+            for(const auto& p:paths.service_paths)
+                if(p.b[0]==l && p.first_od==first)
+                    grouped[first_leg_key(paths.initial_segments[p.segment_id])].insert(p.second_od);
+            for(const auto& [key,available]:grouped) {
+                bool complete=d.single_rates[first]<=0 || available.count(-1);
+                for(int s=0;s<d.n_od;++s)
+                    if(d.pair_rates(first,s)>0 && !available.count(s)) complete=false;
+                if(complete) return true;
+            }
+            return false;
+        }
         if (d.effective_delta()<=0) return true;
         if (d.flow_policy=="aggregate") {
             if (!branches.count({l,b,first,-1})) return false;
@@ -1058,7 +1103,7 @@ std::vector<double> initial_design(const Input& d, const PathCollection& paths) 
     };
     for (int index : order) {
         int r = index / d.assignment_pool_count();
-        if (assigned[r] || gains[index] <= 0 || d.demand[r] <= 0) continue;
+        if (assigned[r] || gains[index] <= 0 || (d.preprocessed_demand?d.head_rates[r]:d.demand[r]) <= 0) continue;
         const int pair=index%d.assignment_pool_count(),l=pair/d.assignment_destinations(),
             b=d.origin_assignment() ? 0 : pair%d.n_l;
         auto trial=pools[pair]; trial.push_back(r);
@@ -1293,6 +1338,8 @@ Json continuous_cg_result(const Input& d, PathCollection& paths, const SolverOpt
                 result["cg_iterations"] = sub.iterations;
                 result["service_columns"] = sub.service.size();
                 result["empty_columns"] = sub.empty.size();
+                result["_service_indices"] = sub.service;
+                result["_empty_indices"] = sub.empty;
                 result["timings"] = sub.timings;
                 result["primal_residuals"] = sub.continuous_residuals;
                 result["operating_point"] = sub.continuous_operating_point;
@@ -1340,8 +1387,11 @@ Json continuous_cg_result(const Input& d, PathCollection& paths, const SolverOpt
     double accounted = 0;
     for (const auto& seconds : result.at("timings")) accounted += seconds.get<double>();
     result["timings"]["other_and_interrupted"] = std::max(0.0, result.at("algorithm_wall").get<double>() - accounted);
-    result["generated_service_paths"] = paths.service_paths.size();
-    result["generated_empty_paths"] = paths.empty_paths.size();
+    result["registered_service_paths"] = paths.service_paths.size();
+    result["registered_empty_paths"] = paths.empty_paths.size();
+    result["generated_service_paths"] = d.preprocessed_demand ? result.value("service_columns",std::size_t(0)) : paths.service_paths.size();
+    result["generated_empty_paths"] = d.preprocessed_demand ? result.value("empty_columns",std::size_t(0)) : paths.empty_paths.size();
+    result["generated_columns_scope"] = d.preprocessed_demand ? "continuous_recourse_rmp" : "registered_generated_catalogue";
     result["catalogue_complete"] = paths.complete;
     if (options.progress) options.progress->record({{"event","continuous_cg_finished"},
         {"bound_scope",result.at("scope")},{"bound_valid",result.at("bound_valid")},
@@ -1393,6 +1443,8 @@ Json solve_fixed_design_cg(const Input& d, PathCollection& paths, const SolverOp
     result["cg_trace"] = sub.trace;
     result["service_columns"] = sub.service.size();
     result["empty_columns"] = sub.empty.size();
+    result["generated_columns"] = {{"service",sub.service.size()},{"empty",sub.empty.size()}};
+    result["generated_columns_scope"] = "fixed_design_recourse_rmp";
     result["pricing_method"] = options.column_generation ? "exact_resource_labeling" : "all_columns";
     result["cg_max_columns"] = options.cg_max_columns;
     result["pricing_tolerance"] = options.pricing_tolerance;
@@ -1401,7 +1453,7 @@ Json solve_fixed_design_cg(const Input& d, PathCollection& paths, const SolverOp
     result["timings"] = sub.timings;
     result["timings"]["greedy_initial_columns"] = seeds.metadata.at("seconds");
     result["algorithm_wall"] = wall_time() - started;
-    result["demand_formulation"] = options.conditional_demand ? "conditional" : "lifted";
+    result["demand_formulation"] = d.preprocessed_demand ? "preprocessed" : options.conditional_demand ? "conditional" : "lifted";
     result["structural_strengthening"] = structural_metadata(options);
     result["subproblem_model_size"] = sub.model_size;
     result["subproblem_model_size_peak"] = sub.model_size;
@@ -1463,6 +1515,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     const double master_build = wall_time() - started - seeds.metadata.at("seconds").get<double>();
     std::vector<double> core = initial_core(d), original_core = core;
     std::set<int> pool_p(seeds.service.begin(),seeds.service.end()), pool_e(seeds.empty.begin(),seeds.empty.end());
+    std::set<int> used_p=pool_p,used_e=pool_e;
     int cuts = 0, ordinary_count = 0, pareto_count = 0, auxiliary_count = 0, pareto_attempts = 0, cg_iterations = 0;
     int conditional_cuts = 0, conditional_subproblems = 0;
     std::set<std::string> assignment_patterns;
@@ -1569,6 +1622,11 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             snapshot["branch_joint_summary"]=branch_joint_summary();
             snapshot["support_complete"]=paths.support_complete;
             snapshot["catalogue_complete"]=paths.complete;
+            snapshot["generated_columns"]={{"service",d.preprocessed_demand?used_p.size():paths.service_paths.size()},
+                {"empty",d.preprocessed_demand?used_e.size():paths.empty_paths.size()}};
+            snapshot["generated_columns_scope"]=d.preprocessed_demand?
+                "completed_recourse_column_union_including_continuous_root":"registered_generated_catalogue";
+            snapshot["reusable_columns"]={{"service",pool_p.size()},{"empty",pool_e.size()}};
             options.progress->checkpoint(snapshot,stage);
         }
     };
@@ -1702,6 +1760,8 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             timing["subproblem"][it.key()] = timing["subproblem"].value(it.key(), 0.0) + it.value().get<double>();
         cg_iterations += sub.iterations;
         (heuristic ? heuristic_cg_iterations : ordinary_cg_iterations) += sub.iterations;
+        used_p.insert(sub.service.begin(),sub.service.end());
+        used_e.insert(sub.empty.begin(),sub.empty.end());
         if (options.reuse_columns) {
             pool_p.insert(sub.service.begin(), sub.service.end());
             pool_e.insert(sub.empty.begin(), sub.empty.end());
@@ -1851,10 +1911,26 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         continuous_root["enabled"] = true;
         continuous_root["allocated_seconds"] = continuous_options.seconds;
         add_time(timing, "continuous_root", phase);
-        // These are physical columns shared by the same formulation. Reusing
-        // them does not fix any fractional design or confer integer feasibility.
-        for (std::size_t j = 0; j < paths.service_paths.size(); ++j) pool_p.insert(static_cast<int>(j));
-        for (std::size_t j = 0; j < paths.empty_paths.size(); ++j) pool_e.insert(static_cast<int>(j));
+        // A preprocessed catalogue contains all physical paths, not just the
+        // columns generated by the continuous RMP. Reuse its actual indices.
+        const auto root_service=continuous_root.value("_service_indices",std::vector<int>{});
+        const auto root_empty=continuous_root.value("_empty_indices",std::vector<int>{});
+        used_p.insert(root_service.begin(),root_service.end());
+        used_e.insert(root_empty.begin(),root_empty.end());
+        if(d.preprocessed_demand) {
+            if(options.reuse_columns) {
+                pool_p.insert(root_service.begin(),root_service.end());
+                pool_e.insert(root_empty.begin(),root_empty.end());
+            }
+        } else {
+            for(std::size_t j=0;j<paths.service_paths.size();++j)pool_p.insert(static_cast<int>(j));
+            for(std::size_t j=0;j<paths.empty_paths.size();++j)pool_e.insert(static_cast<int>(j));
+        }
+        continuous_root["reused_service_columns"]=d.preprocessed_demand ? (options.reuse_columns?root_service.size():0) : paths.service_paths.size();
+        continuous_root["reused_empty_columns"]=d.preprocessed_demand ? (options.reuse_columns?root_empty.size():0) : paths.empty_paths.size();
+        continuous_root["reuse_scope"]=d.preprocessed_demand?"continuous_root_rmp_columns":"registered_generated_catalogue";
+        continuous_root.erase("_service_indices");
+        continuous_root.erase("_empty_indices");
         if (continuous_root.value("bound_valid", false)) {
             const double bound = continuous_root.at("certified_lower_bound").get<double>();
             // Q includes only operational cost; this is a TOTAL-cost lower
@@ -2412,6 +2488,11 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["catalogue_complete"] = paths.complete;
     best["support_complete"] = paths.support_complete;
     best["construction_complete"] = paths.support_complete;
+    best["generated_columns"]={{"service",d.preprocessed_demand?used_p.size():paths.service_paths.size()},
+        {"empty",d.preprocessed_demand?used_e.size():paths.empty_paths.size()}};
+    best["generated_columns_scope"]=d.preprocessed_demand?
+        "completed_recourse_column_union_including_continuous_root":"registered_generated_catalogue";
+    best["reusable_columns"]={{"service",pool_p.size()},{"empty",pool_e.size()}};
     best["initial_columns"] = seeds.metadata;
     best["initial_service_columns"] = seeds.service.size();
     best["initial_empty_columns"] = seeds.empty.size();
@@ -2486,11 +2567,13 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["subproblem_model_size"]=subproblem_size;
     best["subproblem_model_size_peak"]=subproblem_peak;
     best["subproblem_model_size_scope"]="integer_recourse_including_heuristic_designs_excluding_fractional_root";
-    best["demand_formulation"]=options.conditional_demand?"conditional":"lifted";
+    best["demand_formulation"]=d.preprocessed_demand?"preprocessed":options.conditional_demand?"conditional":"lifted";
     best["structural_strengthening"]=structural_metadata(options);
     best["tight_airline_bounds"]=options.tight_airline_bounds;
-    best["demand_formulation_scope"]={{"integer_recourse",options.conditional_demand?"conditional":"lifted"},
-        {"fractional_recourse","lifted"},{"continuous_root","lifted"},{"restricted_mip","lifted"},
+    best["demand_formulation_scope"]={{"integer_recourse",d.preprocessed_demand?"preprocessed":options.conditional_demand?"conditional":"lifted"},
+        {"fractional_recourse",d.preprocessed_demand?"preprocessed":"lifted"},
+        {"continuous_root",d.preprocessed_demand?"preprocessed":"lifted"},
+        {"restricted_mip",d.preprocessed_demand?"preprocessed":"lifted"},
         {"pareto_core",options.conditional_demand?"fixed_assignment_face":"global_design_domain"}};
     best["timings"] = timing;
     best["timings"]["topology_separation"] = topology_seconds;

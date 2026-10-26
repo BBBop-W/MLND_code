@@ -1,4 +1,5 @@
 #include "mlnd/formulation.hpp"
+#include "mlnd/preprocessed_demand.hpp"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -119,6 +120,14 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         throw std::invalid_argument("Tight airline bounds require the direct K<=2 path domain");
     if (conditional_demand && (!fixed || relax_fixed_design))
         throw std::invalid_argument("Conditional demand requires an integer fixed design");
+    if(d.first_leg_consistency && !d.preprocessed_demand)
+        throw std::invalid_argument("First-leg consistency requires preprocessed demand");
+    if (d.preprocessed_demand && (conditional_demand || (d.max_orders != 1 && d.max_orders != 2) ||
+        d.flow_policy != "aggregate" || !paths.complete ||
+        d.single_rates.size() != static_cast<std::size_t>(d.n_od) ||
+        d.head_rates.size() != static_cast<std::size_t>(d.n_od) ||
+        d.pair_rates.rows != d.n_od || d.pair_rates.cols != d.n_od))
+        throw std::invalid_argument("Invalid or incomplete preprocessed demand configuration");
     auto f = design_model(d, fixed == nullptr, strengthening);
     f.conditional_demand = conditional_demand;
     f.tight_airline_bounds = tight_airline_bounds;
@@ -192,11 +201,13 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
                 (d.demand[r] * (*fixed)[a(r,l,b)] / pool_rate[pool]);
         return std::exp(-d.effective_delta() * pool_rate[pool]) + pool_q[pool] * incompatible_share;
     };
-    std::map<std::tuple<int,int,int>,int> groups;
+    std::map<std::vector<int>,int> groups;
     for (int j = 0; j < S; ++j) {
         const auto& seg = paths.initial_segments[j];
         if (seg.id != j) throw std::invalid_argument("Segment IDs must be consecutive");
-        auto key = pooled ? std::make_tuple(seg.b[0],seg.b[1],seg.first_od) : std::make_tuple(j,-1,-1);
+        auto key = d.first_leg_consistency ? first_leg_key(seg)
+            : pooled ? std::vector<int>{seg.b[0],d.preprocessed_demand ? -1 : seg.b[1],seg.first_od}
+                     : std::vector<int>{j,-1,-1};
         auto [it, added] = groups.emplace(key,static_cast<int>(f.lift_groups.size()));
         if (added) f.lift_groups.emplace_back();
         f.lift_groups[it->second].push_back(j);
@@ -218,7 +229,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     for (int i : f.service_indices) f.flow[i] = m.variable(label("flow",i),0,total,paths.service_paths[i].cost);
     for (int i : f.empty_indices) f.empty_flow[i] = m.variable(label("empty_flow",i),0,total,paths.empty_paths[i].cost);
     f.eta.assign(G,-1);
-    const bool lifted = active && !conditional_demand;
+    const bool lifted = active && !conditional_demand && !d.preprocessed_demand;
     std::vector<int> u(lifted ? G*R : 0,-1), chain(lifted ? G*(R+1) : 0,-1),
         product(lifted ? G*R : 0,-1), heads(G,-1);
     for (int g = 0; g < G; ++g) {
@@ -306,20 +317,27 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
             for (int r=0;r<R;++r) row.emplace_back(u[g*R+r],d.demand[r]);
             m.row(label("eta_link",g),'E',0,std::move(row));
         }
-        Coefficients single{{heads[g],conditional_demand ? conditional_single(first,l,b) : 1}};
+        Coefficients single=d.first_leg_consistency
+            ? Coefficients{{heads[g],d.head_rates[first]>0 ? d.single_rates[first]/d.head_rates[first] : 0}}
+            : d.preprocessed_demand
+            ? Coefficients{{v[d.assignment_offset(first,l)],d.single_rates[first]}}
+            : Coefficients{{heads[g],conditional_demand ? conditional_single(first,l,b) : 1}};
         if (lifted) for (int r=0;r<R;++r) single.emplace_back(u[g*R+r],-d.kappa(first,r)*d.demand[r]);
         int row=m.row(label("single",g),'E',0,std::move(single));
         for (int j:indices) f.single_rows[j]=row;
         if (active) for (int r=0;r<R;++r) {
             row=m.row(label("double",g,r),'E',0,
-                      conditional_demand ? Coefficients{{heads[g],conditional_probability(first,r,l,b)}}
+                      d.first_leg_consistency ? Coefficients{{heads[g],d.head_rates[first]>0 ? d.pair_rates(first,r)/d.head_rates[first] : 0}}
+                      : d.preprocessed_demand ? Coefficients{{v[d.assignment_offset(first,l)],d.pair_rates(first,r)}}
+                      : conditional_demand ? Coefficients{{heads[g],conditional_probability(first,r,l,b)}}
                                          : Coefficients{{u[g*R+r],d.kappa(first,r)*d.demand[r]}});
             for (int j:indices) f.double_rows[j*R+r]=row;
         }
     }
     for (int l=0;l<L;++l) for (int b=0;b<d.assignment_destinations();++b) for (int r=0;r<R;++r) {
-        Coefficients row{{v[d.assignment_offset(r,l,b)],-d.demand[r]}};
-        // K=1 assigns only the departure base; physical return bases remain
+        Coefficients row{{v[d.assignment_offset(r,l,b)],
+            -(d.preprocessed_demand ? d.head_rates[r] : d.demand[r])}};
+        // Origin assignment selects only the departure base; return bases remain
         // in the route catalogue and the closed-network balance equations.
         std::vector<int> order_groups;
         if (d.origin_assignment()) {
@@ -328,7 +346,9 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         } else order_groups=by_pair[l*L+b];
         for (int g:order_groups) {
             const int first=paths.initial_segments[f.lift_groups[g][0]].first_od;
-            if (conditional_demand) {
+            if (d.preprocessed_demand) {
+                if(first==r) row.emplace_back(heads[g],1);
+            } else if (conditional_demand) {
                 const double coefficient = (first == r ? 1.0 : 0.0) +
                     (active ? conditional_probability(first,r,l,b) : 0.0);
                 if (coefficient != 0) row.emplace_back(heads[g],coefficient);
@@ -530,6 +550,8 @@ Json solve_full(const Input& d,const PathCollection& paths,const SolverOptions& 
         candidate["catalogue_complete"]=paths.complete;
         candidate["support_complete"]=paths.support_complete;
         candidate["pricing_complete"]=true;
+        candidate["generated_columns"]={{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
+        candidate["generated_columns_scope"]="full_path_model";
         candidate["solved"]=false;
         candidate["termination_reason"]="running_with_validated_incumbent";
         candidate["native_model_validated"]=true;
@@ -586,6 +608,8 @@ Json solve_full(const Input& d,const PathCollection& paths,const SolverOptions& 
     result["support_complete"]=paths.support_complete;
     result["pricing_complete"]=true;
     result["construction_complete"]=true;
+    result["generated_columns"]={{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
+    result["generated_columns_scope"]="full_path_model";
     result["timings"]={{"build",built},{"optimize",outcome.seconds},{"total",wall_time()-begin}};
     result["model_size"]={{"variables",f.matrix.variables.size()},{"linear_rows",f.matrix.rows.size()},{"cones",f.matrix.cones.size()}};
     result["node_count"]=outcome.nodes;

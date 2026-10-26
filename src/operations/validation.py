@@ -7,6 +7,7 @@ import math
 import numpy as np
 
 from src.model.assignment import saved_assignment_scope
+from src.model.generalized_demand import generalized_demand
 from scipy.stats import poisson
 
 from src.data.instances import to_planning_data
@@ -257,6 +258,12 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         raise ValueError("No saved incumbent to validate")
     saved_scope = saved_assignment_scope(data, result)
     origin_assignment = saved_scope == "origin"
+    preprocessed = result.get("demand_formulation") == "preprocessed"
+    first_leg_consistency = result.get("first_leg_consistency", False)
+    if not isinstance(first_leg_consistency, bool):
+        raise ValueError("first_leg_consistency must be a boolean")
+    if first_leg_consistency and not preprocessed:
+        raise ValueError("First-leg consistency requires preprocessed demand")
     bases, h, n, r = data.n_l, data.n_h, data.n_nodes, data.n_od
     shapes = dict(
         facility=(n,),
@@ -331,6 +338,10 @@ def build_operations(inputs, result, *, tolerance=5e-5):
     ) = empty_tasks = 0.0
     path_rows, order_rows, arc_rows = [], [], []
     traversal_bounds = {kind: np.zeros((n, n)) for kind in ("service", "empty")}
+    single_cost = np.full(r, np.inf)
+    double_cost = np.full((r, r), np.inf)
+    single_support = np.zeros((r, bases), dtype=bool)
+    double_support = np.zeros((r, r, bases), dtype=bool)
     for kind, records in [
         ("service", result.get("_missions", [])),
         ("empty", result.get("_relocations", [])),
@@ -378,6 +389,16 @@ def build_operations(inputs, result, *, tolerance=5e-5):
                 continue
             for (u, v), count in q["arcs"].items():
                 traversal_bounds[kind][u, v] = max(traversal_bounds[kind][u, v], count)
+            if preprocessed and kind == "service":
+                first_od, second_od = int(path["first_od"]), path.get("second_od")
+                if second_od is None:
+                    single_cost[first_od] = min(single_cost[first_od], q["cost"])
+                    single_support[first_od, q["b"][0]] = True
+                else:
+                    double_cost[first_od, second_od] = min(
+                        double_cost[first_od, second_od], q["cost"]
+                    )
+                    double_support[first_od, second_od, q["b"][0]] = True
             # Zero records still undergo structural and cached-coefficient checks.
             # Every positive flow, however small, contributes to all resources.
             if flow == 0:
@@ -443,94 +464,221 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         traversal_bounds["service"] + (bases - 1) * traversal_bounds["empty"]
     )
     check("link_activation_bound", link_load - activation * y)
-    checks_head = []
-    checks_eta = []
-    checks_single = []
-    checks_double = []
-    checks_starts = []
-    checks_order = []
-    checks_hbound = []
-    for s in segments:
-        sid = int(s["id"])
-        b = tuple(s["b"])
-        od = int(s["first_od"])
-        hv = heads[sid]
-        ev = etas[sid]
-        assigned = a[:, b[0]] if origin_assignment else a[:, b[0], b[1]]
-        lam = float(data.demand @ assigned)
-        qb = -math.expm1(-lam * data.effective_delta)
-        checks_eta.extend(
-            [
-                abs(lam * ev - qb * hv),
-                ev - data.effective_delta * hv,
-                ev - min(1, data.effective_delta * data.demand[od]),
-            ]
+    if preprocessed:
+        metadata = result.get("preprocessed_demand")
+        if not isinstance(metadata, dict):
+            raise ValueError("Preprocessed result is missing fixed-demand provenance")
+        reference = generalized_demand(
+            data.demand,
+            data.effective_delta,
+            data.kappa,
+            single_cost,
+            double_cost,
+            single_support,
+            double_support,
+            candidate_order=metadata.get("candidate_order"),
         )
-        checks_hbound.append(hv - data.demand[od])
-        targets = data.kappa[od] * data.demand * assigned * ev
-        checks_starts.append(
-            abs(branch[sid, None] + sum(branch[sid, j] for j in range(r)) - hv)
+        for key, target in (
+            ("single_rates", reference.single_rates),
+            ("pair_rates", reference.pair_rates),
+            ("head_rates", reference.head_rates),
+            ("common_origin_support", reference.common_origin_support),
+        ):
+            saved = np.asarray(metadata[key], float)
+            if saved.shape != target.shape or not np.isfinite(saved).all():
+                raise ValueError(f"Invalid preprocessed {key}")
+            check("preprocessed_" + key, np.abs(saved - target))
+        check(
+            "preprocessed_order_conservation",
+            np.abs(reference.reconstructed_orders - data.demand),
         )
-        if data.flow_policy == "prefix":
-            checks_single.append(abs(branch[sid, None] - (hv - targets.sum())))
-            checks_double.extend(abs(branch[sid, j] - targets[j]) for j in range(r))
-    pool_rows = []
-    for bl in range(bases):
-        for bm in (None,) if origin_assignment else range(bases):
-            aa = a[:, bl] if origin_assignment else a[:, bl, bm]
-            hh = data.demand * aa
-            lam = float(hh.sum())
-            qb = -math.expm1(-lam * data.effective_delta)
-            pi = hh / lam if lam else np.zeros(r)
-            theta = (
-                np.linalg.solve(np.eye(r) + qb * pi[:, None] * data.kappa.T, hh)
-                if lam
-                else hh
+        check("preprocessed_single_nonnegative", -reference.single_rates)
+        check("preprocessed_pair_nonnegative", -reference.pair_rates)
+        check("preprocessed_eta_zero", np.abs(eta))
+        v = a * rho[None, :]
+        if "v" in sol:
+            saved_v = np.asarray(sol["v"], float)
+            if saved_v.shape != v.shape or not np.isfinite(saved_v).all():
+                raise ValueError("Invalid preprocessed availability product shape")
+            check("preprocessed_availability_product", np.abs(saved_v - v))
+        check(
+            "preprocessed_supported_service",
+            reference.head_rates[:, None] * v * (~reference.common_origin_support),
+        )
+        singles = np.zeros((r, bases))
+        doubles = np.zeros((r, r, bases))
+        actual_heads = np.zeros((r, bases))
+        task_flow_errors = []
+        for segment in segments:
+            sid, od, bl = int(segment["id"]), segment["first_od"], segment["b"][0]
+            singles[od, bl] += branch[sid, None]
+            doubles[od, :, bl] += [branch[sid, j] for j in range(r)]
+            actual_heads[od, bl] += heads[sid]
+            task_flow_errors.append(
+                abs(
+                    heads[sid]
+                    - branch[sid, None]
+                    - sum(branch[sid, j] for j in range(r))
+                )
             )
-            actual_head = np.zeros(r)
-            continuation = np.zeros(r)
-            actual_single = np.zeros(r)
-            actual_double = np.zeros((r, r))
-            for s in segments:
-                if s["b"][0] == bl and (origin_assignment or s["b"][1] == bm):
-                    sid = int(s["id"])
-                    od = int(s["first_od"])
-                    actual_head[od] += heads[sid]
-                    continuation += hh * data.kappa[od] * etas[sid]
-                    actual_single[od] += branch[sid, None]
-                    actual_double[od] += [branch[sid, j] for j in range(r)]
-            checks_head.extend(np.abs(actual_head + continuation - hh * rho[bl]))
-            checks_order.extend(np.abs(actual_head - rho[bl] * theta))
-            if data.flow_policy == "aggregate":
-                # Reconstruct task rates directly from the fixed pool demand,
-                # independently of saved head/eta lifts or solver row assembly.
-                targets_double = rho[bl] * theta[:, None] * qb * data.kappa * pi
-                targets_single = rho[bl] * theta - targets_double.sum(axis=1)
-                checks_single.extend(np.abs(actual_single - targets_single))
-                checks_double.extend(np.abs(actual_double - targets_double).ravel())
+        check("first_leg_task_flow", task_flow_errors)
+        check(
+            "aggregate_single_branches",
+            np.abs(singles - reference.single_rates[:, None] * v),
+        )
+        check(
+            "aggregate_double_branches",
+            np.abs(doubles - reference.pair_rates[:, :, None] * v[:, None, :]),
+        )
+        check(
+            "task_reconstruction",
+            np.abs(actual_heads - reference.head_rates[:, None] * v),
+        )
+        if first_leg_consistency:
+            physical_groups = defaultdict(list)
+            for segment in segments:
+                key = (
+                    segment["b"][0],
+                    segment["first_od"],
+                    segment["pickup"],
+                    segment["delivery"],
+                    tuple(map(tuple, segment["legs"][:2])),
+                )
+                physical_groups[key].append(int(segment["id"]))
+            single_errors, double_errors, zero_head_errors = [], [], []
+            for key, identifiers in physical_groups.items():
+                od = key[1]
+                total_head = sum(heads[sid] for sid in identifiers)
+                first_rate = float(reference.head_rates[od])
+                if first_rate == 0:
+                    zero_head_errors.append(abs(total_head))
+                    continue
+                single_errors.append(
+                    abs(
+                        sum(branch[sid, None] for sid in identifiers)
+                        - total_head * reference.single_rates[od] / first_rate
+                    )
+                )
+                for second_od in range(r):
+                    double_errors.append(
+                        abs(
+                            sum(branch[sid, second_od] for sid in identifiers)
+                            - total_head
+                            * reference.pair_rates[od, second_od]
+                            / first_rate
+                        )
+                    )
+            check("consistent_first_leg_single_branches", single_errors)
+            check("consistent_first_leg_double_branches", double_errors)
+            check("consistent_first_leg_zero_demand", zero_head_errors)
+        adoption = v.sum(axis=1)
+        expected = reference.head_rates * adoption + reference.pair_rates.T @ adoption
+        pool_rows = []
+        for bl in range(bases):
+            offered_single = float(reference.single_rates @ a[:, bl])
+            offered_pair = float(reference.pair_rates.sum(axis=1) @ a[:, bl])
+            task_rate = offered_single + offered_pair
             pool_rows.append(
                 dict(
                     departure=bl,
-                    return_base=bm,
-                    offered_orders_per_hour=lam,
-                    continuation_probability=qb,
-                    reconstructed_tasks_per_hour=float(theta.sum()),
-                    executed_tasks_per_hour=float(actual_head.sum()),
+                    return_base=None,
+                    offered_orders_per_hour=offered_single + 2 * offered_pair,
+                    continuation_probability=offered_pair / task_rate
+                    if task_rate
+                    else 0.0,
+                    reconstructed_tasks_per_hour=task_rate,
+                    executed_tasks_per_hour=float(actual_heads[:, bl].sum()),
                 )
             )
-    check("head_upper", checks_hbound)
-    check("eta_identity_and_bounds", checks_eta)
-    check("first_leg_task_flow", checks_starts)
-    scope = "aggregate_" if data.flow_policy == "aggregate" else ""
-    check(scope + "single_branches", checks_single)
-    check(scope + "double_branches", checks_double)
-    check("first_leg_order_balance", checks_head)
-    check("task_reconstruction", checks_order)
-    expected = data.demand * (
-        np.sum(a * rho[None, :], axis=1)
-        if origin_assignment
-        else np.sum(a * rho[None, :, None], axis=(1, 2))
-    )
+    else:
+        checks_head = []
+        checks_eta = []
+        checks_single = []
+        checks_double = []
+        checks_starts = []
+        checks_order = []
+        checks_hbound = []
+        for s in segments:
+            sid = int(s["id"])
+            b = tuple(s["b"])
+            od = int(s["first_od"])
+            hv = heads[sid]
+            ev = etas[sid]
+            assigned = a[:, b[0]] if origin_assignment else a[:, b[0], b[1]]
+            lam = float(data.demand @ assigned)
+            qb = -math.expm1(-lam * data.effective_delta)
+            checks_eta.extend(
+                [
+                    abs(lam * ev - qb * hv),
+                    ev - data.effective_delta * hv,
+                    ev - min(1, data.effective_delta * data.demand[od]),
+                ]
+            )
+            checks_hbound.append(hv - data.demand[od])
+            targets = data.kappa[od] * data.demand * assigned * ev
+            checks_starts.append(
+                abs(branch[sid, None] + sum(branch[sid, j] for j in range(r)) - hv)
+            )
+            if data.flow_policy == "prefix":
+                checks_single.append(abs(branch[sid, None] - (hv - targets.sum())))
+                checks_double.extend(abs(branch[sid, j] - targets[j]) for j in range(r))
+        pool_rows = []
+        for bl in range(bases):
+            for bm in (None,) if origin_assignment else range(bases):
+                aa = a[:, bl] if origin_assignment else a[:, bl, bm]
+                hh = data.demand * aa
+                lam = float(hh.sum())
+                qb = -math.expm1(-lam * data.effective_delta)
+                pi = hh / lam if lam else np.zeros(r)
+                theta = (
+                    np.linalg.solve(np.eye(r) + qb * pi[:, None] * data.kappa.T, hh)
+                    if lam
+                    else hh
+                )
+                actual_head = np.zeros(r)
+                continuation = np.zeros(r)
+                actual_single = np.zeros(r)
+                actual_double = np.zeros((r, r))
+                for s in segments:
+                    if s["b"][0] == bl and (origin_assignment or s["b"][1] == bm):
+                        sid = int(s["id"])
+                        od = int(s["first_od"])
+                        actual_head[od] += heads[sid]
+                        continuation += hh * data.kappa[od] * etas[sid]
+                        actual_single[od] += branch[sid, None]
+                        actual_double[od] += [branch[sid, j] for j in range(r)]
+                checks_head.extend(np.abs(actual_head + continuation - hh * rho[bl]))
+                checks_order.extend(np.abs(actual_head - rho[bl] * theta))
+                if data.flow_policy == "aggregate":
+                    # Reconstruct task rates directly from the fixed pool demand,
+                    # independently of saved head/eta lifts or solver row assembly.
+                    targets_double = rho[bl] * theta[:, None] * qb * data.kappa * pi
+                    targets_single = rho[bl] * theta - targets_double.sum(axis=1)
+                    checks_single.extend(np.abs(actual_single - targets_single))
+                    checks_double.extend(np.abs(actual_double - targets_double).ravel())
+                pool_rows.append(
+                    dict(
+                        departure=bl,
+                        return_base=bm,
+                        offered_orders_per_hour=lam,
+                        continuation_probability=qb,
+                        reconstructed_tasks_per_hour=float(theta.sum()),
+                        executed_tasks_per_hour=float(actual_head.sum()),
+                    )
+                )
+        check("head_upper", checks_hbound)
+        check("eta_identity_and_bounds", checks_eta)
+        check("first_leg_task_flow", checks_starts)
+        scope = "aggregate_" if data.flow_policy == "aggregate" else ""
+        check(scope + "single_branches", checks_single)
+        check(scope + "double_branches", checks_double)
+        check("first_leg_order_balance", checks_head)
+        check("task_reconstruction", checks_order)
+        expected = data.demand * (
+            np.sum(a * rho[None, :], axis=1)
+            if origin_assignment
+            else np.sum(a * rho[None, :, None], axis=(1, 2))
+        )
     check("served_order_identity", np.abs(served - expected))
     check("served_demand", served - data.demand)
     direct = data.demand - served
@@ -638,6 +786,8 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         model_version="consecutive",
         flow_policy=data.flow_policy,
         assignment_scope=saved_scope,
+        demand_formulation=result.get("demand_formulation", "lifted"),
+        first_leg_consistency=first_leg_consistency,
         objective=objective,
         demand=float(data.demand.sum()),
         served=float(served.sum()),

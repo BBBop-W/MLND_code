@@ -1,20 +1,25 @@
 # MLND consecutive delivery network
 
-当前工作分支为 `codex/k1-algorithm`，后续算法开发和对照实验限定 K=1，显式传入 `--k 1` / `--max-orders 1`。连续接单需求预处理及首段一致性原型完整保存在 `codex/generalized-demand-20261026`（`cfa7841`）；本分支从已验证的 K=1 三下标基线 `da5591f` 建立，保留公共求解器及已有报告接口。
+当前工作分支为 `codex/unified-task-algorithm`。当前原生算法统一采用**固定广义订单需求、OD 首单到出发基地的分配**；单单与双单使用同一模型和 Benders 框架。`--k 1/2` 是兼容现有输入的任务大小开关，两种模式都必须传入 `--demand-formulation preprocessed`。单单模式的配对流量为零，原始需求保持不变。
 
-优先阅读 [K=1 算法入口与历史试验索引](docs/k1_algorithm_history_20261026.md)。C++ 本分支使用独立目录构建：`make -C cpp -j2 BUILD_DIR=build-k1`，运行 `cpp/build-k1/mlnd_cpp`，避免误用其他分支留在 `cpp/build/` 中的二进制。标准实例默认可能为 K=2，不能省略 K 参数。
+优先阅读 [统一任务算法](docs/unified_task_algorithm_20261027.md)、[加强割有效性](docs/unified_strengthening_validity.md) 和 [40 张真实地图批次说明](docs/unified_benchmark_20261027.md)。历史 K=1 基线保存在 `codex/k1-algorithm`（`4764456`），需求预处理原型保存在 `codex/generalized-demand-20261026`（`cfa7841`）；以前的算法结果见 [历史试验索引](docs/k1_algorithm_history_20261026.md)。
 
-本项目的模型标识为 `consecutive`，研究基地、柜点、航线、订单分配和无人机运营流量的联合规划。Python / Gurobi 与 C++ / CPLEX 使用共同的物理路径、时间、柜格和闭排队网络口径。
+```sh
+make -C cpp -j2 BUILD_DIR=build-unified
+cpp/build-unified/mlnd_cpp --input examples/tsl_2l20h50od \
+  --demand-formulation preprocessed --k 2 --method benders_cg \
+  --shared-rho-joint --queue-perspective --od-airline-bounds --tight-airline-bounds \
+  --topology-cuts --seconds 3600 --gap .01 --threads 1 --seed 43 \
+  --out outputs/NEW_UNIFIED_DOUBLE
+python -m src.experiments.native validate outputs/NEW_UNIFIED_DOUBLE \
+  --instance examples/tsl_2l20h50od
+```
 
-本分支继承 `codex/k1-origin-assignment` 的 **K=1 订单分配**：每个 OD 最多指定一个出发基地，返回基地由运营路径选择。同一 OD 可以通过不同路径返回不同基地，所有基地仍满足无人机流量平衡。保留的 K=2 公共实现使用 OD 到出发—返回基地对的分配、既有连续接单需求重构及 `aggregate` / `prefix` 规则。公式、旧新模型的关系和兼容边界见 [K=1 起点分配说明](docs/k1_origin_assignment.md)。
+将 `--k 2` 改为 `--k 1` 可运行单单；将方法改为 `full_path` 可运行 CPLEX 全路径基准。需求在选址之前按剩余需求逐对构造，保留所有剩余单单并逐 OD 守恒；同一首单的全部任务共用出发基地，返回基地由路径选择。默认保留聚合任务流规则，`--first-leg-consistency` 可另行要求共同首段。物理路径时间、骑手时间、柜格与闭排队网络沿用已有实现。
 
-| 模式 | 二元分配 | 路径的物理端点 | 对照含义 |
-|---|---|---|---|
-| 当前 K=1 | OD × 出发基地 | 出发基地、返回基地均保留 | 放宽同一 OD 必须返回同一基地的限制 |
-| 当前 K=2 | OD × 出发基地 × 返回基地 | 出发基地、返回基地均保留 | 沿用本分支之前的连续接单模型 |
-| 历史 K=1 | OD × 出发基地 × 返回基地 | 出发基地、返回基地均保留 | 用于历史复查，不能直接当作新 K=1 的同模型算法结果 |
+两种方法目前都在预处理时构造完整物理路径目录，以取得配对排序和共同出发支持；算法的 SOCP 中只加入所需列，并用精确定价认证。代码会记录完整目录数及实际模型列数，不能把这次实现描述成无需完整目录存储的算法。
 
-新场景默认按完整双单路径可行性筛选兼容系数，采用聚合任务流规则，保留逐首段约束作为对照。K=1 的有效续单窗口仍为零，但当前 K=1 与 K=2 **还存在分配域的差别**；比较两者时不能把所有成本差异都归因于连续接单。旧换电站模型、旧 continuation 概率能量模型和第二单转骑手分支已移除。
+**下面的 Python 求解命令和旧的 `lifted` / `conditional` 原生入口保留用于历史复查。** Python 已支持当前原生结果的独立验证和运营报告，但其 Gurobi 优化入口尚未实现固定广义订单模型；不能用它与本批次作同模型求解器比较。历史 K=2 的基地对分配、分配相关需求重构不是当前双单试验的模型。
 
 ## 安装与检查
 
@@ -50,7 +55,7 @@ python main.py compare-report outputs/benchmark/runs --out outputs/benchmark/com
 python main.py study-report outputs/consecutive_real_comparison_20261015
 ```
 
-输出目录必须是新的或空的，避免覆盖已有实验。`--input` 不带场景配置时重放保存的物理输入；本分支 `--max-orders 1` 同时采用 K=1 的起点分配域。重放输入不意味着恢复历史版本的优化模型。时间、线程、gap 等求解设置可通过命令行覆盖。
+输出目录必须是新的或空的，避免覆盖已有实验。`--input` 不带场景配置时重放保存的物理输入；Python 历史入口的 `--max-orders 1` 采用 K=1 的起点分配域。重放输入不意味着恢复历史版本的优化模型。时间、线程、gap 等求解设置可通过命令行覆盖。
 
 **输入格式要与入口对应。** `main.py run --input` / `compare --input` 读取 Python 快照，需要 `input_metadata.json` 和 `input_arrays.npz`，例如 `data/benchmarks/tsl_2l20h50od/`。`examples/tsl_2l20h50od/` 是原生 CSV/JSON 实例，包含 `model.json`、`sites.csv` 等文件，应交给 C++ 的 `--input` 或 `src.experiments.native` 的 `--instance`，不能直接传给 `main.py run --input`。
 
@@ -69,7 +74,7 @@ python main.py run --input data/benchmarks/tsl_2l20h50od --max-orders 1 \
 
 这一入口只回放冻结输入并显式使用 K=1；不要同时传完整物理 `--config`，以免重建参数和 κ。默认场景仍是原来的 10H 参数调整入口，20H 算法基准与其分开。原始订单和论文不参与算法修改。
 
-Python 参考实现的定价在完整有限目录上扫描；C++ 使用精确服务阶段标号 CG，仅预处理首段/分支支持，完整路径按需动态生成；贪心初始列、证书与输出定义见 [隐式 CG 框架](docs/implicit_cg.md)。K=1 不保留零续单窗口的冗余递推变量，并采用本分支的起点需求池。K=2 的 aggregate 策略下，同一基地对和第一 OD 的需求递推变量按组共享，保留逐首段实际流量关联；递推变量精简的证明和松弛边界见算法说明。Python 的目录、时间或构模规模超限会返回有效的全骑手基线及明确停止原因，不会把截断目录当成完整模型。报告需同时读取 incumbent、bound、gap、pricing_complete、path_scope 和 termination_reason。
+Python 历史参考实现的定价在完整有限目录上扫描；C++ 历史 lifted/conditional 入口使用精确服务阶段标号 CG，仅预处理首段/分支支持，完整路径按需动态生成；贪心初始列、证书与输出定义见 [隐式 CG 框架](docs/implicit_cg.md)。K=1 不保留零续单窗口的冗余递推变量，并采用本分支的起点需求池。K=2 的 aggregate 策略下，同一基地对和第一 OD 的需求递推变量按组共享，保留逐首段实际流量关联；递推变量精简的证明和松弛边界见算法说明。Python 的目录、时间或构模规模超限会返回有效的全骑手基线及明确停止原因，不会把截断目录当成完整模型。报告需同时读取 incumbent、bound、gap、pricing_complete、path_scope 和 termination_reason。
 
 ## C++ / CPLEX 标准实例入口
 
@@ -92,7 +97,7 @@ python -m src.experiments.native gurobi \
 
 `--k 2` 切换为双单任务；`--method benders_cg` 使用整数设计主问题、固定设计 SOCP、规范列生成、解析成本与资源割、根节点割、分支覆盖种子和受限列联合优化启发式；数学依据与预算见 [主问题加强](docs/master_strengthening.md)。构建要求、固定设计互验、开关及全部输出字段见 [C++ 使用说明](cpp/README.md)。两求解器在限时 MIP 搜索中可能得到不同可行解；模型对齐通过输入、路径、系数矩阵、固定设计及独立运营约束逐层检查。
 
-K=1 的原生输出使用 `assignment_scope="origin"`，`assignment` 与对应乘积变量的维度为 `(R,L)`。`--assignment-support-cuts`、`--double-support-cuts`、`--joint-base-cost-cuts` 的现有证书依赖固定返回基地，因此在 K=1 明确拒绝这些选项；K=2 保持原有适用范围。其他按 OD/基地对编号编写的历史诊断，也应先检查接口，而不能直接套用历史设计文件。
+当前固定任务模型的单单、双单原生输出都使用 `assignment_scope="origin"`，`assignment` 与对应乘积变量的维度为 `(R,L)`。`--assignment-support-cuts`、`--double-support-cuts`、`--joint-base-cost-cuts` 的现有证书依赖固定返回基地，因此在当前统一的出发基地分配中明确拒绝这些选项；仅在历史基地对模型中保留原有适用范围。其他按 OD/基地对编号编写的历史诊断，也应先检查接口，而不能直接套用历史设计文件。
 
 Python 新结果在 `result.json` / `manifest.json` 顶层记录 `assignment_scope`；数值解数组保持在 `solution.json` / NPZ。历史 K=1 三维解可通过独立验证和运营导出按原来的 `base_pair` 语义复查，并在摘要与 OD 分配表中标识。新固定设计和 warm start 要求当前模型的数组维度，旧三维 K=1 设计会明确拒绝，不自动转换。
 
@@ -139,7 +144,7 @@ docs/
 | 工作内容 | 权威入口 | 复用方式 |
 |---|---|---|
 | 配置、命令行与方法选择 | `src/config.py`、`src/cli.py`、`src/solvers/methods.py` | 通过现有命令入口传参数，避免在新脚本中复制默认值 |
-| 实例结构与需求重构 | `src/model/types.py`、`demand.py`、`compatibility.py` | 保留 OD、基地、柜点的 ID 顺序；K=2 重构不要在报告层重新实现 |
+| 实例结构与需求重构 | `src/model/types.py`、`generalized_demand.py`、`cpp/src/preprocessed_demand.cpp` | 固定任务在预处理构造；Python 独立复核。`demand.py` 为旧需求重构，勿混用 |
 | 路径及时间/格口资源 | `src/model/resources.py`、`paths.py` | 使用 `build_service_path`、`rebuild_path`、`enumerate_paths`；不要另写一套飞行时间或柜格占用公式 |
 | Gurobi 公共模型与增量列 | `src/solvers/formulation.py` | `add_design`、`build_model`、`path_column`、`add_path_columns` 供完整模型和 Benders 共用 |
 | Gurobi 求解、认证及加强 | `src/solvers/algorithm.py`、`dual.py`、`pareto.py`、`strengthening.py` | 方法开关走 `api.py` / `methods.py`；割必须与当前分配域及完整路径域一致 |
@@ -163,6 +168,7 @@ docs/
 | 同市场多个 Python 运行 | `python main.py compare-report RUN_PARENT --out REPORT`；`produce_comparison` | 方法表、上下界/收敛图、运营比较、网络图 |
 | 多数据集 K=1/K=2 运营研究 | `python main.py study-report STUDY_ROOT --out REPORT`；`produce_study` | 多数据集指标、逐基地/柜点/OD 明细及解释性报告；默认读取 `STUDY_ROOT/runs/{dataset}_K1`、`{dataset}_K2` |
 | 既有原生三方法比较目录 | `python -m src.reporting.native EXPERIMENT_ROOT --out REPORT`；`build_native_report` | `full_cplex`、`full_gurobi`、`benders_cplex` 下 K1/K2 的核验后比较；目录标签由模块 `RUNS` 定义 |
+| 当前 40 地图批次 | `python outputs/unified_benchmark_20261027/run.py report` | 单单/双单 × CPLEX 全路径/算法的核验后求解与运营汇总 |
 | 规模阶梯批次 | `python -m src.reporting.scale_ladder BATCH`；`build_scale_report` | 从批次 manifest、任务状态、结果和核验记录生成 `BATCH/analysis` |
 | 结构加强 / BDD 既有实验 | `src/reporting/structural_comparison.py`、`bdd.py` 与对应 `src/experiments/` 的 `report` 入口 | 使用该实验自身的协议和目录结构；勿套用不匹配的通用读取器 |
 

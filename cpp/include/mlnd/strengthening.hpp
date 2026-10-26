@@ -5,7 +5,8 @@
 namespace mlnd {
 
 // Input-only lower resource/cost allocations. Assignment-indexed vectors use
-// Input::assignment_offset: (order, departure) for K=1 and base-pair for K=2.
+// Input::assignment_offset: (order, departure) for origin assignment and
+// (order, departure, return) for the legacy base-pair formulation.
 // No generated column is used to compute an extremum.
 struct AnalyticalMasterBounds {
     std::vector<double> unit_cost, unit_saving, slot_time;
@@ -53,6 +54,8 @@ CapacitySavingsNetwork capacity_savings_network(const Input&);
 
 // External weighted occurrence relaxation; none of these variables enters the
 // design master. Group and locker supplies are nonnegative affine forms in x.
+// Fixed generalized tasks supply an OD occurrence through its own head and
+// every incoming pair, all charged to the corresponding head's assignment.
 // With u_gj >= 0, maximize sum alpha_gj*u_gj subject to group demand and
 // weighted locker load limits. Unlike monetary max-flow, this keeps each
 // occurrence's own saving and slot-time coefficient.

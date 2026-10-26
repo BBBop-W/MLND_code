@@ -64,6 +64,8 @@ od-airline-root-probe: $(BUILD_DIR)/mlnd_od_airline_root_probe
 .PHONY: structural-strengthening-probe structural-cg-cut-probe
 structural-strengthening-probe: $(BUILD_DIR)/mlnd_structural_strengthening_probe
 structural-cg-cut-probe: $(BUILD_DIR)/mlnd_structural_cg_cut_probe
+.PHONY: preprocessed-demand-probe
+preprocessed-demand-probe: $(BUILD_DIR)/mlnd_preprocessed_demand_probe
 
 $(BUILD_DIR)/mlnd_%_probe: tests/%_probe.cpp $(CORE_OBJECTS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@

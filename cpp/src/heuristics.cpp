@@ -61,7 +61,7 @@ std::vector<double> lifted_point(const Input& d, const PathCollection& paths,
         double head = 0, lambda = 0;
         for (int j : group) head += x[f.head[j]];
         if (d.flow_policy == "aggregate") put(name("group_head", g), head);
-        if (d.effective_delta() <= 0) continue;
+        if (d.effective_delta() <= 0 || d.preprocessed_demand) continue;
         for (int r = 0; r < d.n_od; ++r)
             lambda += d.demand[r] * assignment(r, segment.b[0], segment.b[1]);
         const double eta = lambda > 0 ? head * -std::expm1(-d.effective_delta() * lambda) / lambda : 0;
@@ -191,9 +191,16 @@ Json physical_residuals(const Input& d, const PathCollection& paths, const Json&
         const double courier = s.at("courier").at(r);
         check("courier_lower", -courier); equal("demand_balance", served[r] + courier, d.demand[r]);
         operating += d.ground_cost[r] * courier;
-        for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+        for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
+            double rate=d.demand[r]*assignment_value(d,s.at("assignment"),r,l,b);
+            if(d.preprocessed_demand) {
+                rate=d.head_rates[r]*assignment_value(d,s.at("assignment"),r,l);
+                for(int head=0;head<d.n_od;++head)
+                    rate+=d.pair_rates(head,r)*assignment_value(d,s.at("assignment"),head,l);
+            }
             equal("served_assignment_rho", by_pair[d.assignment_offset(r,l,b)],
-                  d.demand[r] * assignment_value(d,s.at("assignment"),r,l,b) * s.at("rho").at(l).get<double>());
+                  rate*s.at("rho").at(l).get<double>());
+        }
     }
     for (int u = 0; u < d.n_nodes(); ++u) for (int v = 0; v < d.n_nodes(); ++v) {
         const double y = s.at("airline").at(u).at(v);

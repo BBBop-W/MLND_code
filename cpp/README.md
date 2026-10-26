@@ -89,11 +89,49 @@ cpp/build/mlnd_cpp \
 
 当前原生路径枚举器支持 `route_mode="direct"` 且 `candidate_routes=null`。其他路径域会被明确拒绝，不能把被拒绝的输入解释为自动采用直接路径。模型读取原有 `flow_policy`：`aggregate` 按同一基地对及第一单 OD 汇总分支比例，`prefix` 分别约束第一程；读取器不会在两者之间转换。固定 TSL 实例采用 `aggregate`，其等价验证也采用该规则。
 
-`full_path` 将完整可行目录中的所有服务路径和空飞路径直接放入 MISOCP。`benders_full` 也使用完整目录；`benders_cg` 仅预处理首段/分支支持，以动态列池和精确标号定价求解，不预枚举完整路径。
+`full_path` 将完整可行目录中的所有服务路径和空飞路径直接放入 MISOCP。`benders_full` 也使用完整目录；`benders_cg` 使用动态列池和精确标号定价。历史 lifted/conditional 模型只预处理首段/分支支持；固定广义订单模型先枚举完整目录重构需求，再向 SOCP 加列。
 
 ## 固定设计和初始解
 
-`--fixed-design` 固定 `facility`、`capacity_level`、`assignment`、`airline` 四组 0/1 决策，然后求解连续 SOCP；支持 `full_path`、`benders_full` 和 `benders_cg`，最后一种使用隐式列生成：
+### 统一的固定广义订单模型
+
+当前统一入口使用 `--demand-formulation preprocessed`，支持 `--method full_path|benders_full|benders_cg`、`--k 1/2` 和 `aggregate`。双单模式要求二元 κ；单单模式所有配对率为零，不使用 κ。两种模式都使用 `assignment_scope="origin"`。构建请使用 `make -C cpp -j2 BUILD_DIR=build-unified`，运行 `cpp/build-unified/mlnd_cpp`。详见 [统一算法与验证](../docs/unified_task_algorithm_20261027.md) 和 [有效割说明](../docs/unified_strengthening_validity.md)。
+它在完整路径枚举后、选址优化前固定单单和有序双单任务率，并为具有同一首单 OD 的所有任务共同指定一个出发基地；返回基地仍由路径选择。
+默认 `lifted`、现有 K=1 和条件 Benders 均保持原来的定义。
+
+预处理按“两个单单的最低路径运营成本之和减去对应双单的最低路径运营成本”从大到小遍历有正节省的兼容有序 OD 对，相同分数按 OD 索引排序。
+这三个最低成本均在所有候选设施的完整路径目录上计算，仅用于外生排序，不是组合匹配的最优性证明，也不包含固定设施成本。
+给定当前剩余需求 `a`，异类双单取 `min(a[r],a[s]) * (1-exp(-a[s]*delta))`；同类双单取 `a[r]/2 * (1-exp(-a[r]*delta))`。
+每次从两类剩余需求分别扣除该任务率，同类扣除两次；最后余量成为单单任务率。
+只有在首单的单单及全部已接受双单分支仍具有共同可行出发基地时才接受该组合；不满足时保留其原始需求。
+这是残余泊松机会与有效匹配率的近似，逐 OD 的平均需求守恒由扣除规则保证。
+
+模型使用固定任务率乘 `alpha[r,l]*rho[l]` 约束对应路径流，不再构造 `eta/u/Z/Y`。
+第二单 OD 可以在自己的出发分配为空时由另一首单的任务服务；原始 OD 的无人机服务量与直接骑手量仍严格守恒。
+未通过无人机执行的双单由直接骑手完成，不隐含将该双单拆回两个独立的无人机任务。
+该模式已支持 Benders；成本、容量、资源、航线和拓扑割按当前分配语义复用。旧 assignment-support、double-support 和 joint-base-cost 三类割仍因依赖固定返回基地而拒绝启用。
+
+```sh
+cpp/build-unified/mlnd_cpp --input outputs/tsl_scale_ladder/instances/L01 --k 2 \
+  --method full_path --demand-formulation preprocessed \
+  --seconds 600 --gap 0.000001 --threads 1 --seed 43 \
+  --out outputs/NEW_PREPROCESSED_K2
+make -C cpp preprocessed-demand-probe
+cpp/build/mlnd_preprocessed_demand_probe
+```
+
+`result.json` 和单独的 `preprocessed_demand.json` 保存全部任务率、处理顺序、每次剩余需求及概率、共同基地支持、需求守恒误差。
+物理路径、柜格、机队与基地流量平衡继续复用公共构造器。
+当前单单、双单都采用出发基地分配，可以在统一分配域下比较；与历史基地对模型比较时需另行说明分配域变化。
+
+在统一模型入口上增加 `--first-leg-consistency`，可要求单单与各个双单分支具有相同的首段分布。
+首段由出发基地、首单 OD、首次取餐柜、首次收餐柜及前两段实际飞行路线定义，汇总所有可能的返回基地。
+令该物理首段的总任务流为 `H_gamma`，则其单单流为 `nu_r/H_r * H_gamma`，双单 `r,s` 的流为 `nu_rs/H_r * H_gamma`，所有首段总流仍为 `H_r * alpha[r,l] * rho[l]`。
+首段分布由规划模型在得知续单类型之前共同选择，仍可在多个首段间按比例分流；此开关不要求一个 OD 只能使用唯一首段，也不预先固定返回基地。
+没有路径支持的正需求分支会使相应首段流为零，不重新计算或删除预处理任务率。
+该开关保持原来的 `flow_policy="aggregate"` 输入及物理资源，另外输出 `first_leg_consistency` 和 `first_leg_consistency_diagnostics`，记录具有全部正需求分支支持的物理首段数量。
+
+`--fixed-design` 固定 `facility`、`capacity_level`、`assignment`、`airline` 四组 0/1 决策，然后求解连续 SOCP；支持 `full_path`、`benders_full` 和 `benders_cg`，最后一种使用列生成（固定广义订单模式需完整预处理目录）：
 
 ```sh
 cpp/build/mlnd_cpp \
@@ -181,7 +219,7 @@ Pareto 辅助对偶使用相同标号算法逐批分离遗漏路径驻点约束�
 
 `--cg-max-columns` 默认 64，只限制每轮加列量，不截断标号搜索；`--pricing-tolerance` 默认 `1e-7`，是绝对约化成本容差；`--cg-duality-tolerance` 默认 `1e-6`，乘以 `1+abs(运营成本)` 得到原始—对偶间隙容差。每轮 `cg_trace` 记录 RMP/对偶状态、目标、间隙、定价是否完整、最小约化成本、生成/扩展/支配标号数、加列数和各阶段耗时。`negative_paths`/`omitted_paths` 统计支配后被检查的完成路径，不是完整目录中所有负列/遗漏列的总数。
 
-预处理只保存首段/任务分支支持；路径由贪心或定价生成时动态登记、去重并获得稳定 ID。先生成便宜的单单/双单种子，再在限定预算内补齐单单及每个正需求、正 κ 的续单分支。`aggregate` 分支可选不同首段；`prefix` 寻找共用一个首段的完整分支包。首选首段无可行延长时继续尝试其他首段。该步骤不固定最终选址或流量，物理缺失、预算中断和资源不足也不会导致分支等式被删除。定价的负列堆受批量上限限制，后缀缓存最多 128 组。框架解释见 [隐式 CG 框架](../docs/implicit_cg.md)，本次种子与主问题加强以 [主问题加强文档](../docs/master_strengthening.md) 为准。
+历史 lifted/conditional 模型的预处理只保存首段/任务分支支持；路径由贪心或定价生成时动态登记、去重并获得稳定 ID。固定任务模型的目录边界见前文。先生成便宜的单单/双单种子，再在限定预算内补齐单单及每个正需求、正 κ 的续单分支。`aggregate` 分支可选不同首段；`prefix` 寻找共用一个首段的完整分支包。首选首段无可行延长时继续尝试其他首段。该步骤不固定最终选址或流量，物理缺失、预算中断和资源不足也不会导致分支等式被删除。定价的负列堆受批量上限限制，后缀缓存最多 128 组。框架解释见 [隐式 CG 框架](../docs/implicit_cg.md)，本次种子与主问题加强以 [主问题加强文档](../docs/master_strengthening.md) 为准。
 
 ### 主问题加强与可行上界搜索（2026-10-19）
 
@@ -447,6 +485,6 @@ tests/            输入、路径、模型等价回归
 
 构造路径和模型时不重新拟合需求、不更换 κ，也不重新解释固定资产折旧。原始数据、论文和冻结基准不属于此实现的写入对象。
 
-两种需求实现均支持 `--structural-strengthening`，开启分配关联聚合、共同 ρ 联合线性化和排队 perspective 三项加强；默认关闭以保留旧版对照。它们保持整数模型不变，强化两种方法共享的连续根松弛，主问题仍不增加运营辅助变量。独立开关、数学依据和验证范围见 [结构加强说明](../docs/structural_strengthening.md)。
+当前和历史需求实现均支持 `--structural-strengthening`，开启分配关联聚合、共同 ρ 联合线性化和排队 perspective 三项加强；默认关闭以保留旧版对照。它们保持整数模型不变，强化两种方法共享的连续根松弛，主问题仍不增加运营辅助变量。独立开关、数学依据和验证范围见 [结构加强说明](../docs/structural_strengthening.md)。
 
 四组算法的新旧比较使用 `python -m src.experiments.structural_benchmark`，冻结修改前后的二进制与同一 TSL 输入。每个 K 分别比较旧/新 lifted 与旧/新 conditional；连续根消融独立运行，不作为免费初始化传给算法。回归入口为 `make structural-strengthening-probe structural-cg-cut-probe`。

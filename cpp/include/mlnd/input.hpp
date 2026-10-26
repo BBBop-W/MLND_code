@@ -37,9 +37,18 @@ struct Input {
     std::vector<std::vector<int>> candidate_routes;
     bool has_candidate_routes = false;
     Json metadata, model_json, manifest;
+    // Optional fixed global task reconstruction. Physical paths and raw OD
+    // demand are unchanged; only the task rates and assignment scope differ.
+    bool preprocessed_demand = false;
+    bool first_leg_consistency = false;
+    std::vector<double> single_rates, head_rates;
+    Matrix<double> pair_rates;
+    Matrix<int> common_origin_support;
+    Json preprocessed_demand_report;
+    Json first_leg_support_report;
 
     int n_nodes() const { return n_l + n_h; }
-    bool origin_assignment() const { return max_orders == 1; }
+    bool origin_assignment() const { return max_orders == 1 || preprocessed_demand; }
     int assignment_destinations() const { return origin_assignment() ? 1 : n_l; }
     int assignment_pool_count() const { return n_l * assignment_destinations(); }
     int assignment_count() const { return n_od * assignment_pool_count(); }
