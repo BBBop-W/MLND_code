@@ -38,15 +38,13 @@ def saved_assignment_scope(data, result):
     """Validate saved semantics, including historical three-dimensional K=1."""
     shape = np.asarray(result["_solution"]["assignment"]).shape
     preprocessed = result.get("demand_formulation") == "preprocessed"
-    if preprocessed and (
-        data.max_orders not in (1, 2)
-        or data.flow_policy != "aggregate"
-        or result.get("assignment_scope") != "origin"
-    ):
-        raise ValueError(
-            "Preprocessed demand requires explicit aggregate origin assignment"
-        )
-    if shape == (data.n_od, data.n_l) and (data.max_orders == 1 or preprocessed):
+    if preprocessed:
+        count = data.n_od if data.max_orders == 1 else data.n_od + data.n_od**2
+        if (data.flow_policy != "aggregate" or result.get("assignment_scope") != "task"
+                or shape != (count, data.n_l)):
+            raise ValueError("Preprocessed demand requires explicit independent task assignment")
+        return "task"
+    if shape == (data.n_od, data.n_l) and data.max_orders == 1:
         inferred = "origin"
     elif shape == (data.n_od, data.n_l, data.n_l):
         inferred = "base_pair"

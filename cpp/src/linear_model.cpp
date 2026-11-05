@@ -5,6 +5,7 @@
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace mlnd {
 struct SolverObservation {
@@ -91,7 +92,7 @@ void LinearModel::coefficient(int row, int variable, double value) {
     if (value != 0) rows.at(row).coefficients.emplace_back(variable, value);
 }
 NativeSolver::NativeSolver(const LinearModel& source, const SolverOptions& options, std::string role)
-    : env(), model(env), cplex(env), variables(env), rows(env), objective(env) {
+    : env(), model(env), cplex(env), variables(env), rows(env), cone_rows(env), objective(env) {
     const double build_started = wall_time();
     model_construction_guard("cplex_model_construction", source.variables.size(), source.rows.size(), source.cones.size(), true);
     if (options.progress) {
@@ -118,9 +119,15 @@ NativeSolver::NativeSolver(const LinearModel& source, const SolverOptions& optio
     model.add(objective);
     cost.end();
     for (const auto& row : source.rows) add_row(row);
-    for (const auto& cone : source.cones)
-        model.add(variables[cone.one] * variables[cone.one]
-                  <= cone.factor * variables[cone.up] * variables[cone.down]);
+    for (const auto& cone : source.cones) {
+        IloExpr expression(env);
+        expression=variables[cone.one] * variables[cone.one]
+            - cone.factor * variables[cone.up] * variables[cone.down];
+        IloRange row(env,-IloInfinity,expression,0);
+        cone_rows.add(row);
+        model.add(row);
+        expression.end();
+    }
     model_construction_guard("cplex_model_construction", source.variables.size(), source.rows.size(), source.cones.size(), true);
     const double extraction_started=wall_time();
     if (observation_) observation_->progress->record({{"event","solver_extraction_start"},{"stage",observation_->role},
@@ -140,6 +147,11 @@ NativeSolver::NativeSolver(const LinearModel& source, const SolverOptions& optio
     cplex.setParam(IloCplex::Param::Simplex::Tolerances::Feasibility, 1e-8);
     cplex.setParam(IloCplex::Param::Simplex::Tolerances::Optimality, 1e-8);
     cplex.setParam(IloCplex::Param::Barrier::QCPConvergeTol, 1e-9);
+    // Fixed cone coordinates (for example cone_one == 1) may otherwise be
+    // presolved in a way that prevents native dual recovery after an optimal
+    // solve. Ask CPLEX to preserve QCP dual information during that solve.
+    if(!mixed_ && !source.cones.empty())
+        cplex.setParam(IloCplex::Param::Preprocessing::QCPDuals,IloCplex::QCPDualsForce);
     if (observation_) observation_->progress->record({{"event", "solver_model_build_end"},
         {"stage", observation_->role}, {"solver_id", observation_->id},
         {"seconds", wall_time() - build_started}, {"model_size", observation_->model_size}, {"mixed_integer", mixed_}});
@@ -172,6 +184,44 @@ void NativeSolver::add_variable(const VariableRecord& source, const Coefficients
     objective.setLinearCoef(variable, source.cost);
     for (auto [index, value] : column) rows[index].setLinearCoef(variable, value);
     mixed_ = mixed_ || source.binary;
+}
+void NativeSolver::add_variables(const std::vector<VariableRecord>& sources,
+                                 const std::vector<Coefficients>& coefficients) {
+    if(sources.size()!=coefficients.size())throw std::invalid_argument("Column batch size mismatch");
+    if(sources.empty())return;
+    // Validate the whole batch, including duplicate rows (whose interpretation
+    // could differ between column construction and setLinearCoef), first.
+    std::vector<int> seen(rows.getSize(),-1);
+    for(std::size_t j=0;j<sources.size();++j) {
+        const auto& v=sources[j];
+        if(v.binary || !std::isfinite(v.lower) || !std::isfinite(v.upper) ||
+           !std::isfinite(v.cost) || v.lower>v.upper)
+            throw std::invalid_argument("Invalid continuous column bounds, type or cost");
+        for(auto [row,value]:coefficients[j]) {
+            if(row<0 || row>=rows.getSize() || !std::isfinite(value) || seen[row]==static_cast<int>(j))
+                throw std::invalid_argument("Invalid or duplicate sparse column row");
+            seen[row]=static_cast<int>(j);
+        }
+    }
+    IloNumColumnArray columns(env);
+    IloNumArray lower(env),upper(env);
+    try {
+        for(std::size_t j=0;j<sources.size();++j) {
+            model_construction_guard("cplex_column_batch_preparation",variables.getSize(),rows.getSize(),0);
+            IloNumColumn column=objective(sources[j].cost);
+            for(auto [row,value]:coefficients[j])if(value)column+=rows[row](value);
+            columns.add(column);lower.add(sources[j].lower);upper.add(sources[j].upper);
+        }
+        model_construction_guard("cplex_column_batch_insertion",variables.getSize(),rows.getSize(),0,true);
+        IloNumVarArray added(env,columns,lower,upper,ILOFLOAT);
+        for(IloInt j=0;j<added.getSize();++j)added[j].setName(sources[j].name.c_str());
+        variables.add(added);model.add(added);added.end();
+    } catch(...) {
+        for(IloInt j=0;j<columns.getSize();++j)columns[j].end();
+        columns.end();lower.end();upper.end();throw;
+    }
+    for(IloInt j=0;j<columns.getSize();++j)columns[j].end();
+    columns.end();lower.end();upper.end();
 }
 void NativeSolver::add_start(const std::vector<double>& values, const std::vector<int>& indices) {
     if (!mixed_) return;
@@ -259,6 +309,74 @@ SolveOutcome NativeSolver::optimize(double seconds) {
         {"solver_bound", mixed_ || out.optimal ? Json(out.bound) : Json(nullptr)},
         {"bound_scope", "solver_model"}, {"nodes", out.nodes}});
     return out;
+}
+NativeDualPoint NativeSolver::read_dual(const LinearModel& source) {
+    const double started=wall_time();
+    NativeDualPoint result;
+    result.diagnostics={{"method","cplex_native_dual"},{"additional_optimization_calls",0}};
+    if(mixed_ || !source.minimize || objective.getSense()!=IloObjective::Minimize) {
+        result.error="Native dual extraction requires a continuous minimization model";
+        return result;
+    }
+    if(source.variables.size()!=static_cast<std::size_t>(variables.getSize()) ||
+       source.rows.size()!=static_cast<std::size_t>(rows.getSize()) ||
+       source.cones.size()!=static_cast<std::size_t>(cone_rows.getSize())) {
+        result.error="Native dual source dimensions do not match the extracted model";
+        return result;
+    }
+    IloNumArray row_values(env),bound_values(env),cone_values(env);
+    IloNumVarArray cone_variables(env);
+    try {
+        // This getter also rejects a model without a current solution. No
+        // solve or parameter change is performed by this extraction method.
+        result.diagnostics["solver_objective"]=cplex.getObjValue();
+        result.diagnostics["solver_status_code"]=static_cast<int>(cplex.getCplexStatus());
+        if(rows.getSize())cplex.getDuals(row_values,rows);
+        if(variables.getSize())cplex.getReducedCosts(bound_values,variables);
+        if(row_values.getSize()!=rows.getSize() || bound_values.getSize()!=variables.getSize())
+            throw std::runtime_error("Native linear dual dimensions are inconsistent");
+        result.row_prices.resize(row_values.getSize());
+        result.bound_prices.resize(bound_values.getSize());
+        for(IloInt i=0;i<row_values.getSize();++i)result.row_prices[i]=row_values[i];
+        for(IloInt j=0;j<bound_values.getSize();++j)result.bound_prices[j]=bound_values[j];
+        std::unordered_map<IloInt,int> variable_indices;
+        for(IloInt j=0;j<variables.getSize();++j)variable_indices.emplace(variables[j].getId(),j);
+        result.cone_vectors.resize(source.cones.size(),{0,0,0});
+        for(std::size_t k=0;k<source.cones.size();++k) {
+            const auto& cone=source.cones[k];
+            const std::array<int,3> coordinates{cone.up,cone.down,cone.one};
+            if(cone.up<0 || cone.down<0 || cone.one<0 ||
+               cone.up>=variables.getSize() || cone.down>=variables.getSize() || cone.one>=variables.getSize() ||
+               cone.up==cone.down || cone.up==cone.one || cone.down==cone.one)
+                throw std::runtime_error("Invalid native cone coordinate mapping");
+            cplex.getQCDSlack(cone_rows[static_cast<IloInt>(k)],cone_values,cone_variables);
+            if(cone_values.getSize()!=cone_variables.getSize())
+                throw std::runtime_error("Native cone dual dimensions are inconsistent");
+            for(IloInt h=0;h<cone_variables.getSize();++h) {
+                const auto found=variable_indices.find(cone_variables[h].getId());
+                if(found==variable_indices.end())throw std::runtime_error("Unknown native cone dual variable");
+                const auto position=std::find(coordinates.begin(),coordinates.end(),found->second);
+                if(position==coordinates.end())throw std::runtime_error("Native cone dual has an unexpected coordinate");
+                result.cone_vectors[k][position-coordinates.begin()]+=cone_values[h];
+            }
+        }
+        const auto finite=[](double value){return std::isfinite(value);};
+        bool all_finite=std::all_of(result.row_prices.begin(),result.row_prices.end(),finite) &&
+            std::all_of(result.bound_prices.begin(),result.bound_prices.end(),finite);
+        for(const auto& cone:result.cone_vectors)
+            all_finite=all_finite && std::all_of(cone.begin(),cone.end(),finite);
+        if(!all_finite)throw std::runtime_error("Native dual information contains a nonfinite value");
+        result.available=true;
+    } catch(const IloException& error) {
+        result.error=error.getMessage();
+    } catch(const std::exception& error) {
+        result.error=error.what();
+    }
+    row_values.end();bound_values.end();cone_values.end();cone_variables.end();
+    result.diagnostics["available"]=result.available;
+    result.diagnostics["seconds"]=wall_time()-started;
+    if(!result.available)result.diagnostics["error"]=result.error;
+    return result;
 }
 void NativeSolver::set_incumbent_observer(std::function<void(const SolveOutcome&)> observer) {
     if (observation_) observation_->incumbent = std::move(observer);
@@ -480,50 +598,112 @@ Json polish_conic_primal(const LinearModel& original,const SolverOptions& option
         report["error"]=error.getMessage();return finish("restricted_lp_solver_error");
     }
 }
-Json point_residuals(const LinearModel& model, const std::vector<double>& x) {
-    if (x.size() != model.variables.size()) throw std::invalid_argument("Solution dimension mismatch");
-    double bound = 0, linear = 0, scaled = 0, cone = 0, integer = 0;
-    Json worst_linear=nullptr,worst_scaled=nullptr;
+PointAssessment assess_point(const LinearModel& model, const std::vector<double>& x) {
+    PointAssessment out;
+    if (x.size() != model.variables.size()) return out;
+    out.dimension_valid = true;
+    out.feasible = true;
+    auto check = [&](double residual, double tolerance, const char* kind, const std::string& name) {
+        if (residual / tolerance > out.worst_) {
+            out.worst_ = residual / tolerance;
+            out.worst_constraint_ = PointAssessment::ToleranceDetail{kind,name,residual,tolerance};
+        }
+    };
     for (std::size_t i = 0; i < x.size(); ++i) {
-        if (!std::isfinite(x[i])) throw std::runtime_error("Nonfinite solution value");
-        bound = std::max({bound, model.variables[i].lower - x[i], x[i] - model.variables[i].upper});
-        if (model.variables[i].binary) integer = std::max(integer, std::abs(x[i] - std::round(x[i])));
+        if (!std::isfinite(x[i])) { out.feasible = false; return out; }
+        const auto& v = model.variables[i];
+        out.bound_ = std::max({out.bound_,v.lower-x[i],x[i]-v.upper});
+        const double tolerance = 2e-7 * (1 + std::abs(x[i]));
+        // Do not rewrite these comparisons as residual > tolerance: their
+        // floating-point rounding is part of the existing acceptance gate.
+        if (x[i] < v.lower-tolerance || x[i] > v.upper+tolerance) out.feasible = false;
+        check(std::max({0.0,v.lower-x[i],x[i]-v.upper}),tolerance,"bound",v.name);
+        if (v.binary) {
+            const double violation = std::abs(x[i]-std::round(x[i]));
+            out.integer_ = std::max(out.integer_,violation);
+            if (violation > 1e-7) out.feasible = false;
+            check(violation,1e-7,"integrality",v.name);
+        }
     }
+    out.finite = true;
     for (const auto& row : model.rows) {
+        // Keep the two old accumulation policies, in the same coefficient
+        // order, within one traversal of the sparse row.
         long double activity = 0, magnitude = std::abs(row.rhs);
+        double lhs = 0, scale = 1 + std::abs(row.rhs);
+        double minimum = INFINITY, maximum = 0;
         for (auto [i, value] : row.coefficients) {
             activity += static_cast<long double>(value) * x[i];
             magnitude += std::abs(static_cast<long double>(value) * x[i]);
+            lhs += value * x[i];
+            scale += std::abs(value * x[i]);
+            if (value != 0) {
+                minimum = std::min(minimum,std::abs(value));
+                maximum = std::max(maximum,std::abs(value));
+            }
         }
         const double diff = static_cast<double>(activity - row.rhs);
         const double violation = row.sense == 'E' ? std::abs(diff) :
                                  std::max(0.0, row.sense == 'L' ? diff : -diff);
         const double scaled_violation=violation/static_cast<double>(1+magnitude);
-        if(violation>linear || scaled_violation>scaled) {
-            double minimum=INFINITY,maximum=0;
-            for(auto [j,a]:row.coefficients) if(a!=0) {
-                minimum=std::min(minimum,std::abs(a));maximum=std::max(maximum,std::abs(a));
-            }
-            Json detail={{"name",row.name},{"sense",std::string(1,row.sense)},
-                {"rhs",row.rhs},{"activity",static_cast<double>(activity)},
-                {"magnitude",static_cast<double>(magnitude)},{"absolute_violation",violation},
-                {"scaled_violation",scaled_violation},{"nonzeros",row.coefficients.size()},
-                {"minimum_absolute_coefficient",std::isfinite(minimum)?Json(minimum):Json(nullptr)},
-                {"maximum_absolute_coefficient",maximum}};
-            if(violation>linear)worst_linear=detail;
-            if(scaled_violation>scaled)worst_scaled=detail;
+        if (violation>out.linear_ || scaled_violation>out.scaled_) {
+            PointAssessment::LinearDetail detail{row.name,row.sense,row.rhs,
+                static_cast<double>(activity),static_cast<double>(magnitude),violation,
+                scaled_violation,row.coefficients.size(),minimum,maximum};
+            if (violation>out.linear_) out.worst_linear_=detail;
+            if (scaled_violation>out.scaled_) out.worst_scaled_=std::move(detail);
         }
-        linear = std::max(linear, violation);
-        scaled = std::max(scaled, scaled_violation);
+        out.linear_ = std::max(out.linear_,violation);
+        out.scaled_ = std::max(out.scaled_,scaled_violation);
+        double residual = lhs-row.rhs;
+        if (row.sense=='L') residual=std::max(0.0,residual);
+        else if (row.sense=='G') residual=std::max(0.0,-residual);
+        else residual=std::abs(residual);
+        const double tolerance = 2e-7*scale;
+        if (residual>tolerance) out.feasible=false;
+        check(residual,tolerance,"linear",row.name);
     }
     for (const auto& c : model.cones) {
         const double lhs = x[c.one] * x[c.one], rhs = c.factor * x[c.up] * x[c.down];
-        cone = std::max(cone, (lhs - rhs) / (1 + std::abs(lhs) + std::abs(rhs)));
+        out.cone_ = std::max(out.cone_,(lhs-rhs)/(1+std::abs(lhs)+std::abs(rhs)));
+        const double tolerance=2e-7*(1+std::abs(lhs)+std::abs(rhs));
+        if (lhs>rhs+tolerance) out.feasible=false;
+        check(std::max(0.0,lhs-rhs),tolerance,"cone",model.variables[c.one].name);
     }
-    return {{"max_bound_violation", bound}, {"max_linear_violation", linear},
-            {"max_scaled_linear_violation", scaled}, {"max_scaled_cone_violation", cone},
-            {"max_integrality_violation", integer},
-            {"worst_linear_constraint",worst_linear},{"worst_scaled_linear_constraint",worst_scaled},
-            {"passed", bound <= 2e-6 && scaled <= 2e-7 && cone <= 2e-7 && integer <= 1e-7}};
+    return out;
+}
+Json PointAssessment::residuals() const {
+    if (!dimension_valid) throw std::invalid_argument("Solution dimension mismatch");
+    if (!finite) throw std::runtime_error("Nonfinite solution value");
+    auto detail=[](const std::optional<LinearDetail>& entry)->Json {
+        if (!entry) return nullptr;
+        const auto& d=*entry;
+        return {{"name",d.name},{"sense",std::string(1,d.sense)},
+            {"rhs",d.rhs},{"activity",d.activity},{"magnitude",d.magnitude},
+            {"absolute_violation",d.violation},{"scaled_violation",d.scaled},
+            {"nonzeros",d.nonzeros},
+            {"minimum_absolute_coefficient",std::isfinite(d.minimum)?Json(d.minimum):Json(nullptr)},
+            {"maximum_absolute_coefficient",d.maximum}};
+    };
+    return {{"max_bound_violation",bound_},{"max_linear_violation",linear_},
+        {"max_scaled_linear_violation",scaled_},{"max_scaled_cone_violation",cone_},
+        {"max_integrality_violation",integer_},
+        {"worst_linear_constraint",detail(worst_linear_)},{"worst_scaled_linear_constraint",detail(worst_scaled_)},
+        {"passed",bound_<=2e-6 && scaled_<=2e-7 && cone_<=2e-7 && integer_<=1e-7}};
+}
+Json PointAssessment::diagnostics() const {
+    if (!dimension_valid) return {{"passed",false},{"reason","dimension"}};
+    if (!finite) return {{"passed",false},{"reason","nonfinite"}};
+    auto report=residuals();
+    report["passed"]=feasible;
+    report["worst_tolerance_ratio"]=worst_;
+    report["worst_constraint"]=worst_constraint_
+        ? Json{{"kind",worst_constraint_->kind},{"name",worst_constraint_->name},
+               {"violation",worst_constraint_->violation},{"tolerance",worst_constraint_->tolerance}}
+        : Json(nullptr);
+    return report;
+}
+Json point_residuals(const LinearModel& model, const std::vector<double>& x) {
+    return assess_point(model,x).residuals();
 }
 } // namespace mlnd

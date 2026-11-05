@@ -95,7 +95,7 @@ def _direct_support(data, proposed):
         )
         q = travel[None, :] + waits
         prefix = q[:, :, None] + loaded[None, :, :]
-        receipt = prefix + data.receipt_mean[:, None, :]
+        receipt = prefix + data.home_receipt_mean[:, None, :]
         feasible = (
             data.allowed_links[origin, n_l:][None, :, None]
             & allowed_loaded[None, :, :]
@@ -123,7 +123,7 @@ def _direct_support(data, proposed):
         receipt = (
             (transfer[None, :] + data.delta / 2 + waits)[:, :, None]
             + loaded[None, :, :]
-            + data.receipt_mean[:, None, :]
+            + data.home_receipt_mean[:, None, :]
         )
         transfer_allowed = data.allowed_links[n_l + j, n_l:].copy()
         transfer_allowed[j] = True  # zero-length repositioning needs no arc

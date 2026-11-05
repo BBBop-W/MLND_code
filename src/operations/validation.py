@@ -107,7 +107,7 @@ def _segment(data, segment):
         raise ValueError("First loaded flight is shorter than the common window")
     mean = float(data.rider_mean[r, i])
     wait = mean * math.exp(-times[0] / mean) if mean else 0.0
-    if times[0] + wait + times[1] + data.receipt_mean[r, j] > data.deadline[r] + 1e-12:
+    if times[0] + wait + times[1] + data.home_receipt_mean[r, j] > data.deadline[r] + 1e-12:
         raise ValueError("Shared first leg violates its first order's mean deadline")
     _cached(segment, dict(t0=times[0], t1=times[1]))
     return dict(segment, id=sid, b=b, first_od=r, pickup=i, delivery=j, legs=legs)
@@ -194,7 +194,7 @@ def _physical(data, path, *, empty=False):
     cost = data.flight_cost * flight + data.waiting_cost * sum(waits)
     for n, (r, i, j, q) in enumerate(zip(ods, pickups, deliveries, pickups_mean)):
         deposited = q + times[2 * n + 1]
-        received = deposited + data.receipt_mean[r, j]
+        received = deposited + data.home_receipt_mean[r, j]
         if received > data.deadline[r] + 1e-8:
             raise ValueError(f"Order {n + 1} exceeds its own mean receipt deadline")
         slots[i] += q
@@ -257,18 +257,19 @@ def build_operations(inputs, result, *, tolerance=5e-5):
     if sol is None:
         raise ValueError("No saved incumbent to validate")
     saved_scope = saved_assignment_scope(data, result)
-    origin_assignment = saved_scope == "origin"
+    origin_assignment = saved_scope in ("origin", "task")
     preprocessed = result.get("demand_formulation") == "preprocessed"
     first_leg_consistency = result.get("first_leg_consistency", False)
     if not isinstance(first_leg_consistency, bool):
         raise ValueError("first_leg_consistency must be a boolean")
-    if first_leg_consistency and not preprocessed:
-        raise ValueError("First-leg consistency requires preprocessed demand")
+    if first_leg_consistency:
+        raise ValueError("First-leg consistency is incompatible with independent tasks")
     bases, h, n, r = data.n_l, data.n_h, data.n_nodes, data.n_od
     shapes = dict(
         facility=(n,),
         capacity_level=data.slot_counts.shape,
-        assignment=(r, bases) if origin_assignment else (r, bases, bases),
+        assignment=((r if data.max_orders == 1 else r+r*r), bases) if preprocessed
+            else (r, bases) if origin_assignment else (r, bases, bases),
         airline=(n, n),
         rho=(bases,),
         idle=(bases,),
@@ -501,10 +502,23 @@ def build_operations(inputs, result, *, tolerance=5e-5):
             if saved_v.shape != v.shape or not np.isfinite(saved_v).all():
                 raise ValueError("Invalid preprocessed availability product shape")
             check("preprocessed_availability_product", np.abs(saved_v - v))
-        check(
-            "preprocessed_supported_service",
-            reference.head_rates[:, None] * v * (~reference.common_origin_support),
-        )
+        single_v = v[:r]
+        pair_v = v[r:].reshape(r, r, bases) if data.max_orders == 2 else np.zeros((r, r, bases))
+        expected_single = reference.single_rates[:, None] * single_v
+        expected_pair = reference.pair_rates[:, :, None] * pair_v
+        if result.get("task_indexing") != "singles_then_row_major_pairs":
+            raise ValueError("Missing or inconsistent task indexing")
+        expected_table = [dict(task=q, first_od=q if q < r else (q-r)//r,
+                               second_od=-1 if q < r else (q-r)%r,
+                               rate=float(reference.single_rates[q] if q < r else reference.pair_rates[(q-r)//r, (q-r)%r]))
+                          for q in range(len(a))]
+        table = result.get("task_table")
+        if not isinstance(table, list) or len(table) != len(expected_table):
+            raise ValueError("Missing or invalid task table")
+        for saved, target in zip(table, expected_table):
+            if any(saved.get(key) != target[key] for key in ("task", "first_od", "second_od")):
+                raise ValueError("Task identity mismatch")
+            check(f"task_rate_{target['task']}", abs(_scalar(saved.get("rate"), "task rate") - target["rate"]))
         singles = np.zeros((r, bases))
         doubles = np.zeros((r, r, bases))
         actual_heads = np.zeros((r, bases))
@@ -524,59 +538,21 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         check("first_leg_task_flow", task_flow_errors)
         check(
             "aggregate_single_branches",
-            np.abs(singles - reference.single_rates[:, None] * v),
+            np.abs(singles - expected_single),
         )
         check(
             "aggregate_double_branches",
-            np.abs(doubles - reference.pair_rates[:, :, None] * v[:, None, :]),
+            np.abs(doubles - expected_pair),
         )
         check(
             "task_reconstruction",
-            np.abs(actual_heads - reference.head_rates[:, None] * v),
+            np.abs(actual_heads - expected_single - expected_pair.sum(axis=1)),
         )
-        if first_leg_consistency:
-            physical_groups = defaultdict(list)
-            for segment in segments:
-                key = (
-                    segment["b"][0],
-                    segment["first_od"],
-                    segment["pickup"],
-                    segment["delivery"],
-                    tuple(map(tuple, segment["legs"][:2])),
-                )
-                physical_groups[key].append(int(segment["id"]))
-            single_errors, double_errors, zero_head_errors = [], [], []
-            for key, identifiers in physical_groups.items():
-                od = key[1]
-                total_head = sum(heads[sid] for sid in identifiers)
-                first_rate = float(reference.head_rates[od])
-                if first_rate == 0:
-                    zero_head_errors.append(abs(total_head))
-                    continue
-                single_errors.append(
-                    abs(
-                        sum(branch[sid, None] for sid in identifiers)
-                        - total_head * reference.single_rates[od] / first_rate
-                    )
-                )
-                for second_od in range(r):
-                    double_errors.append(
-                        abs(
-                            sum(branch[sid, second_od] for sid in identifiers)
-                            - total_head
-                            * reference.pair_rates[od, second_od]
-                            / first_rate
-                        )
-                    )
-            check("consistent_first_leg_single_branches", single_errors)
-            check("consistent_first_leg_double_branches", double_errors)
-            check("consistent_first_leg_zero_demand", zero_head_errors)
-        adoption = v.sum(axis=1)
-        expected = reference.head_rates * adoption + reference.pair_rates.T @ adoption
+        expected = (expected_single + expected_pair.sum(axis=1) + expected_pair.sum(axis=0)).sum(axis=1)
         pool_rows = []
         for bl in range(bases):
-            offered_single = float(reference.single_rates @ a[:, bl])
-            offered_pair = float(reference.pair_rates.sum(axis=1) @ a[:, bl])
+            offered_single = float(reference.single_rates @ a[:r, bl])
+            offered_pair = float(np.sum(reference.pair_rates * a[r:, bl].reshape(r, r)) if data.max_orders == 2 else 0)
             task_rate = offered_single + offered_pair
             pool_rows.append(
                 dict(

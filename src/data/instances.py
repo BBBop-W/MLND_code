@@ -25,9 +25,38 @@ def to_planning_data(data):
         raise ValueError("Use load_saved to explicitly convert legacy input data")
     names = {field.name for field in fields(PlanningData) if field.init}
     values = {name: data[name] for name in names if name in data}
+    if values.get("home_receipt_mean") is None:
+        values["home_receipt_mean"] = home_receipt_mean(data)
     # Unlabelled historical snapshots used the shared-prefix branch equations.
     values.setdefault("flow_policy", "prefix")
     return PlanningData(**values)
+
+
+def home_receipt_mean(data):
+    """Recover courier-home time only from explicit data or frozen provenance.
+
+    A hand-built input without pickup-share data interprets receipt_mean as
+    courier receipt. A mixed historical snapshot requires the original courier
+    parameters; a mixture alone does not identify either mode's receipt time.
+    """
+    shape = (len(data["demand"]), int(data["n_h"]))
+    if data.get("home_receipt_mean") is not None:
+        value = data["home_receipt_mean"]
+    elif not np.any(np.asarray(data.get("pickup_share", 0)) > 0):
+        value = data["receipt_mean"]
+    else:
+        terminal = data.get("metadata", {}).get("resolved_config", {}).get("terminal", {})
+        if terminal.get("courier_receipt_minutes") is not None:
+            value = np.asarray(terminal["courier_receipt_minutes"], dtype=float) / 60
+        elif "courier_removal_minutes" in terminal and "last_rider_mean" in data:
+            value = (np.asarray(terminal["courier_removal_minutes"], dtype=float) / 60
+                     + np.asarray(data["last_rider_mean"], dtype=float))
+        else:
+            raise ValueError("Mixed receipt data require explicit home_receipt_mean or frozen courier terminal parameters")
+    result = np.broadcast_to(np.asarray(value, dtype=float), shape).copy()
+    if not np.isfinite(result).all() or np.any(result < 0):
+        raise ValueError("home_receipt_mean must be finite and nonnegative")
+    return result
 
 
 def pack_planning_data(planning, metadata=None):
@@ -349,6 +378,7 @@ def _scenario(raw, cfg, source):
         first_cost=first_cost,
         terminal_cost=(1 - sigma) * last_cost,
         receipt_mean=sigma * receipt_s + (1 - sigma) * receipt_r,
+        home_receipt_mean=receipt_r,
         removal_mean=sigma * removal_s + (1 - sigma) * removal_r,
         ground_cost=ground,
         deadline=deadline,

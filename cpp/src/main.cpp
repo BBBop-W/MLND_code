@@ -1,6 +1,7 @@
 #include "mlnd/benders.hpp"
 #include "mlnd/output.hpp"
 #include "mlnd/preprocessed_demand.hpp"
+#include "mlnd/solver_presets.hpp"
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -16,15 +17,17 @@ mlnd::Json read_json(const std::filesystem::path& path) {
 int main(int argc,char** argv) {
     using namespace mlnd;
     std::filesystem::path input, start_path, fixed_path;
-    std::string method="full_path", stage="arguments";
+    SolverConfiguration configuration;
+    auto& options=configuration.options;
+    auto& method=configuration.method;
+    auto& path_column_limit=configuration.path_column_limit;
+    std::string stage="arguments";
     int k=0;
-    SolverOptions options;
     bool inspect=false, have_input=false, preprocessing_complete=false;
-    std::size_t path_column_limit=500000;
     double started=0, budget=0, read_seconds=0, preprocessing_seconds=0, stage_started=0;
     Input data;
     PathCollection paths; paths.complete=false; paths.support_complete=false;
-    Json metadata=Json::object();
+    Json metadata=Json::object(), resolved_configuration=Json::object();
     auto result_method=[&]() -> std::string {
         if(fixed_path.empty()) return method;
         if(method=="full_path") return "fixed_design";
@@ -127,7 +130,9 @@ int main(int argc,char** argv) {
                 if(++i>=argc) throw std::invalid_argument("Missing value for "+key);
                 return argv[i];
             };
-            if(key=="--input") input=argument();
+            if(configuration.acceleration_flag(key))continue;
+            if(key=="--preset") configuration.apply_preset(argument());
+            else if(key=="--input") input=argument();
             else if(key=="--out") options.output=argument();
             else if(key=="--k") k=std::stoi(argument());
             else if(key=="--method") method=argument();
@@ -139,24 +144,23 @@ int main(int argc,char** argv) {
                 options.preprocessed_demand=value=="preprocessed";
             }
             else if(key=="--first-leg-consistency") options.first_leg_consistency=true;
-            else if(key=="--tight-airline-bounds") options.tight_airline_bounds=true;
             else if(key=="--structural-strengthening") {
                 options.assignment_incident_clique=options.shared_rho_joint=options.queue_perspective=true;
             }
-            else if(key=="--assignment-incident-clique") options.assignment_incident_clique=true;
-            else if(key=="--shared-rho-joint") options.shared_rho_joint=true;
-            else if(key=="--queue-perspective") options.queue_perspective=true;
-            else if(key=="--od-airline-bounds") options.od_airline_bounds=true;
-            else if(key=="--topology-cuts") options.topology_cuts=true;
             else if(key=="--topology-seconds") options.topology_seconds=std::stod(argument());
             else if(key=="--topology-cut-limit") options.topology_cut_limit=std::stoi(argument());
-            else if(key=="--assignment-support-cuts") options.assignment_support_cuts=true;
             else if(key=="--assignment-support-seconds") options.assignment_support_seconds=std::stod(argument());
             else if(key=="--assignment-support-floor") options.assignment_support_floor=std::stod(argument());
             else if(key=="--assignment-support-cut-limit") options.assignment_support_cut_limit=std::stoi(argument());
             else if(key=="--assignment-support-max-cuts") options.assignment_support_max_cuts=std::stoi(argument());
-            else if(key=="--double-support-cuts") options.double_support_cuts=true;
-            else if(key=="--joint-base-cost-cuts") options.joint_base_cost_cuts=true;
+            else if(key=="--airline-resource-seconds") options.airline_resource_seconds=std::stod(argument());
+            else if(key=="--airline-resource-cut-limit") options.airline_resource_cut_limit=std::stoi(argument());
+            else if(key=="--task-resource-seconds") options.task_resource_seconds=std::stod(argument());
+            else if(key=="--task-resource-cut-limit") options.task_resource_cut_limit=std::stoi(argument());
+            else if(key=="--path-support-seconds") options.path_support_seconds=std::stod(argument());
+            else if(key=="--path-support-preprocessing-seconds") options.path_support_preprocessing_seconds=std::stod(argument());
+            else if(key=="--path-support-cut-limit") options.path_support_cut_limit=std::stoi(argument());
+            else if(key=="--path-support-max-cuts") options.path_support_max_cuts=std::stoi(argument());
             else if(key=="--branch-joint-seconds") options.branch_joint_seconds=std::stod(argument());
             else if(key=="--branch-joint-preprocessing-seconds") options.branch_joint_preprocessing_seconds=std::stod(argument());
             else if(key=="--branch-joint-floor") options.branch_joint_floor=std::stod(argument());
@@ -198,72 +202,51 @@ int main(int argc,char** argv) {
             else if(key=="--heuristic-budget-fraction") options.heuristic_budget_fraction=std::stod(argument());
             else if(key=="--root-budget-fraction") options.root_budget_fraction=std::stod(argument());
             else if(key=="--local-branching-radius") options.local_branching_radius=std::stoi(argument());
+            else if(key=="--local-branching-head-radius") options.local_branching_head_radius=std::stoi(argument());
+            else if(key=="--local-branching-capacity-radius") options.local_branching_capacity_radius=std::stoi(argument());
+            else if(key=="--pricing-smoothing-weight") options.pricing_smoothing_weight=std::stod(argument());
+            else if(key=="--pricing-exact-interval") options.pricing_exact_interval=std::stoi(argument());
+            else if(key=="--cut-pool-active-limit") options.cut_pool_active_limit=std::stoi(argument());
+            else if(key=="--cut-pool-age") options.cut_pool_age=std::stoi(argument());
+            else if(key=="--design-cache-limit") options.design_cache_limit=std::stoi(argument());
+            else if(key=="--stabilized-master-seconds") options.stabilized_master_seconds=std::stod(argument());
+            else if(key=="--stabilized-master-level") options.stabilized_master_level=std::stod(argument());
             else if(key=="--start") start_path=argument();
             else if(key=="--fixed-design") fixed_path=argument();
-            else if(key=="--no-pareto") options.pareto=false;
-            else if(key=="--no-reuse-columns") options.reuse_columns=false;
-            else if(key=="--plain") {
-                options.reuse_dual_lp=false;
-                options.pareto=options.reuse_columns=options.courier_savings_bound=false;
-                options.initial_design=options.warm_start=options.incumbent_cleanup=options.primal_search=false;
-                options.branch_covering_seeds=options.resource_bounds=false;
-                options.capacity_cuts=false;
-                options.resource_lp_cuts=options.adaptive_master=false;
-                options.neighborhood_cuts=false;
-                options.continuous_root=false;
-                options.root_projection=options.root_inout=options.auxiliary_valid_cuts=false;
-                options.resource_airline_bounds=false;
-                options.od_airline_bounds=false;
-                options.root_cuts=options.restricted_mip=options.local_branching=options.incumbent_cutoff=false;
-            }
-            else if(key=="--disable") {
-                const auto flag=argument();
-                if(flag=="pareto_cuts") options.pareto=false;
-                else if(flag=="reuse_dual_lp") options.reuse_dual_lp=false;
-                else if(flag=="reuse_columns") options.reuse_columns=false;
-                else if(flag=="courier_savings_bound") options.courier_savings_bound=false;
-                else if(flag=="initial_design") options.initial_design=false;
-                else if(flag=="warm_start") options.warm_start=false;
-                else if(flag=="incumbent_cleanup") options.incumbent_cleanup=false;
-                else if(flag=="primal_search") options.primal_search=false;
-                else if(flag=="branch_covering_seeds") options.branch_covering_seeds=false;
-                else if(flag=="resource_bounds") options.resource_bounds=false;
-                else if(flag=="capacity_cuts") options.capacity_cuts=false;
-                else if(flag=="resource_lp_cuts") options.resource_lp_cuts=false;
-                else if(flag=="adaptive_master") options.adaptive_master=false;
-                else if(flag=="neighborhood_cuts") options.neighborhood_cuts=false;
-                else if(flag=="continuous_root") options.continuous_root=false;
-                else if(flag=="root_projection") options.root_projection=false;
-                else if(flag=="root_inout") options.root_inout=false;
-                else if(flag=="auxiliary_valid_cuts") options.auxiliary_valid_cuts=false;
-                else if(flag=="resource_airline_bounds") options.resource_airline_bounds=false;
-                else if(flag=="od_airline_bounds") options.od_airline_bounds=false;
-                else if(flag=="tight_airline_bounds") options.tight_airline_bounds=false;
-                else if(flag=="assignment_incident_clique") options.assignment_incident_clique=false;
-                else if(flag=="shared_rho_joint") options.shared_rho_joint=false;
-                else if(flag=="queue_perspective") options.queue_perspective=false;
-                else if(flag=="topology_cuts") options.topology_cuts=false;
-                else if(flag=="assignment_support_cuts") options.assignment_support_cuts=false;
-                else if(flag=="double_support_cuts") options.double_support_cuts=false;
-                else if(flag=="joint_base_cost_cuts") options.joint_base_cost_cuts=false;
-                else if(flag=="root_cuts") options.root_cuts=false;
-                else if(flag=="restricted_mip") options.restricted_mip=false;
-                else if(flag=="local_branching") options.local_branching=false;
-                else if(flag=="incumbent_cutoff") options.incumbent_cutoff=false;
-                else throw std::invalid_argument("Unknown acceleration: "+flag);
-            }
+            else if(key=="--no-pareto") configuration.set_acceleration("pareto_cuts",false);
+            else if(key=="--no-reuse-columns") configuration.set_acceleration("reuse_columns",false);
+            else if(key=="--plain") configuration.plain();
+            else if(key=="--disable") configuration.set_acceleration(argument(),false);
+            else if(key=="--export-catalogue") options.export_catalogue=true;
             else if(key=="--log") options.log=true;
             else if(key=="--capacity-cut-limit") options.capacity_cut_limit=std::stoi(argument());
             else if(key=="--inspect") inspect=true;
             else if(key=="--help") {
-                std::cout<<"mlnd_cpp --input INSTANCE --k 1|2 --out NEW_DIRECTORY "
+                std::cout<<"mlnd_cpp [--preset performance-20261105|accelerated-20261105|baseline-20261029|baseline|bounds-20261030|lb-20261030|speed-20261030|alns-20261030|full-cplex-20261029|legacy] "
+                           "--input INSTANCE --k 1|2 --out NEW_DIRECTORY "
                            "[--method full_path|benders_cg|benders_full] [--seconds 600] "
                            "[--demand-formulation lifted|conditional|preprocessed] [--first-leg-consistency] "
                            "[--structural-strengthening] [--assignment-incident-clique] [--shared-rho-joint] [--queue-perspective] "
                            "[--tight-airline-bounds] [--topology-cuts] [--topology-seconds 2] [--topology-cut-limit 1000] "
+                           "[--airline-connectivity-cuts] [--airline-resource-cuts] [--airline-resource-seconds 2] [--airline-resource-cut-limit 1000] "
+                           "[--primal-polish] "
+                           "[--design-face-cuts] [--queue-joint-cuts] "
+                           "[--primal-coupled-neighborhood] [--primal-seed-portfolio] "
+                           "[--branch-pricing-correction] [--cg-seed-reuse] [--staged-continuous-root] "
+                           "[--eliminate-zero-task-columns] [--compact-task-heads] "
+                           "[--cache-pricing-graph] [--persist-recourse-model] [--stabilized-pricing] "
+                           "[--pricing-smoothing-weight .5] [--pricing-exact-interval 4] "
+                           "[--primal-support-completion] [--grouped-local-branching] "
+                           "[--local-branching-head-radius 4] [--local-branching-capacity-radius 2] "
+                           "[--streamlined-recourse] [--catalogue-pricing] [--diverse-pricing] [--reuse-recourse-rhs] [--design-certificate-cache] [--design-cache-limit 16] [--adaptive-pricing] [--cg-primal-feedback] [--indexed-support-completion] [--stabilized-master] [--stabilized-master-seconds 2] [--stabilized-master-level .5] [--cut-pool-deduplication] [--cut-pool-management] [--cut-pool-active-limit 256] [--cut-pool-age 8] "
+                           "[--weak-dual-cuts] [--interior-cuts] [--primal-asset-neighborhood] "
+                           "[--search-scheduling] [--dual-lp-first] [--fractional-path-support] [--airline-resource-balance] "
                            "[--od-airline-bounds] "
                            "[--assignment-support-cuts] [--assignment-support-seconds .25] "
                            "[--assignment-support-floor 1e-4] [--assignment-support-cut-limit 2000] [--assignment-support-max-cuts 16] "
+                           "[--path-support-cuts] [--path-support-seconds .25] [--path-support-preprocessing-seconds 2] "
+                           "[--path-support-cut-limit 50000] [--path-support-max-cuts 32] "
+                           "[--task-savings-bound] [--task-resource-cuts] [--task-airline-bounds] "
                            "[--double-support-cuts] [--joint-base-cost-cuts] [--branch-joint-seconds .25] "
                            "[--branch-joint-preprocessing-seconds 2] [--branch-joint-floor 1e-4] "
                            "[--branch-joint-cut-limit 2000] [--branch-joint-max-cuts 16] "
@@ -283,55 +266,50 @@ int main(int argc,char** argv) {
                            "[--pareto-call-seconds 30] [--heuristic-budget-fraction 0.2] "
                            "[--local-branching-radius 8] "
                            "[--capacity-cut-limit 100] "
-                           "[--cg-duality-tolerance 1e-6] [--pricing-tolerance 1e-7] [--log]\n";
+                           "[--queue-polymatroid-cuts] "
+                           "[--queue-price-search] [--target-master-refinement] "
+                           "[--queue-fractional-separation] "
+                           "[--cg-duality-tolerance 1e-6] [--pricing-tolerance 1e-7] [--export-catalogue] [--log]\n"
+                           "Place --preset first; later options override it. Without a preset, legacy defaults above apply.\n"
+                           "baseline-20261029: preprocessed benders_cg, 600 s, gap 0.01, complete paths, fractional queue.\n"
+                           "full-cplex-20261029: matching preprocessed full_path formulation and shared strengthening.\n"
+                           "--export-catalogue writes full_catalogue.json after optimization, outside its budget.\n";
                 return 0;
             } else throw std::invalid_argument("Unknown argument: "+key);
         }
         if(input.empty()) throw std::invalid_argument("--input is required");
-        if(method!="full_path" && method!="benders_cg" && method!="benders_full")
-            throw std::invalid_argument("Unsupported method");
-        if(options.conditional_demand && method=="full_path")
-            throw std::invalid_argument("Conditional demand is an integer-recourse Benders mode; full_path remains lifted");
-        if(options.first_leg_consistency && !options.preprocessed_demand)
-            throw std::invalid_argument("--first-leg-consistency requires --demand-formulation preprocessed");
-        if(!std::isfinite(options.seconds)||options.seconds<=0||!std::isfinite(options.gap)||options.gap<0
-           ||options.threads<1||options.max_iterations<1||options.cg_max_columns<1
-           ||!std::isfinite(options.cg_duality_tolerance)||options.cg_duality_tolerance<=0
-           ||!std::isfinite(options.pricing_tolerance)||options.pricing_tolerance<=0)
-            throw std::invalid_argument("Invalid solver budget or CG tolerance");
-        if(options.root_cut_rounds<0||options.pareto_frequency<1||options.local_branching_radius<0||options.capacity_cut_limit<0
-           ||options.topology_cut_limit<0||!std::isfinite(options.topology_seconds)||options.topology_seconds<=0
-           ||options.assignment_support_cut_limit<0||options.assignment_support_max_cuts<1
-           ||!std::isfinite(options.assignment_support_seconds)||options.assignment_support_seconds<=0
-           ||!std::isfinite(options.assignment_support_floor)||options.assignment_support_floor<=0
-           ||options.branch_joint_cut_limit<0||options.branch_joint_max_cuts<1
-           ||!std::isfinite(options.branch_joint_seconds)||options.branch_joint_seconds<=0
-           ||!std::isfinite(options.branch_joint_preprocessing_seconds)||options.branch_joint_preprocessing_seconds<=0
-           ||!std::isfinite(options.branch_joint_floor)||options.branch_joint_floor<=0
-           ||options.resource_lp_cut_limit<0||!std::isfinite(options.resource_lp_seconds)||options.resource_lp_seconds<=0
-           ||options.heuristic_pool_size<1||!std::isfinite(options.neighborhood_cut_seconds)||options.neighborhood_cut_seconds<=0
-           ||!std::isfinite(options.master_initial_gap)||options.master_initial_gap<0||options.master_initial_gap>1
-           ||!std::isfinite(options.master_slice_seconds)||options.master_slice_seconds<=0
-           ||!std::isfinite(options.continuous_root_seconds)||options.continuous_root_seconds<=0
-           ||options.continuous_root_max_columns<1
-           ||!std::isfinite(options.root_inout_weight)||options.root_inout_weight<=0||options.root_inout_weight>=1
-           ||!std::isfinite(options.pareto_call_seconds)||options.pareto_call_seconds<=0)
-            throw std::invalid_argument("Invalid strengthening frequency or budget");
-        for(double fraction:{options.pareto_budget_fraction,options.root_budget_fraction,options.heuristic_budget_fraction,
-                             options.neighborhood_cut_budget_fraction,options.continuous_root_budget_fraction})
-            if(!std::isfinite(fraction)||fraction<0||fraction>1)
-                throw std::invalid_argument("Budget fractions must be finite and within [0,1]");
+        configuration.validate();
+        resolved_configuration=configuration.metadata();
         started=wall_time(); budget=options.seconds;
         if(!inspect) {
             if(options.output.empty()) throw std::invalid_argument("--out is required");
             if(std::filesystem::exists(options.output/"result.json") || std::filesystem::exists(options.output/"progress.jsonl"))
                 throw std::invalid_argument("Output already contains a run; use a new directory");
             metadata={{"solver","CPLEX"},{"engine","cpp"},{"requested_method",method},{"method",result_method()},
-                {"demand_formulation",demand_formulation()},
+                {"preset",configuration.preset},{"resolved_configuration",resolved_configuration},
+                {"export_catalogue",options.export_catalogue},{"demand_formulation",demand_formulation()},
                 {"first_leg_consistency",options.first_leg_consistency},
                 {"structural_strengthening",{{"assignment_incident_clique",options.assignment_incident_clique},
                     {"shared_rho_joint",options.shared_rho_joint},{"queue_perspective",options.queue_perspective}}},
                 {"od_airline_bounds",options.od_airline_bounds},
+                {"path_support_cuts",options.path_support_cuts},
+                {"task_savings_bound",options.task_savings_bound},
+                {"task_resource_cuts",options.task_resource_cuts},
+                {"task_airline_bounds",options.task_airline_bounds},
+                {"airline_connectivity_cuts",options.airline_connectivity_cuts},
+                {"airline_resource_cuts",options.airline_resource_cuts},
+                {"queue_polymatroid_cuts",options.queue_polymatroid_cuts},
+                {"queue_price_search",options.queue_price_search},
+                {"queue_fractional_separation",options.queue_fractional_separation},
+                {"target_master_refinement",options.target_master_refinement},
+                {"design_face_cuts",options.design_face_cuts},{"queue_joint_cuts",options.queue_joint_cuts},
+                {"primal_coupled_neighborhood",options.primal_coupled_neighborhood},
+                {"primal_seed_portfolio",options.primal_seed_portfolio},
+                {"branch_pricing_correction",options.branch_pricing_correction},
+                {"cg_seed_reuse",options.cg_seed_reuse},
+                {"staged_continuous_root",options.staged_continuous_root},
+                {"fast_pricing",options.fast_pricing},{"batch_columns",options.batch_columns},
+                {"primal_alns",options.primal_alns},
                 {"input",input.string()},
                 {"requested_max_orders",k},
                 {"budget",budget},{"threads",options.threads},{"seed",options.seed},{"requested_gap",options.gap},
@@ -360,7 +338,8 @@ int main(int argc,char** argv) {
             throw std::invalid_argument("Origin assignment requires disabling legacy base-pair assignment-support, double-support, and joint-base-cost cuts");
         read_seconds=wall_time()-stage_started;
         Json summary={{"assignment_scope",data.assignment_scope()},{"assignment_variables",data.assignment_count()},{"name",data.name},{"max_orders",data.max_orders},{"n_l",data.n_l},
-                      {"n_h",data.n_h},{"n_od",data.n_od},{"input_read_seconds",read_seconds}};
+                      {"n_h",data.n_h},{"n_od",data.n_od},{"input_read_seconds",read_seconds},
+                      {"preset",configuration.preset},{"resolved_configuration",resolved_configuration}};
         if(inspect) { std::cout<<summary.dump(2)<<'\n'; return 0; }
         metadata.update({{"max_orders",data.max_orders},{"name",data.name},
             {"n_l",data.n_l},{"n_h",data.n_h},{"n_od",data.n_od},
@@ -408,6 +387,14 @@ int main(int argc,char** argv) {
                 {"accepted_pairs",data.preprocessed_demand_report.at("accepted_pairs")},
                 {"max_conservation_error",data.preprocessed_demand_report.at("max_conservation_error")}});
         }
+        if(options.task_airline_bounds) {
+            options.progress->guard("task_airline_preprocessing");
+            auto prepared=build_task_airline_bounds(data,paths);
+            options.task_airline_upper=std::move(prepared.upper);
+            options.task_airline_metadata=std::move(prepared.metadata);
+            options.progress->record({{"event","task_airline_preprocessed"},
+                {"metadata",options.task_airline_metadata}});
+        }
         preprocessing_seconds=wall_time()-stage_started;
         preprocessing_complete=true;
         options.progress->record({{"event","phase_end"},{"stage",stage},{"seconds",preprocessing_seconds},
@@ -439,9 +426,14 @@ int main(int argc,char** argv) {
         stage="output_finalization"; stage_started=wall_time();
         synchronize_result_paths(data,paths,result);
         result["solver"]="CPLEX";
+        result["preset"]=configuration.preset;
+        result["resolved_configuration"]=resolved_configuration;
+        result["export_catalogue"]=options.export_catalogue;
         result["demand_formulation"]=demand_formulation();
         result["tight_airline_bounds"]=options.tight_airline_bounds;
         result["od_airline_bounds"]=options.od_airline_bounds;
+        result["task_airline_bounds"]=options.task_airline_bounds;
+        result["task_airline_metadata"]=options.task_airline_metadata;
         { IloEnv env; IloCplex probe(env); result["solver_version"]=probe.getVersion(); env.end(); }
         result["engine"]="cpp";
         result["max_orders"]=data.max_orders;
@@ -487,6 +479,8 @@ int main(int argc,char** argv) {
         result["wall_before_output"]=wall_time()-started;
         std::filesystem::create_directories(options.output);
         const double output_started=wall_time();
+        if(options.export_catalogue)
+            result["complete_catalogue_export"]=write_complete_catalogue(options.output/"full_catalogue.json",data,paths);
         write_result(options.output,data,paths,result);
         result["output_seconds"]=wall_time()-output_started;
         result["wall"]=wall_time()-started;

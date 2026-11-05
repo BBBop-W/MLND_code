@@ -12,6 +12,9 @@
 namespace mlnd {
 namespace {
 double remaining(double deadline) { return std::max(0.0, deadline - wall_time()); }
+bool valid_indices(const std::vector<int>& values,int count) {
+    return std::all_of(values.begin(),values.end(),[&](int i){return i>=0 && i<count;});
+}
 std::string name(const std::string& stem, int a, int b = -1, int c = -1) {
     auto out = stem + "_" + std::to_string(a);
     if (b >= 0) out += "_" + std::to_string(b);
@@ -40,8 +43,18 @@ std::vector<double> lifted_point(const Input& d, const PathCollection& paths,
             else if (values[j] != 0) throw std::invalid_argument("Positive flow on absent column");
         }
     };
-    copy("rho", f.rho); copy("idle", f.idle); copy("head", f.head);
+    copy("rho", f.rho); copy("idle", f.idle);
+    if(!f.compact_task_heads)copy("head", f.head);
     copy("courier", f.courier); copy("flow", f.flow); copy("empty_flow", f.empty_flow);
+    if(f.compact_task_heads) {
+        const auto saved=s.at("head").get<std::vector<double>>();
+        const auto restored=recover_task_heads(f,paths,x);
+        if(saved.size()!=restored.size())throw std::invalid_argument("Wrong shape: head");
+        for(std::size_t j=0;j<saved.size();++j)
+            if(!std::isfinite(saved[j]) || !std::isfinite(restored[j]) ||
+               std::abs(saved[j]-restored[j])>2e-7*(1+std::abs(saved[j])+std::abs(restored[j])))
+                throw std::invalid_argument("Saved head disagrees with path-flow recovery");
+    }
     x.at(f.fleet) = s.at("fleet");
     auto assignment = [&](int r, int l, int b) {
         return design.at(f.layout.assignment_index(r,l,b));
@@ -52,10 +65,11 @@ std::vector<double> lifted_point(const Input& d, const PathCollection& paths,
         put(name("cone_down", l), indicator - x[f.rho[l]]);
         put(name("cone_one", l), indicator);
     }
-    for (int r = 0; r < d.n_od; ++r)
+    for (int r = 0; r < d.assignment_entities(); ++r)
         for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
             put(name("v", r, l, d.origin_assignment() ? -1 : b), assignment(r, l, b) * x[f.rho[l]]);
     for (std::size_t g = 0; g < f.lift_groups.size(); ++g) {
+        if(f.compact_task_heads)continue;
         const auto& group = f.lift_groups[g];
         const auto& segment = paths.initial_segments.at(group.front());
         double head = 0, lambda = 0;
@@ -94,7 +108,11 @@ Json physical_residuals(const Input& d, const PathCollection& paths, const Json&
     auto equal = [&](const std::string& label, double a, double b) {
         check(label, std::abs(a - b), 1 + std::abs(a) + std::abs(b));
     };
-    std::vector<double> served(d.n_od), load(d.n_h), balance(d.n_l), by_pair(d.assignment_count());
+    std::vector<double> served(d.n_od), load(d.n_h), balance(d.n_l),
+        by_pair(d.n_od*d.assignment_pool_count()), task_flow(d.preprocessed_demand?d.assignment_count():0);
+    const auto occurrence_index=[&](int r,int l,int b) {
+        return r*d.assignment_pool_count()+l*d.assignment_destinations()+(d.origin_assignment()?0:b);
+    };
     Matrix<double> arcs(d.n_nodes(), d.n_nodes());
     double busy = 0, operating = 0, opening = 0;
     const double total = std::accumulate(d.demand.begin(), d.demand.end(), 0.0);
@@ -147,8 +165,10 @@ Json physical_residuals(const Input& d, const PathCollection& paths, const Json&
         balance[p.b[0]] += flow; balance[p.b[1]] -= flow;
         for (auto [r, count] : physical.served_counts) {
             served[r] += flow * count;
-            by_pair[d.assignment_offset(r,p.b[0],p.b[1])] += flow * count;
+            by_pair[occurrence_index(r,p.b[0],p.b[1])] += flow * count;
         }
+        if(d.preprocessed_demand)
+            task_flow[d.assignment_offset(d.task_index(p.first_od,p.second_od),p.b[0])] += flow;
         for (auto [h, value] : physical.slot_times) load[h] += flow * value;
         for (auto [u, v, count] : physical.arc_counts) arcs(u, v) += flow * count;
     }
@@ -194,14 +214,19 @@ Json physical_residuals(const Input& d, const PathCollection& paths, const Json&
         for (int l = 0; l < d.n_l; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
             double rate=d.demand[r]*assignment_value(d,s.at("assignment"),r,l,b);
             if(d.preprocessed_demand) {
-                rate=d.head_rates[r]*assignment_value(d,s.at("assignment"),r,l);
-                for(int head=0;head<d.n_od;++head)
-                    rate+=d.pair_rates(head,r)*assignment_value(d,s.at("assignment"),head,l);
+                rate=0;
+                for(int q=0;q<d.task_count();++q) {
+                    const int multiplicity=(d.task_first(q)==r)+(d.task_second(q)==r);
+                    if(multiplicity)rate+=multiplicity*d.task_rate(q)*assignment_value(d,s.at("assignment"),q,l);
+                }
             }
-            equal("served_assignment_rho", by_pair[d.assignment_offset(r,l,b)],
+            equal("served_assignment_rho", by_pair[occurrence_index(r,l,b)],
                   rate*s.at("rho").at(l).get<double>());
         }
     }
+    if(d.preprocessed_demand)for(int q=0;q<d.task_count();++q)for(int l=0;l<d.n_l;++l)
+        equal("task_assignment_rho",task_flow[d.assignment_offset(q,l)],
+            d.task_rate(q)*assignment_value(d,s.at("assignment"),q,l)*s.at("rho").at(l).get<double>());
     for (int u = 0; u < d.n_nodes(); ++u) for (int v = 0; v < d.n_nodes(); ++v) {
         const double y = s.at("airline").at(u).at(v);
         double bound = 0;
@@ -223,20 +248,7 @@ Json validate_result(const Input& d, const PathCollection& paths, const Formulat
         // otherwise a snapshot from a differently ordered pool could silently
         // reinterpret its indexed flows. Raw solution-only inputs explicitly
         // use the current pool's IDs and still undergo full point validation.
-        const auto& saved = result.at("_solution");
-        auto prefix = [&](const char* records, const char* flow, const auto& pool) {
-            if (!result.contains(records)) return;
-            const auto& rows = result.at(records);
-            if (!rows.is_array() || rows.size() != saved.at(flow).size() || rows.size() > pool.size())
-                throw std::invalid_argument("Incumbent physical records do not match its column prefix");
-            for (std::size_t p = 0; p < rows.size(); ++p) {
-                const Json expected = pool[p];
-                if (rows.at(p).at("path") != expected)
-                    throw std::invalid_argument("Incumbent path identity differs from the current column prefix");
-            }
-        };
-        prefix("_missions", "flow", paths.service_paths);
-        prefix("_relocations", "empty_flow", paths.empty_paths);
+        validate_result_path_records(paths, result);
         synchronize_result_paths(d, paths, result);
         point = lifted_point(d, paths, f, result);
         auto matrix = point_residuals(f.matrix, point);
@@ -253,9 +265,91 @@ Json validate_result(const Input& d, const PathCollection& paths, const Formulat
 }
 } // namespace
 
+Json add_grouped_primal_radius(const Input& d, Formulation& f, const std::vector<double>& center,
+                              const std::vector<int>& requested_heads, const std::vector<int>& requested_lockers,
+                              int head_radius, int capacity_radius) {
+    if(center.size()!=static_cast<std::size_t>(f.layout.count) || head_radius<0 || capacity_radius<0 ||
+       !valid_indices(requested_heads,d.assignment_entities()) || !valid_indices(requested_lockers,d.n_h))
+        throw std::invalid_argument("Invalid grouped primal radius domain");
+    const std::set<int> heads(requested_heads.begin(),requested_heads.end());
+    const std::set<int> lockers(requested_lockers.begin(),requested_lockers.end());
+    Coefficients head_row,capacity_row;int head_constant=0,capacity_constant=0;
+    const auto add_group=[&](const std::vector<int>& indices,Coefficients& row,int& constant) {
+        int active=-1;
+        for(int j:indices) {
+            if(!std::isfinite(center[j]) || (std::abs(center[j])>1e-6 && std::abs(center[j]-1)>1e-6))
+                throw std::invalid_argument("Grouped primal center is not binary");
+            if(center[j]>.5) {
+                if(active>=0)throw std::invalid_argument("Grouped primal center has multiple active states");
+                active=j;
+            }
+        }
+        if(active>=0) {row.emplace_back(active,-1);++constant;}
+        else for(int j:indices)row.emplace_back(j,1);
+    };
+    for(int r:heads) {
+        std::vector<int> indices;
+        for(int l=0;l<d.n_l;++l)for(int b=0;b<d.assignment_destinations();++b)
+            indices.push_back(f.layout.assignment_index(r,l,b));
+        add_group(indices,head_row,head_constant);
+    }
+    for(int h:lockers) {
+        std::vector<int> indices;
+        for(int z=0;z<d.n_levels;++z)indices.push_back(f.layout.capacity+h*d.n_levels+z);
+        add_group(indices,capacity_row,capacity_constant);
+    }
+    f.matrix.row("primal_head_group_radius",'L',head_radius-head_constant,std::move(head_row));
+    f.matrix.row("primal_capacity_group_radius",'L',capacity_radius-capacity_constant,std::move(capacity_row));
+    return {{"metric","categorical_state_changes"},{"head_radius",head_radius},{"capacity_radius",capacity_radius},
+        {"heads",heads},{"lockers",lockers},{"base_facilities_counted",false},{"airlines_counted",false},
+        {"scope","temporary_primal_only"}};
+}
+
 Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
                                 const SolverOptions& options, double deadline,
-                                const Json* incumbent, int radius) {
+                                const Json* incumbent, int radius,
+                                const std::vector<int>* service_indices,
+                                const std::vector<int>* empty_indices,
+                                bool fix_assignment, bool fix_infrastructure,
+                                const CoupledPrimalNeighborhood* coupled,
+                                const PrimalRepairRestrictions* restrictions) {
+    if (fix_assignment && fix_infrastructure)
+        throw std::invalid_argument("Primal assignment and infrastructure fixing modes are mutually exclusive");
+    if (coupled && (fix_assignment || fix_infrastructure || radius >= 0))
+        throw std::invalid_argument("Coupled primal block cannot be combined with another neighborhood");
+    if (coupled) {
+        if(!valid_indices(coupled->heads,d.assignment_entities()) || !valid_indices(coupled->lockers,d.n_h) ||
+           !valid_indices(coupled->bases,d.n_l))
+            throw std::invalid_argument("Coupled primal resource index is out of range");
+        for(auto [u,v]:coupled->airlines)if(u<0||v<0||u>=d.n_nodes()||v>=d.n_nodes())
+            throw std::invalid_argument("Coupled primal airline index is out of range");
+    }
+    if (restrictions) {
+        if(!valid_indices(restrictions->change_heads,d.assignment_entities()) ||
+           !valid_indices(restrictions->change_lockers,d.n_h) ||
+           !valid_indices(restrictions->closed_lockers,d.n_h) ||
+           !valid_indices(restrictions->closed_bases,d.n_l))
+            throw std::invalid_argument("Primal exploration resource index is out of range");
+        for(auto [u,v]:restrictions->closed_airlines)
+            if(u<0 || v<0 || u>=d.n_nodes() || v>=d.n_nodes())
+                throw std::invalid_argument("Primal exploration airline index is out of range");
+        if(!restrictions->change_heads.empty() && !d.origin_assignment())
+            throw std::invalid_argument("Head-state exploration requires origin assignment");
+        if(!restrictions->forbidden_origins.empty() && !d.origin_assignment())
+            throw std::invalid_argument("Origin restrictions require origin assignment");
+        for(auto [r,l]:restrictions->forbidden_origins) {
+            if(r<0 || r>=d.assignment_entities() || l<0 || l>=d.n_l)
+                throw std::invalid_argument("Forbidden primal origin is out of range");
+            if(coupled && std::find(coupled->heads.begin(),coupled->heads.end(),r)==coupled->heads.end())
+                throw std::invalid_argument("Forbidden primal origin lies outside the released head groups");
+        }
+        if(restrictions->grouped_radius && !coupled)
+            throw std::invalid_argument("Grouped repair radius requires a coupled neighborhood");
+        if(std::isnan(restrictions->objective_upper) || restrictions->objective_upper==-INFINITY ||
+           !std::isfinite(restrictions->validation_reserve_seconds) ||
+           restrictions->validation_reserve_seconds<0)
+            throw std::invalid_argument("Invalid primal exploration budget or objective ceiling");
+    }
     if (radius < -1) throw std::invalid_argument("Local branching radius must be -1 or nonnegative");
     if (options.heuristic_pool_size < 0) throw std::invalid_argument("Heuristic pool size must be nonnegative");
     if (!paths.support_complete) throw std::invalid_argument("Restricted heuristic needs complete initial support");
@@ -268,7 +362,10 @@ Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
     Json report = {{"validated", true}, {"improved", false}, {"source", "all_courier_fallback"},
                    {"status", "time_limit"}, {"local_branching_radius", radius},
                    {"local_branching_blocks", {"facility", "capacity", "assignment"}},
+                   {"assignment_fix_requested", fix_assignment}, {"assignment_fixed", false},
+                   {"infrastructure_fix_requested", fix_infrastructure}, {"infrastructure_fixed", false},
                    {"global_lower_bound_available", false}, {"diagnostics", Json::object()}};
+    if(restrictions)report["candidate_validated"]=false;
     const bool collect_pool = options.neighborhood_cuts && options.heuristic_pool_size > 0;
     if (collect_pool) {
         report["design_pool"] = Json::array();
@@ -310,13 +407,52 @@ Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
     };
     if (remaining(deadline) <= 0) return finish();
     const double construction = wall_time();
-    const std::vector<int>* all = nullptr;
-    auto f = build_formulation(d, paths, nullptr, all, all, false, false, options.tight_airline_bounds,
+    std::vector<int> selected_service, selected_empty;
+    // Selection changes only a heuristic's feasible subset. In particular,
+    // adding every strictly positive incumbent column preserves a possible
+    // warm start without truncating tiny flows or dropping task requirements.
+    auto select = [&](const std::vector<int>* requested, std::size_t count,
+                      const char* flow_field, const char* metadata_field,
+                      std::vector<int>& selected) -> const std::vector<int>* {
+        if (!requested) {
+            report["column_selection"][metadata_field] = {{"scope", "all_registered"},
+                {"catalogue_columns", count}, {"selected_columns", count},
+                {"incumbent_columns_added", 0}};
+            return nullptr;
+        }
+        std::set<int> unique;
+        for (int index : *requested) {
+            if (index < 0 || static_cast<std::size_t>(index) >= count)
+                throw std::invalid_argument("Primal heuristic column index is out of range");
+            unique.insert(index);
+        }
+        const auto requested_count = unique.size();
+        if (incumbent) {
+            const auto& saved = incumbent->contains("_solution") ? incumbent->at("_solution") : *incumbent;
+            // Malformed incumbents still reach the ordinary validation path
+            // and cannot supply assignment fixings or an accepted upper bound.
+            if (saved.contains(flow_field) && saved.at(flow_field).is_array() &&
+                saved.at(flow_field).size() <= count) {
+                const auto& flow = saved.at(flow_field);
+                for (std::size_t j = 0; j < flow.size(); ++j)
+                    if (flow[j].is_number() && flow[j].get<double>() > 0)
+                        unique.insert(static_cast<int>(j));
+            }
+        }
+        selected.assign(unique.begin(), unique.end());
+        report["column_selection"][metadata_field] = {{"scope", "selected_plus_incumbent_support"},
+            {"catalogue_columns", count}, {"requested_columns", requested_count},
+            {"selected_columns", selected.size()}, {"incumbent_columns_added", selected.size() - requested_count}};
+        return &selected;
+    };
+    const auto* service = select(service_indices, paths.service_paths.size(), "flow", "service", selected_service);
+    const auto* empty = select(empty_indices, paths.empty_paths.size(), "empty_flow", "empty", selected_empty);
+    auto f = build_formulation(d, paths, nullptr, service, empty, false, false, options.tight_airline_bounds,
                               formulation_strengthening(options));
     build += wall_time() - construction;
     report["model_size"] = {{"variables", f.matrix.variables.size()}, {"linear_rows", f.matrix.rows.size()},
-                            {"cones", f.matrix.cones.size()}, {"service_columns", paths.service_paths.size()},
-                            {"empty_columns", paths.empty_paths.size()}};
+                            {"cones", f.matrix.cones.size()}, {"service_columns", f.service_indices.size()},
+                            {"empty_columns", f.empty_indices.size()}};
     std::vector<double> start;
     double phase = wall_time();
     auto baseline_validation = validate_result(d, paths, f, best, start);
@@ -342,11 +478,85 @@ Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
         }
     }
     validation += wall_time() - phase;
+    if (fix_assignment && !valid_incumbent) {
+        report["status"] = "assignment_polish_requires_valid_incumbent";
+        return finish();
+    }
+    if (fix_infrastructure && !valid_incumbent) {
+        report["status"] = "infrastructure_polish_requires_valid_incumbent";
+        return finish();
+    }
+    if (coupled && !valid_incumbent) {
+        report["status"] = "coupled_polish_requires_valid_incumbent";
+        return finish();
+    }
+    if (restrictions && (!restrictions->change_heads.empty() || !restrictions->change_lockers.empty()) &&
+        !valid_incumbent) {
+        report["status"]="exploration_requires_valid_incumbent";
+        return finish();
+    }
+    if (coupled) {
+        std::vector<bool> released(f.layout.count,false);
+        for(int r:coupled->heads)for(int l=0;l<d.n_l;++l)
+            for(int b=0;b<d.assignment_destinations();++b)
+                released[f.layout.assignment_index(r,l,b)]=true;
+        for(int h:coupled->lockers) {
+            released[f.layout.facility+d.n_l+h]=true;
+            for(int z=0;z<d.n_levels;++z)released[f.layout.capacity+h*d.n_levels+z]=true;
+        }
+        for(int l:coupled->bases)released[f.layout.facility+l]=true;
+        for(auto [u,v]:coupled->airlines)released[f.layout.airline+u*d.n_nodes()+v]=true;
+        std::vector<int> indices;
+        for(int j=0;j<f.layout.count;++j) {
+            if(released[j])indices.push_back(j);
+            else f.matrix.variables[j].lower=f.matrix.variables[j].upper=center[j];
+        }
+        report["coupled_neighborhood"]={{"heads",coupled->heads},{"lockers",coupled->lockers},
+            {"bases",coupled->bases},{"airlines",coupled->airlines},{"released_design_indices",indices},
+            {"fixed_design_variables",f.layout.count-indices.size()},
+            {"whole_assignment_groups",true},{"scope","temporary_primal_only"}};
+        if (!point_residuals(f.matrix, start).at("passed").get<bool>()) start.clear();
+    }
+    if (fix_assignment) {
+        for (int j = f.layout.assignment; j < f.layout.airline; ++j) {
+            f.matrix.variables[j].lower = center[j];
+            f.matrix.variables[j].upper = center[j];
+        }
+        report["assignment_fixed"] = true;
+        report["fixed_assignment_variables"] = f.layout.airline - f.layout.assignment;
+        // A retained global fallback may lie outside this primal neighborhood.
+        // It remains a valid global incumbent but is not a valid MIP start here.
+        if (!point_residuals(f.matrix, start).at("passed").get<bool>()) start.clear();
+    }
+    if (fix_infrastructure) {
+        for (int j = 0; j < f.layout.assignment; ++j) {
+            f.matrix.variables[j].lower = center[j];
+            f.matrix.variables[j].upper = center[j];
+        }
+        report["infrastructure_fixed"] = true;
+        report["fixed_infrastructure_variables"] = f.layout.assignment;
+        // A fallback outside this neighborhood is still a global feasible
+        // incumbent, but must not be passed to CPLEX as a neighborhood start.
+        if (!point_residuals(f.matrix, start).at("passed").get<bool>()) start.clear();
+    }
     if (radius >= 0 && !valid_incumbent) {
         report["status"] = "local_branching_requires_valid_incumbent";
         return finish();
     }
-    if (radius >= 0) {
+    const bool grouped_radius=options.grouped_local_branching &&
+        (radius>0 || (coupled && restrictions && restrictions->grouped_radius));
+    if(grouped_radius) {
+        std::vector<int> heads,lockers;
+        if(coupled) {heads=coupled->heads;lockers=coupled->lockers;}
+        else {
+            for(int r=0;r<d.assignment_entities();++r)heads.push_back(r);
+            for(int h=0;h<d.n_h;++h)lockers.push_back(h);
+        }
+        report["grouped_local_branching"]=add_grouped_primal_radius(d,f,center,heads,lockers,
+            options.local_branching_head_radius,options.local_branching_capacity_radius);
+        report["local_branching_blocks"]={"head_state","capacity_state"};
+        if(!point_residuals(f.matrix,start).at("passed").get<bool>())start.clear();
+    } else if (radius >= 0) {
         Coefficients row;
         int ones = 0;
         for (int j = 0; j < f.layout.airline; ++j) {
@@ -357,6 +567,47 @@ Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
         // The global fallback need not belong to the neighbourhood. Only a
         // neighbourhood-feasible start is supplied to this restricted solve.
         if (!point_residuals(f.matrix, start).at("passed").get<bool>()) start.clear();
+    }
+    if (restrictions) {
+        Coefficients change;
+        int constant=0;
+        // A migration between two bases is one change, not two binary flips.
+        const std::set<int> heads(restrictions->change_heads.begin(),restrictions->change_heads.end());
+        const std::set<int> lockers(restrictions->change_lockers.begin(),restrictions->change_lockers.end());
+        for(int r:heads) {
+            int active=-1;
+            for(int l=0;l<d.n_l;++l)if(center[f.layout.assignment_index(r,l)]>.5)active=l;
+            if(active>=0) {change.emplace_back(f.layout.assignment_index(r,active),-1);++constant;}
+            else for(int l=0;l<d.n_l;++l)change.emplace_back(f.layout.assignment_index(r,l),1);
+        }
+        for(int h:lockers) {
+            int active=-1;
+            for(int z=0;z<d.n_levels;++z)if(center[f.layout.capacity+h*d.n_levels+z]>.5)active=z;
+            if(active>=0) {change.emplace_back(f.layout.capacity+h*d.n_levels+active,-1);++constant;}
+            else for(int z=0;z<d.n_levels;++z)change.emplace_back(f.layout.capacity+h*d.n_levels+z,1);
+        }
+        if(!change.empty())f.matrix.row("primal_exploration_group_change",'G',1-constant,std::move(change));
+        for(int l:restrictions->closed_bases)
+            f.matrix.row(name("primal_closed_base",l),'E',0,{{f.layout.facility+l,1}});
+        for(int h:restrictions->closed_lockers)
+            f.matrix.row(name("primal_closed_locker",h),'E',0,{{f.layout.facility+d.n_l+h,1}});
+        for(auto [u,v]:restrictions->closed_airlines)
+            f.matrix.row(name("primal_closed_airline",u,v),'E',0,{{f.layout.airline+u*d.n_nodes()+v,1}});
+        for(auto [r,l]:restrictions->forbidden_origins)
+            f.matrix.row(name("primal_forbidden_origin",r,l),'E',0,{{f.layout.assignment_index(r,l),1}});
+        if(std::isfinite(restrictions->objective_upper)) {
+            Coefficients costs;
+            for(std::size_t j=0;j<f.matrix.variables.size();++j)
+                if(f.matrix.variables[j].cost!=0)costs.emplace_back(static_cast<int>(j),f.matrix.variables[j].cost);
+            f.matrix.row("primal_exploration_cost_ceiling",'L',restrictions->objective_upper-f.matrix.constant,
+                         std::move(costs));
+        }
+        report["repair_restrictions"]={{"change_heads",heads},{"change_lockers",lockers},
+            {"closed_bases",restrictions->closed_bases},{"closed_lockers",restrictions->closed_lockers},
+            {"closed_airlines",restrictions->closed_airlines},{"objective_upper",restrictions->objective_upper},
+            {"forbidden_origins",restrictions->forbidden_origins},
+            {"scope","temporary_primal_only"},{"validation_reserve_seconds",0.0}};
+        if(!point_residuals(f.matrix,start).at("passed").get<bool>())start.clear();
     }
     if (remaining(deadline) <= 0) return finish();
     phase = wall_time();
@@ -372,6 +623,15 @@ Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
         if (!start.empty()) solver->add_start(start);
         build += wall_time() - phase;
         double optimize_budget = remaining(deadline);
+        if (restrictions) {
+            if(options.progress)optimize_budget=std::min(optimize_budget,options.progress->remaining());
+            optimize_budget=std::max(0.0,optimize_budget);
+            const double per_candidate=validation/(incumbent?2.0:1.0);
+            const double reserve=std::min(optimize_budget,std::max({restrictions->validation_reserve_seconds,
+                .10*(deadline-begin),1.5*per_candidate}));
+            report["repair_restrictions"]["validation_reserve_seconds"]=reserve;
+            optimize_budget-=reserve;
+        }
         if (collect_pool) {
             if (options.progress) optimize_budget = std::min(optimize_budget, options.progress->remaining());
             optimize_budget = std::max(0.0, optimize_budget);
@@ -389,6 +649,10 @@ Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
             metadata["postprocess_reserve_seconds"] = reserve;
             optimize_budget -= reserve;
             metadata["optimize_time_limit_seconds"] = optimize_budget;
+        }
+        if(restrictions && optimize_budget<=0) {
+            report["status"]="validation_reserve_exhausted";
+            return finish();
         }
         outcome = solver->optimize(optimize_budget);
         if (collect_pool) report["design_pool_metadata"]["remaining_after_optimize"] =
@@ -418,6 +682,15 @@ Json solve_restricted_heuristic(const Input& d, const PathCollection& paths,
             auto checked = validate_result(d, paths, f, candidate, reconstructed);
             report["diagnostics"]["candidate_validation"] = checked;
             if (checked.at("passed").get<bool>()) {
+                // A valid worse neighbor belongs to the search trajectory,
+                // while the independently retained global best remains safe.
+                if(restrictions) {
+                    candidate.erase("bound");candidate.erase("gap");
+                    candidate["native_model_validated"]=true;
+                    if(restrictions->retain_validated)restrictions->retain_validated(candidate);
+                    report["candidate_validated"]=true;
+                    report["candidate"]=candidate;
+                }
                 // A design can generate a useful cut even when its primal
                 // objective does not improve the retained global incumbent.
                 keep_design(candidate, radius >= 0 ? "restricted_columns_local_branching" : "restricted_columns_misocp");

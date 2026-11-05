@@ -14,6 +14,7 @@ from src.data.standard import (
     BASE_HEADERS,
     INPUT_FILES,
     SCHEMA,
+    LEGACY_SCHEMA,
     TABLES,
     export_standard,
     load_standard,
@@ -89,7 +90,7 @@ def test_export_and_load_preserve_every_snapshot_field(standard_instance):
     actual = load_standard(standard_instance)
     _assert_exact(expected, actual)
     report = validate_standard(standard_instance, reference=SNAPSHOT)
-    assert report["schema"] == SCHEMA
+    assert report["schema"] == LEGACY_SCHEMA
     assert report["reference_exact_match"]
     assert report["snapshot_fields"] == len(expected)
     assert report["arrays_compared"] == sum(

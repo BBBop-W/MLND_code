@@ -4,8 +4,8 @@
 
 namespace mlnd {
 
-// Input-only lower resource/cost allocations. Assignment-indexed vectors use
-// Input::assignment_offset: (order, departure) for origin assignment and
+// Input-only lower resource/cost allocations. Vectors use raw-OD occurrence
+// groups: (order, departure) for task assignment and
 // (order, departure, return) for the legacy base-pair formulation.
 // No generated column is used to compute an extremum.
 struct AnalyticalMasterBounds {
@@ -43,7 +43,7 @@ struct CapacitySavingsNetwork {
     int nodes = 0, source = 0, sink = 0;
     double courier_cost = 0, numerical_margin = 0;
     std::vector<CapacitySavingsArc> arcs;
-    // Indexed by Input::assignment_offset(order, departure, return) * H + delivery.
+    // Indexed by raw-OD occurrence group * H + delivery, not task assignment.
     std::vector<double> unit_saving, slot_time, unit_cost;
     std::vector<bool> eligible;
     Json metadata;
@@ -54,8 +54,8 @@ CapacitySavingsNetwork capacity_savings_network(const Input&);
 
 // External weighted occurrence relaxation; none of these variables enters the
 // design master. Group and locker supplies are nonnegative affine forms in x.
-// Fixed generalized tasks supply an OD occurrence through its own head and
-// every incoming pair, all charged to the corresponding head's assignment.
+// Every fixed task supplies each contained OD with its occurrence multiplicity
+// times task rate, charged to that task's independent assignment.
 // With u_gj >= 0, maximize sum alpha_gj*u_gj subject to group demand and
 // weighted locker load limits. Unlike monetary max-flow, this keeps each
 // occurrence's own saving and slot-time coefficient.

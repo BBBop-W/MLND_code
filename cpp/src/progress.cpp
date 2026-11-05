@@ -42,13 +42,15 @@ void atomic_json_file(const std::filesystem::path& path, const Json& value) {
     std::filesystem::rename(temporary, path);
 }
 
-RunProgress::RunProgress(std::filesystem::path directory, double started, double budget, Json metadata)
-    : directory_(std::move(directory)), started_(started), budget_(budget), metadata_(std::move(metadata)) {
+RunProgress::RunProgress(std::filesystem::path directory, double started, double budget, Json metadata,
+                         std::function<double()> clock)
+    : directory_(std::move(directory)), started_(started), budget_(budget), metadata_(std::move(metadata)),
+      clock_(std::move(clock)) {
     std::filesystem::create_directories(directory_);
     events_.open(directory_ / "progress.jsonl", std::ios::app);
     if (!events_) throw std::runtime_error("Cannot open progress.jsonl");
 }
-double RunProgress::elapsed() const { return std::max(0.0, steady_seconds() - started_); }
+double RunProgress::elapsed() const { return std::max(0.0, (clock_ ? clock_() : steady_seconds()) - started_); }
 double RunProgress::remaining() const { return std::max(0.0, budget_ - elapsed()); }
 Json RunProgress::stamp(Json event) const {
     event["timestamp_utc"] = utc_timestamp();
@@ -121,6 +123,7 @@ void RunProgress::checkpoint(const Json& result, const std::string& stage, bool 
     observation_seconds_+=steady_seconds()-begin;
     record_unlocked({{"event", "incumbent_checkpoint"}, {"stage", stage},
         {"objective", objective}, {"upper_bound", objective}, {"validated_incumbent", true},
+        {"served",result.value("served",0.0)},
         {"bound_scope", stored.at("bound_scope")}, {"bound", stored.at("bound")},
         {"lower_bound", stored.at("bound")}, {"gap", stored.at("gap")}});
 }

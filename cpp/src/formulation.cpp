@@ -36,6 +36,94 @@ DesignLayout::DesignLayout(const Input& d) {
     airline = assignment + d.assignment_count();
     count = airline + d.n_nodes() * d.n_nodes();
 }
+TaskAirlineBounds build_task_airline_bounds(const Input& d, const PathCollection& paths) {
+    if (!d.preprocessed_demand || !d.origin_assignment() || d.flow_policy != "aggregate" ||
+        d.route_mode != "direct" || d.has_candidate_routes || d.max_orders < 1 || d.max_orders > 2 ||
+        !paths.complete || !paths.support_complete)
+        throw std::invalid_argument("Task airline bounds require fixed independent tasks and a complete direct path catalogue");
+    const int R=d.n_od, L=d.n_l, N=d.n_nodes();
+    if (d.single_rates.size()!=static_cast<std::size_t>(R) || d.pair_rates.rows!=R || d.pair_rates.cols!=R)
+        throw std::invalid_argument("Task airline bounds require complete fixed task rates");
+    for (double rate:d.single_rates) if (!std::isfinite(rate) || rate<0)
+        throw std::invalid_argument("Invalid single task rate for airline bound");
+    for (double rate:d.pair_rates.values) if (!std::isfinite(rate) || rate<0)
+        throw std::invalid_argument("Invalid double task rate for airline bound");
+    const double total=std::accumulate(d.demand.begin(),d.demand.end(),0.0);
+    if (!std::isfinite(total) || total<0)
+        throw std::invalid_argument("Invalid demand for task airline bounds");
+    // Sparse maps avoid a R*L*(R+1)*N*N tensor. Return bases are deliberately
+    // absent from the grouping key, so every feasible return remains allowed.
+    std::map<std::tuple<int,int,int>,std::map<int,int>> branch_max;
+    for (const auto& p:paths.service_paths) {
+        if (p.first_od<0 || p.first_od>=R || p.second_od<-1 || p.second_od>=R ||
+            (d.max_orders==1 && p.second_od>=0) ||
+            p.b[0]<0 || p.b[0]>=L || p.b[1]<0 || p.b[1]>=L)
+            throw std::invalid_argument("Malformed path in task airline catalogue");
+        const double rate=p.second_od<0?d.single_rates[p.first_od]:d.pair_rates(p.first_od,p.second_od);
+        if (rate==0) continue;
+        auto& maxima=branch_max[{p.first_od,p.b[0],p.second_od}];
+        std::map<int,int> counts;
+        for (auto [u,v,count]:p.arc_counts) {
+            if (u<0 || u>=N || v<0 || v>=N || count<0)
+                throw std::invalid_argument("Malformed arc count in task airline catalogue");
+            counts[u*N+v]+=count;
+        }
+        for (auto [e,count]:counts) maxima[e]=std::max(maxima[e],count);
+    }
+    std::vector<std::map<int,long double>> task_origin_load(d.task_count()*L);
+    for (const auto& [key,maxima]:branch_max) {
+        const auto [r,l,s]=key;
+        const long double rate=s<0?d.single_rates[r]:d.pair_rates(r,s);
+        for (auto [e,count]:maxima) task_origin_load[d.task_index(r,s)*L+l][e]+=rate*count;
+    }
+    std::vector<long double> service_upper(N*N,0);
+    for (int q=0;q<d.task_count();++q) {
+        // Each task chooses its departure independently, so maximize within
+        // each task before summing contributions from different task types.
+        std::map<int,long double> task_max;
+        for (int l=0;l<L;++l) for (auto [e,value]:task_origin_load[q*L+l])
+            task_max[e]=std::max(task_max[e],value);
+        for (auto [e,value]:task_max) service_upper[e]+=value;
+    }
+    TaskAirlineBounds out;
+    out.upper.assign(N*N,0);
+    std::vector<double> previous(N*N,0),ratios;
+    int reduced=0,zero=0,relocation=0;
+    for (int u=0;u<N;++u) for (int v=0;v<N;++v) {
+        const int e=u*N+v;
+        if (u==v || !d.allowed_links(u,v)) continue;
+        previous[e]=u<L && v<L?total*std::max(0,L-1):total;
+        if (u<L && v<L) {
+            // Empty paths are direct base-to-base arcs. Preserve their
+            // original bound, including any redundant relocation circulation.
+            out.upper[e]=previous[e]; ++relocation;
+        } else {
+            const long double bound=service_upper[e];
+            double rounded=static_cast<double>(bound);
+            if (static_cast<long double>(rounded)<bound)
+                rounded=std::nextafter(rounded,std::numeric_limits<double>::infinity());
+            if (rounded>0) rounded=std::nextafter(rounded+1e-12*(1+rounded),
+                                                std::numeric_limits<double>::infinity());
+            // Demand conservation gives the existing D bound independently.
+            out.upper[e]=std::min(previous[e],rounded);
+        }
+        if (out.upper[e]+1e-10<previous[e]) ++reduced;
+        if (out.upper[e]==0) ++zero;
+        if (previous[e]>0) ratios.push_back(out.upper[e]/previous[e]);
+    }
+    std::sort(ratios.begin(),ratios.end());
+    out.metadata={{"enabled",true},{"source","complete_fixed_task_arc_multiplicity"},
+        {"catalogue_complete",paths.complete},{"support_complete",paths.support_complete},
+        {"service_paths_scanned",paths.service_paths.size()},{"positive_branch_origin_groups",branch_max.size()},
+        {"assignment_scope",d.assignment_scope()},{"return_scope","all_physical_returns"},
+        {"validity_scope","all_original_integer_designs"},{"integer_feasible_set_preserved",true},
+        {"master_added_variables",0},{"additional_recourse_rows",0},
+        {"reduced_arc_bounds",reduced},{"zero_allowed_arc_bounds",zero},
+        {"unchanged_relocation_arcs",relocation},{"tight_existing_upper",previous},{"task_upper",out.upper},
+        {"minimum_bound_ratio",ratios.empty()?Json(nullptr):Json(ratios.front())},
+        {"median_bound_ratio",ratios.empty()?Json(nullptr):Json(ratios[ratios.size()/2])}};
+    return out;
+}
 Formulation design_model(const Input& d, bool integer, const FormulationStrengthening& strengthening) {
     Formulation f(d);
     f.strengthening = strengthening;
@@ -43,6 +131,7 @@ Formulation design_model(const Input& d, bool integer, const FormulationStrength
         {"assignment_incident_clique",strengthening.assignment_incident_clique},
         {"shared_rho_joint",strengthening.shared_rho_joint},
         {"queue_perspective",strengthening.queue_perspective},
+        {"task_airline_bounds",!strengthening.task_airline_upper.empty()},
         {"assignment_incident_rows",0},{"shared_rho_domain_rows",0},{"shared_rho_rows",0},{"perspective_cones",0},
         {"finite_idle_rho_rows",0},{"local_convexification",strengthening.enabled()},
         {"integer_feasible_set_preserved",true},{"global_convex_hull_claimed",false},
@@ -58,9 +147,10 @@ Formulation design_model(const Input& d, bool integer, const FormulationStrength
     for (int i = 0; i < d.n_h; ++i)
         for (int s = 0; s < d.n_levels; ++s)
             m.variable(label("capacity_level", i, s), 0, 1, d.slot_cost(i, s), integer);
-    for (int r = 0; r < d.n_od; ++r)
+    for (int r = 0; r < d.assignment_entities(); ++r)
         for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
-            m.variable(label("assignment", r, l, d.origin_assignment() ? -1 : b), 0, 1, 0, integer);
+            m.variable(label("assignment", r, l, d.origin_assignment() ? -1 : b), 0,
+                       d.preprocessed_demand && d.task_rate(r)==0 ? 0 : 1, 0, integer);
     for (int i = 0; i < N; ++i) for (int j = 0; j < N; ++j)
         m.variable(label("airline", i, j), 0, 1, d.link_cost(i, j), integer);
     for (int i = 0; i < f.layout.count; ++i) {
@@ -72,7 +162,7 @@ Formulation design_model(const Input& d, bool integer, const FormulationStrength
         for (int s = 0; s < d.n_levels; ++s) row.emplace_back(z(i, s), 1);
         m.row(label("install", i), 'E', 0, std::move(row));
     }
-    for (int r = 0; r < d.n_od; ++r) {
+    for (int r = 0; r < d.assignment_entities(); ++r) {
         Coefficients sum;
         for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) sum.emplace_back(a(r,l,b), 1);
         m.row(label("assign", r), 'L', 1, std::move(sum));
@@ -99,9 +189,9 @@ Formulation design_model(const Input& d, bool integer, const FormulationStrength
                 m.row(label("assign_shared_rho_domain",r,l),'L',0,std::move(departure));
             }
     }
-    f.strengthening_metadata["assignment_incident_rows"] = strengthening.assignment_incident_clique ? d.n_od*L : 0;
+    f.strengthening_metadata["assignment_incident_rows"] = strengthening.assignment_incident_clique ? d.assignment_entities()*L : 0;
     f.strengthening_metadata["shared_rho_domain_rows"] =
-        strengthening.shared_rho_joint && !strengthening.assignment_incident_clique ? d.n_od*L : 0;
+        strengthening.shared_rho_joint && !strengthening.assignment_incident_clique ? d.assignment_entities()*L : 0;
     for (int i = 0; i < N; ++i) for (int j = 0; j < N; ++j) {
         m.row(label("airline_from",i,j), 'L', 0, {{y(i,j),1},{x(i),-1}});
         m.row(label("airline_to",i,j), 'L', 0, {{y(i,j),1},{x(j),-1}});
@@ -118,10 +208,15 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     if (!paths.support_complete) throw std::invalid_argument("Complete initial-segment support is required");
     if (tight_airline_bounds && (d.route_mode != "direct" || d.has_candidate_routes || d.max_orders < 1 || d.max_orders > 2))
         throw std::invalid_argument("Tight airline bounds require the direct K<=2 path domain");
+    if (!strengthening.task_airline_upper.empty() &&
+        (!d.preprocessed_demand || !d.origin_assignment() || !paths.complete || !paths.support_complete ||
+         d.route_mode!="direct" || d.has_candidate_routes || d.max_orders<1 || d.max_orders>2 ||
+         strengthening.task_airline_upper.size()!=static_cast<std::size_t>(d.n_nodes()*d.n_nodes())))
+        throw std::invalid_argument("Prepared task airline bounds do not match this formulation domain");
     if (conditional_demand && (!fixed || relax_fixed_design))
         throw std::invalid_argument("Conditional demand requires an integer fixed design");
-    if(d.first_leg_consistency && !d.preprocessed_demand)
-        throw std::invalid_argument("First-leg consistency requires preprocessed demand");
+    if(d.first_leg_consistency)
+        throw std::invalid_argument("First-leg consistency is incompatible with independent task assignment");
     if (d.preprocessed_demand && (conditional_demand || (d.max_orders != 1 && d.max_orders != 2) ||
         d.flow_policy != "aggregate" || !paths.complete ||
         d.single_rates.size() != static_cast<std::size_t>(d.n_od) ||
@@ -138,6 +233,29 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     const double total = std::accumulate(d.demand.begin(), d.demand.end(), 0.0);
     const double baseline = std::inner_product(d.demand.begin(),d.demand.end(),d.ground_cost.begin(),0.0);
     const double fleet_bound = baseline / d.fleet_cost;
+    f.service_flow_upper=total;
+    f.zero_task_columns_eliminated=strengthening.eliminate_zero_task_columns && d.preprocessed_demand;
+    f.compact_task_heads=strengthening.compact_task_heads && d.preprocessed_demand &&
+        d.origin_assignment() && pooled && !d.first_leg_consistency;
+    if(f.zero_task_columns_eliminated) {
+        f.task_rate_branches=R+1;
+        f.fixed_task_rates.reserve(static_cast<std::size_t>(R)*(R+1));
+        for(int r=0;r<R;++r) {
+            f.fixed_task_rates.push_back(d.single_rates[r]);
+            for(int s=0;s<R;++s)f.fixed_task_rates.push_back(d.pair_rates(r,s));
+        }
+        for(double rate:f.fixed_task_rates)if(!std::isfinite(rate)||rate<0)
+            throw std::invalid_argument("Zero-task elimination requires finite nonnegative fixed task rates");
+    }
+    if(f.compact_task_heads)for(double rate:d.head_rates)if(!std::isfinite(rate)||rate<0)
+        throw std::invalid_argument("Head compression requires finite nonnegative head rates");
+    f.reduction_metadata={{"zero_task_columns_requested",strengthening.eliminate_zero_task_columns},
+        {"zero_task_columns_active",f.zero_task_columns_eliminated},
+        {"compact_task_heads_requested",strengthening.compact_task_heads},
+        {"compact_task_heads_active",f.compact_task_heads},
+        {"scope","exact_fixed_task_reformulation"},{"physical_catalogue_preserved",true},
+        {"fractional_design_projection_preserved",true},{"eliminated_head_variables",0},
+        {"eliminated_head_definition_rows",0},{"retained_head_bound_rows",0}};
     f.rho_upper.assign(L,1.0);
     if (strengthening.queue_perspective) {
         if (!std::isfinite(fleet_bound) || fleet_bound < 0)
@@ -205,8 +323,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     for (int j = 0; j < S; ++j) {
         const auto& seg = paths.initial_segments[j];
         if (seg.id != j) throw std::invalid_argument("Segment IDs must be consecutive");
-        auto key = d.first_leg_consistency ? first_leg_key(seg)
-            : pooled ? std::vector<int>{seg.b[0],d.preprocessed_demand ? -1 : seg.b[1],seg.first_od}
+        auto key = pooled ? std::vector<int>{seg.b[0],d.preprocessed_demand ? -1 : seg.b[1],seg.first_od}
                      : std::vector<int>{j,-1,-1};
         auto [it, added] = groups.emplace(key,static_cast<int>(f.lift_groups.size()));
         if (added) f.lift_groups.emplace_back();
@@ -217,16 +334,24 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     for (int l = 0; l < L; ++l) f.rho.push_back(m.variable(label("rho",l),0,1));
     for (int l = 0; l < L; ++l) f.idle.push_back(m.variable(label("idle",l),0,fleet_bound));
     f.fleet = m.variable("fleet",0,fleet_bound,d.fleet_cost);
-    for (int j = 0; j < S; ++j) f.head.push_back(m.variable(label("head",j),0,d.demand[paths.initial_segments[j].first_od]));
+    for (int j = 0; j < S; ++j) f.head.push_back(f.compact_task_heads ? -1 :
+        m.variable(label("head",j),0,d.demand[paths.initial_segments[j].first_od]));
     std::vector<int> v(d.assignment_count());
-    for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
+    for (int r = 0; r < d.assignment_entities(); ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
         v[d.assignment_offset(r,l,b)] = m.variable(label("v",r,l,d.origin_assignment() ? -1 : b),0,1);
     for (int r = 0; r < R; ++r) f.courier.push_back(m.variable(label("courier",r),0,d.demand[r],d.ground_cost[r]));
     f.flow.assign(paths.service_paths.size(),-1);
     f.empty_flow.assign(paths.empty_paths.size(),-1);
     f.service_indices = selected(paths.service_paths.size(),service);
     f.empty_indices = selected(paths.empty_paths.size(),empty);
-    for (int i : f.service_indices) f.flow[i] = m.variable(label("flow",i),0,total,paths.service_paths[i].cost);
+    const auto requested_service_count=f.service_indices.size();
+    if(f.zero_task_columns_eliminated)f.service_indices.erase(
+        std::remove_if(f.service_indices.begin(),f.service_indices.end(),[&](int id) {
+            return !service_path_enabled(f,paths.service_paths[id]);
+        }),f.service_indices.end());
+    f.reduction_metadata["zero_task_columns_removed_from_request"]=requested_service_count-f.service_indices.size();
+    for (int i : f.service_indices) f.flow[i] = m.variable(label("flow",i),0,
+        service_path_upper_bound(f,paths.service_paths[i]),paths.service_paths[i].cost);
     for (int i : f.empty_indices) f.empty_flow[i] = m.variable(label("empty_flow",i),0,total,paths.empty_paths[i].cost);
     f.eta.assign(G,-1);
     const bool lifted = active && !conditional_demand && !d.preprocessed_demand;
@@ -241,7 +366,8 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
             for (int r = 0; r <= R; ++r) chain[g*(R+1)+r] = m.variable(label("Z",g,r),0,h);
             for (int r = 0; r < R; ++r) product[g*R+r] = m.variable(label("Y",g,r),0,h);
         }
-        heads[g] = pooled ? m.variable(label("group_head",g),0,h) : f.head[f.lift_groups[g][0]];
+        heads[g] = f.compact_task_heads ? -1 :
+            pooled ? m.variable(label("group_head",g),0,h) : f.head[f.lift_groups[g][0]];
     }
     f.executed_head_rows.assign(S,-1);
     f.single_rows.assign(S,-1);
@@ -264,13 +390,13 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         }
         m.cones.push_back({up,down,one,1});
     }
-    for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
+    for (int r = 0; r < d.assignment_entities(); ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
         const int vr=v[d.assignment_offset(r,l,b)], ar=a(r,l,b);
         m.row(label("v_rho",r,l,b),'L',0,{{vr,1},{f.rho[l],-1}});
         m.row(label("v_assignment",r,l,b),'L',0,{{vr,1},{ar,-1}});
         m.row(label("v_lower",r,l,b),'G',-1,{{vr,1},{f.rho[l],-1},{ar,-1}});
     }
-    if (strengthening.shared_rho_joint) for (int r = 0; r < R; ++r) for (int l = 0; l < L; ++l) {
+    if (strengthening.shared_rho_joint) for (int r = 0; r < d.assignment_entities(); ++r) for (int l = 0; l < L; ++l) {
         Coefficients executed{{f.rho[l],-1}}, unexecuted{{f.rho[l],1},{l,-1}};
         for (int b = 0; b < d.assignment_destinations(); ++b) {
             const int vr=v[d.assignment_offset(r,l,b)];
@@ -281,12 +407,32 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         m.row(label("v_joint_executed",r,l),'L',0,std::move(executed));
         m.row(label("v_joint_unexecuted",r,l),'L',0,std::move(unexecuted));
     }
-    f.strengthening_metadata["shared_rho_rows"] = strengthening.shared_rho_joint ? 2*R*L : 0;
+    f.strengthening_metadata["shared_rho_rows"] = strengthening.shared_rho_joint ? 2*d.assignment_entities()*L : 0;
     f.strengthening_metadata["perspective_cones"] = strengthening.queue_perspective ? L : 0;
     f.strengthening_metadata["finite_idle_rho_rows"] = strengthening.queue_perspective ? L : 0;
     f.strengthening_metadata["fixed_integer_recourse_strengthened"] = false;
-    if (pooled) for (int j=0;j<S;++j)
+    if (pooled && !f.compact_task_heads) for (int j=0;j<S;++j)
         f.executed_head_rows[j]=m.row(label("executed_head",j),'E',0,{{f.head[j],1}});
+    if (d.preprocessed_demand) {
+        // The assignment entity is a task, not its first OD. Build every row
+        // even when no physical column supports this task at this base: a
+        // positive task must then have zero executed assignment product.
+        f.task_rows.resize(d.task_count()*L);
+        for (int q=0;q<d.task_count();++q) for (int l=0;l<L;++l) {
+            const double rate=d.task_rate(q);
+            if (!std::isfinite(rate) || rate<0)
+                throw std::invalid_argument("Task assignment requires finite nonnegative task rates");
+            f.task_rows[q*L+l]=m.row(label("task",q,l),'E',0,
+                {{v[d.assignment_offset(q,l)],rate}});
+        }
+        for (int j=0;j<S;++j) {
+            const auto& segment=paths.initial_segments[j];
+            const int first=segment.first_od,l=segment.b[0];
+            f.single_rows[j]=f.task_rows[d.task_index(first)*L+l];
+            if (d.max_orders==2) for (int second=0;second<R;++second)
+                f.double_rows[j*R+second]=f.task_rows[d.task_index(first,second)*L+l];
+        }
+    }
     std::vector<std::vector<int>> by_pair(L*L);
     for (int g=0;g<G;++g) {
         const auto& indices=f.lift_groups[g];
@@ -294,7 +440,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         const int l=segment.b[0], b=segment.b[1], first=segment.first_od;
         const double h=d.demand[first], upper=std::min(1.0,d.effective_delta()*h);
         by_pair[l*L+b].push_back(g);
-        if (pooled) {
+        if (pooled && !f.compact_task_heads) {
             Coefficients row{{heads[g],1}};
             for (int j:indices) row.emplace_back(f.head[j],-1);
             m.row(label("group_head_link",g),'E',0,std::move(row));
@@ -317,26 +463,46 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
             for (int r=0;r<R;++r) row.emplace_back(u[g*R+r],d.demand[r]);
             m.row(label("eta_link",g),'E',0,std::move(row));
         }
-        Coefficients single=d.first_leg_consistency
-            ? Coefficients{{heads[g],d.head_rates[first]>0 ? d.single_rates[first]/d.head_rates[first] : 0}}
-            : d.preprocessed_demand
-            ? Coefficients{{v[d.assignment_offset(first,l)],d.single_rates[first]}}
-            : Coefficients{{heads[g],conditional_demand ? conditional_single(first,l,b) : 1}};
+        if (d.preprocessed_demand) continue;
+        Coefficients single{{heads[g],conditional_demand ? conditional_single(first,l,b) : 1}};
         if (lifted) for (int r=0;r<R;++r) single.emplace_back(u[g*R+r],-d.kappa(first,r)*d.demand[r]);
         int row=m.row(label("single",g),'E',0,std::move(single));
         for (int j:indices) f.single_rows[j]=row;
         if (active) for (int r=0;r<R;++r) {
             row=m.row(label("double",g,r),'E',0,
-                      d.first_leg_consistency ? Coefficients{{heads[g],d.head_rates[first]>0 ? d.pair_rates(first,r)/d.head_rates[first] : 0}}
-                      : d.preprocessed_demand ? Coefficients{{v[d.assignment_offset(first,l)],d.pair_rates(first,r)}}
-                      : conditional_demand ? Coefficients{{heads[g],conditional_probability(first,r,l,b)}}
+                      conditional_demand ? Coefficients{{heads[g],conditional_probability(first,r,l,b)}}
                                          : Coefficients{{u[g*R+r],d.kappa(first,r)*d.demand[r]}});
             for (int j:indices) f.double_rows[j*R+r]=row;
         }
     }
+    std::vector<int> compact_total_rows(f.compact_task_heads ? R*L : 0,-1);
     for (int l=0;l<L;++l) for (int b=0;b<d.assignment_destinations();++b) for (int r=0;r<R;++r) {
-        Coefficients row{{v[d.assignment_offset(r,l,b)],
-            -(d.preprocessed_demand ? d.head_rates[r] : d.demand[r])}};
+        Coefficients task_head;
+        if (d.preprocessed_demand) {
+            task_head.emplace_back(v[d.assignment_offset(d.task_index(r),l)],d.single_rates[r]);
+            if (d.max_orders==2) for (int s=0;s<R;++s)
+                task_head.emplace_back(v[d.assignment_offset(d.task_index(r,s),l)],d.pair_rates(r,s));
+        }
+        if(f.compact_task_heads) {
+            // The aggregate is derived from independently assigned tasks.
+            // No common head assignment or common task fraction is imposed.
+            const int row=m.row(label("orders",r,l),'E',0,task_head);
+            compact_total_rows[r*L+l]=row;
+            // Usually H_r<=lambda_r and v<=1 imply every removed head bound.
+            // Preserve the literal old upper bound for hand-built inputs or
+            // rounding edges with H_r>lambda_r, without relying on division.
+            if(d.head_rates[r]>d.demand[r]) {
+                m.row(label("compact_head_upper",r,l),'L',d.demand[r],task_head);
+                f.reduction_metadata["retained_head_bound_rows"]=
+                    f.reduction_metadata["retained_head_bound_rows"].get<int>()+1;
+            }
+            continue;
+        }
+        Coefficients row;
+        if (d.preprocessed_demand) {
+            row=std::move(task_head);
+            for (auto& term:row) term.second=-term.second;
+        } else row.emplace_back(v[d.assignment_offset(r,l,b)],-d.demand[r]);
         // Origin assignment selects only the departure base; return bases remain
         // in the route catalogue and the closed-network balance equations.
         std::vector<int> order_groups;
@@ -359,6 +525,16 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
         }
         m.row(label("orders",r,l,d.origin_assignment() ? -1 : b),'E',0,std::move(row));
     }
+    if(f.compact_task_heads) {
+        for(int j=0;j<S;++j) {
+            const auto& segment=paths.initial_segments[j];
+            f.executed_head_rows[j]=compact_total_rows[segment.first_od*L+segment.b[0]];
+        }
+        f.reduction_metadata["eliminated_head_variables"]=S+G;
+        f.reduction_metadata["eliminated_head_definition_rows"]=S+G;
+        f.reduction_metadata["total_head_rows_preserved"]=R*L;
+    }
+    f.strengthening_metadata["exact_task_reductions"]=f.reduction_metadata;
     for (int r=0;r<R;++r) f.order_rows.push_back(m.row(label("demand",r),'E',d.demand[r],{{f.courier[r],1}}));
     for (int l=0;l<L;++l) f.balance_rows.push_back(m.row(label("balance",l),'E',0));
     Coefficients fleet{{f.fleet,-1}};
@@ -385,6 +561,12 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
             else if (u>=L && v>=L) bound=total*(tight_airline_bounds ? 1 : d.max_orders);
             else bound=total;
         }
+        if (!strengthening.task_airline_upper.empty()) {
+            const double task_bound=strengthening.task_airline_upper[u*N+v];
+            if (!std::isfinite(task_bound) || task_bound<0)
+                throw std::invalid_argument("Invalid prepared task airline upper bound");
+            bound=std::min(bound,task_bound);
+        }
         f.link_rows.push_back(m.row(label("link",u,v),'L',0,{{y(u,v),-bound}}));
     }
     for (int i:f.service_indices) for (auto [row,value]:path_column(f,paths.service_paths[i])) m.coefficient(row,f.flow[i],value);
@@ -392,37 +574,92 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     return f;
 }
 Coefficients path_column(const Formulation& f,const ServicePath& p) {
-    const int R=static_cast<int>(f.order_rows.size()), N=static_cast<int>(std::sqrt(f.link_rows.size()));
-    const int j=p.segment_id;
-    int branch=p.second_od<0?f.single_rows.at(j):f.double_rows.at(j*R+p.second_od);
-    if (branch<0) throw std::invalid_argument("Missing service branch row");
-    Coefficients c{{branch,-1}};
-    if (f.executed_head_rows.at(j)>=0) c.emplace_back(f.executed_head_rows[j],-1);
-    for (auto [r,count]:p.served_counts) c.emplace_back(f.order_rows.at(r),count);
-    for (auto [i,time]:p.slot_times) c.emplace_back(f.capacity_rows.at(i),time);
-    if (p.b[0]!=p.b[1]) { c.emplace_back(f.balance_rows.at(p.b[0]),1); c.emplace_back(f.balance_rows.at(p.b[1]),-1); }
-    c.emplace_back(f.fleet_row,p.time);
-    for (auto [u,v,count]:p.arc_counts) c.emplace_back(f.link_rows.at(u*N+v),count);
-    return c;
+    Coefficients column;
+    for_each_path_coefficient(f,p,[&](int row,double value){column.emplace_back(row,value);});
+    return column;
 }
 Coefficients path_column(const Formulation& f,const EmptyPath& p) {
-    const int N=static_cast<int>(std::sqrt(f.link_rows.size()));
-    Coefficients c;
-    if (p.b[0]!=p.b[1]) { c.emplace_back(f.balance_rows.at(p.b[0]),1); c.emplace_back(f.balance_rows.at(p.b[1]),-1); }
-    c.emplace_back(f.fleet_row,p.time);
-    for (auto [u,v,count]:p.arc_counts) c.emplace_back(f.link_rows.at(u*N+v),count);
-    return c;
+    Coefficients column;
+    for_each_path_coefficient(f,p,[&](int row,double value){column.emplace_back(row,value);});
+    return column;
+}
+std::vector<double> recover_task_heads(const Formulation& f,const PathCollection& paths,
+                                       const std::vector<double>& values) {
+    if(values.size()!=f.matrix.variables.size() || f.head.size()!=paths.initial_segments.size())
+        throw std::invalid_argument("Head recovery dimensions disagree");
+    std::vector<double> heads(paths.initial_segments.size(),0);
+    if(!f.compact_task_heads) {
+        for(std::size_t j=0;j<heads.size();++j)heads[j]=values.at(f.head[j]);
+        return heads;
+    }
+    std::vector<long double> totals(heads.size(),0);
+    for(int id:f.service_indices) {
+        const auto& path=paths.service_paths.at(id);
+        totals.at(path.segment_id)+=values.at(f.flow.at(id));
+    }
+    for(std::size_t j=0;j<heads.size();++j)heads[j]=static_cast<double>(totals[j]);
+    return heads;
 }
 void add_columns(Formulation& f,NativeSolver& solver,const Input& d,const PathCollection& paths,
-                 const std::vector<int>& service,const std::vector<int>& empty) {
+                 const std::vector<int>& service,const std::vector<int>& empty,bool batch) {
     // Path coefficients do not depend on strategic values. The same sparse
     // insertion therefore applies to fixed-design recourse and the free
     // continuous formulation; all common rows are already materialized.
     const double total=std::accumulate(d.demand.begin(),d.demand.end(),0.0);
+    if(batch) {
+        // Validate both requested domains before appending any native or record
+        // columns. Build a bounded pending batch without touching current rows.
+        const auto selected_service=selected(paths.service_paths.size(),&service);
+        const auto selected_empty=selected(paths.empty_paths.size(),&empty);
+        std::vector<VariableRecord> variables;
+        std::vector<Coefficients> columns;
+        std::vector<int> added_service,added_empty;
+        std::vector<std::size_t> row_counts(f.matrix.rows.size(),0);
+        auto prepare=[&](int i,bool is_service) {
+            model_construction_guard("column_batch_preparation",f.matrix.variables.size(),f.matrix.rows.size(),f.matrix.cones.size());
+            variables.push_back({label(is_service?"flow":"empty_flow",i),0,
+                is_service?service_path_upper_bound(f,paths.service_paths[i]):total,
+                is_service?paths.service_paths[i].cost:paths.empty_paths[i].cost,false});
+            columns.push_back(is_service?path_column(f,paths.service_paths[i]):path_column(f,paths.empty_paths[i]));
+            for(auto [row,value]:columns.back())if(value)++row_counts.at(row);
+            (is_service?added_service:added_empty).push_back(i);
+        };
+        for(int i:selected_service)if((!f.zero_task_columns_eliminated || service_path_enabled(f,paths.service_paths[i])) &&
+            (i>=static_cast<int>(f.flow.size()) || f.flow[i]<0))prepare(i,true);
+        for(int i:selected_empty)if(i>=static_cast<int>(f.empty_flow.size()) || f.empty_flow[i]<0)prepare(i,false);
+        if(variables.empty())return;
+        const int first=static_cast<int>(f.matrix.variables.size());
+        auto reserve_growth=[](auto& values,std::size_t required) {
+            if(values.capacity()<required)values.reserve(std::max(required,values.capacity()*2));
+        };
+        reserve_growth(f.matrix.variables,f.matrix.variables.size()+variables.size());
+        for(std::size_t row=0;row<row_counts.size();++row)if(row_counts[row])
+            reserve_growth(f.matrix.rows[row].coefficients,f.matrix.rows[row].coefficients.size()+row_counts[row]);
+        f.flow.resize(paths.service_paths.size(),-1);f.empty_flow.resize(paths.empty_paths.size(),-1);
+        reserve_growth(f.service_indices,f.service_indices.size()+added_service.size());
+        reserve_growth(f.empty_indices,f.empty_indices.size()+added_empty.size());
+        // No budget check between a successful native insertion and its sparse
+        // record commit: interruption must never expose mismatched dimensions.
+        solver.add_variables(variables,columns);
+        for(std::size_t j=0;j<variables.size();++j) {
+            f.matrix.variables.push_back(std::move(variables[j]));
+            for(auto [row,value]:columns[j])if(value)f.matrix.rows[row].coefficients.emplace_back(first+static_cast<int>(j),value);
+        }
+        int index=first;
+        for(int i:added_service)f.flow[i]=index++;
+        for(int i:added_empty)f.empty_flow[i]=index++;
+        auto merge=[](std::vector<int>& target,const std::vector<int>& added) {
+            const auto split=target.size();target.insert(target.end(),added.begin(),added.end());
+            std::inplace_merge(target.begin(),target.begin()+split,target.end());
+        };
+        merge(f.service_indices,added_service);merge(f.empty_indices,added_empty);
+        return;
+    }
     f.flow.resize(paths.service_paths.size(),-1);
     f.empty_flow.resize(paths.empty_paths.size(),-1);
-    for (int i:selected(paths.service_paths.size(),&service)) if (f.flow[i]<0) {
-        int index=f.matrix.variable(label("flow",i),0,total,paths.service_paths[i].cost);
+    for (int i:selected(paths.service_paths.size(),&service)) if (f.flow[i]<0 &&
+        (!f.zero_task_columns_eliminated || service_path_enabled(f,paths.service_paths[i]))) {
+        int index=f.matrix.variable(label("flow",i),0,service_path_upper_bound(f,paths.service_paths[i]),paths.service_paths[i].cost);
         auto column=path_column(f,paths.service_paths[i]);
         for (auto [row,value]:column) f.matrix.coefficient(row,index,value);
         solver.add_variable(f.matrix.variables.back(),column);
@@ -587,6 +824,7 @@ Json solve_full(const Input& d,const PathCollection& paths,const SolverOptions& 
         result["solver_raw_objective"]=outcome.objective;
     }
     result["tight_airline_bounds"]=options.tight_airline_bounds;
+    result["exact_model_reductions"]=f.reduction_metadata;
     if (f.strengthening.enabled()) result["structural_strengthening"] = f.strengthening_metadata;
     result["method"]=fixed?"fixed_design":"full_path";
     result["solver"]="CPLEX";

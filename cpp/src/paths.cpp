@@ -70,7 +70,7 @@ bool first_segment(const Input& data, BasePair b, int r, int i, int j,
     const double t1 = data.flight_times(pickup, delivery);
     if (t1 + tolerance < data.effective_delta()) return false;
     const double q1 = t0 + first_wait(data.rider_mean(r, i), t0);
-    const double final = q1 + t1 + data.receipt_mean(r, j);
+    const double final = q1 + t1 + data.delivery_receipt(r, j);
     if (final > data.deadline[r] + tolerance) return false;
     segment = {id, b, r, i, j,
                {direct_leg(b[0], pickup), direct_leg(pickup, delivery)}, t0, t1};
@@ -124,7 +124,7 @@ bool service_path(const Input& data, const InitialSegment& segment,
     for (std::size_t k = 0; k < ods.size(); ++k) {
         const int od = ods[k], pickup = path.pickups[k], delivery = path.deliveries[k];
         const double q = path.pickup_times[k], t = loaded_times[k];
-        const double receipt = q + t + data.receipt_mean(od, delivery);
+        const double receipt = q + t + data.delivery_receipt(od, delivery);
         if (receipt > data.deadline[od] + tolerance) return false;
         path.delivery_times.push_back(receipt);
         ++served[od];
@@ -290,6 +290,12 @@ BranchSeedReport branch_covering_seed_paths(const Input& d, PathCollection& path
         return report.stopped;
     };
     auto assigned=[&](int r, BasePair b) {
+        if(d.preprocessed_demand) {
+            for(int q=0;q<d.task_count();++q)
+                if(d.task_first(q)==r && d.task_rate(q)>0 &&
+                   (!assignment_mask || (*assignment_mask)[d.assignment_offset(q,b[0])]!=0))return true;
+            return false;
+        }
         return d.demand[r]>0 && (!assignment_mask || (*assignment_mask)[d.assignment_offset(r,b[0],b[1])]!=0);
     };
     using Group=std::array<int,3>;
@@ -335,8 +341,14 @@ BranchSeedReport branch_covering_seed_paths(const Input& d, PathCollection& path
     for (auto& entry:groups) {
         const auto& key=entry.first;
         std::sort(entry.second.begin(),entry.second.end());
-        std::vector<int> branches{-1};
-        if (d.effective_delta()>0)
+        std::vector<int> branches;
+        if(d.preprocessed_demand) {
+            for(int q=0;q<d.task_count();++q)
+                if(d.task_first(q)==key[2] && d.task_rate(q)>0 &&
+                   (!assignment_mask || (*assignment_mask)[d.assignment_offset(q,key[0])]!=0))
+                    branches.push_back(d.task_second(q));
+        } else branches.push_back(-1);
+        if (!d.preprocessed_demand && d.effective_delta()>0)
             for (int r=0;r<d.n_od;++r)
                 if (assigned(r,{key[0],key[1]}) && d.kappa(key[2],r)>0) branches.push_back(r);
         ++report.groups_requested;
@@ -469,7 +481,7 @@ PathCollection enumerate_paths(const Input& data,
                     const double back = data.flight_times(delivery, return_base);
                     // Exact q2/receipt expression from build_service_path.
                     const double q2 = transfer + data.effective_delta() / 2 + wait;
-                    const double receipt = q2 + loaded + data.receipt_mean(s, j);
+                    const double receipt = q2 + loaded + data.delivery_receipt(s, j);
                     if (receipt > data.deadline[s] + tolerance) continue;
                     list.push_back({s, i, j, transfer, loaded, back, wait});
                 }

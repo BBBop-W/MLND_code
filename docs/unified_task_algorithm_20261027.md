@@ -86,10 +86,19 @@ share the requested wall-time budget; output finalization is reported separately
 
 The shared formulation accepts assignment incident rows, the joint `alpha*rho`
 strengthening, queue perspective cones, and the tight physical airline bounds.
-The existing continuous-root calculation, exact dual certification, Pareto
-selection, dual-LP reuse, column reuse, resource/capacity feedback, root
-projection, incumbent cutoff, cleanup, and primal/neighborhood search remain
-available.
+The existing continuous-root calculation, full-domain dual certification,
+Pareto selection, column reuse, resource/capacity feedback, root projection,
+incumbent cutoff, cleanup, and primal/neighborhood search remain available.
+Ordinary recourse duals now come directly from CPLEX native getters; the legacy
+dual-LP options are compatibility-only. Resource separation LPs and Pareto
+auxiliary optimization remain distinct strengthening steps. See
+[native dual extraction](native_dual_20261028.md).
+
+With optional weak cuts, full-domain validity after complete pricing and
+conservative correction is distinct from a tight recourse optimality
+certificate. Only the latter sets `recourse_optimal`; a valid weak cut does not
+certify an optimal recourse solution or exclude an entire design. See
+[bounds improvements](bounds_improvement_20261028.md).
 
 The initial design heuristic now evaluates the entire fixed collection of tasks
 headed by `r`, allows different physical return bases, and checks positive fixed

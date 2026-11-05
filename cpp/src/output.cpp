@@ -4,7 +4,9 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <numeric>
+#include <set>
 #include <sstream>
 
 namespace mlnd {
@@ -25,7 +27,7 @@ Json zeros(int size) { return std::vector<double>(size, 0); }
 Json empty_solution(const Input& data, const PathCollection& paths) {
     Json capacity = Json::array(), assignment = Json::array(), airline = Json::array();
     for (int h = 0; h < data.n_h; ++h) capacity.push_back(zeros(data.n_levels));
-    for (int r = 0; r < data.n_od; ++r) {
+    for (int r = 0; r < data.assignment_entities(); ++r) {
         Json row = Json::array();
         for (int l = 0; l < data.n_l; ++l)
             row.push_back(data.origin_assignment() ? Json(0.0) : zeros(data.n_l));
@@ -80,8 +82,9 @@ Metrics metrics(const Input& data, const PathCollection& paths, const Json& solu
         }
     };
     for (std::size_t index = 0; index < paths.service_paths.size(); ++index) {
-        const auto& path = paths.service_paths[index];
         const double flow = solution.at("flow").at(index).get<double>();
+        if (flow == 0) continue;
+        const auto& path = paths.service_paths[index];
         out.outflow[path.b[0]] += flow;
         out.inflow[path.b[1]] += flow;
         out.busy[path.b[0]] += flow * path.time;
@@ -102,8 +105,9 @@ Metrics metrics(const Input& data, const PathCollection& paths, const Json& solu
         arc_activity(path.arc_counts, flow);
     }
     for (std::size_t index = 0; index < paths.empty_paths.size(); ++index) {
-        const auto& path = paths.empty_paths[index];
         const double flow = solution.at("empty_flow").at(index).get<double>();
+        if (flow == 0) continue;
+        const auto& path = paths.empty_paths[index];
         out.outflow[path.b[0]] += flow;
         out.inflow[path.b[1]] += flow;
         out.busy[path.b[0]] += flow * path.time;
@@ -114,6 +118,41 @@ Metrics metrics(const Input& data, const PathCollection& paths, const Json& solu
         arc_activity(path.arc_counts, flow);
     }
     return out;
+}
+
+bool compact_records(const Input& data) {
+    // Prefix policies need additional branch-level support. Keep their legacy
+    // records until an equivalent certificate is implemented for that policy.
+    return data.preprocessed_demand && data.flow_policy == "aggregate" &&
+           !data.first_leg_consistency;
+}
+
+const std::vector<int>& service_witnesses(const PathCollection& paths) {
+    if (paths.output_witness_service_size == paths.service_paths.size())
+        return paths.output_service_witnesses;
+    std::map<std::tuple<int,int,int>, int> least_cost;
+    std::map<std::pair<int,int>, std::pair<int,int>> maximum_traversal;
+    for (std::size_t index = 0; index < paths.service_paths.size(); ++index) {
+        const auto& p = paths.service_paths[index];
+        // These paths jointly preserve global task minimum costs and every
+        // departure-base support indicator used in fixed-demand reconstruction.
+        const auto key = std::make_tuple(p.first_od, p.second_od, p.b[0]);
+        auto [entry, inserted] = least_cost.emplace(key, static_cast<int>(index));
+        if (!inserted && p.cost < paths.service_paths[entry->second].cost)
+            entry->second = static_cast<int>(index);
+        for (const auto& [u,v,count] : p.arc_counts) {
+            auto [arc, added] = maximum_traversal.emplace(std::make_pair(u,v),
+                std::make_pair(count, static_cast<int>(index)));
+            if (!added && count > arc->second.first)
+                arc->second = {count, static_cast<int>(index)};
+        }
+    }
+    std::set<int> selected;
+    for (const auto& [key, index] : least_cost) selected.insert(index);
+    for (const auto& [key, value] : maximum_traversal) selected.insert(value.second);
+    paths.output_service_witnesses.assign(selected.begin(), selected.end());
+    paths.output_witness_service_size = paths.service_paths.size();
+    return paths.output_service_witnesses;
 }
 
 Json metric_json(const Input& data, const Json& solution, const Metrics& m) {
@@ -134,24 +173,62 @@ Json metric_json(const Input& data, const Json& solution, const Metrics& m) {
                 {"repositioning", m.empty_cost}, {"direct_courier", m.courier_cost}}}};
 }
 
+bool task_rates_available(const Input& data) {
+    return data.single_rates.size()==static_cast<std::size_t>(data.n_od) &&
+        data.head_rates.size()==static_cast<std::size_t>(data.n_od) &&
+        data.pair_rates.rows==data.n_od && data.pair_rates.cols==data.n_od;
+}
+
+Json task_table(const Input& data) {
+    Json tasks=Json::array();
+    if(data.preprocessed_demand)for(int q=0;q<data.task_count();++q)
+        tasks.push_back({{"task",q},{"first_od",data.task_first(q)},
+            {"second_od",data.task_second(q)},
+            {"rate",task_rates_available(data)?Json(data.task_rate(q)):Json(nullptr)}});
+    return tasks;
+}
+
 Json package(const Input& data, const PathCollection& paths, Json solution) {
+    if(data.preprocessed_demand) {
+        solution["task_indexing"]="singles_then_row_major_pairs";
+        solution["task_table"]=task_table(data);
+    }
+    solution["delivery_time_scope"]="courier_home";
     const Metrics m = metrics(data, paths, solution);
     Json missions = Json::array(), relocations = Json::array();
-    for (std::size_t index = 0; index < paths.service_paths.size(); ++index)
-        missions.push_back({{"path", paths.service_paths[index]}, {"flow", solution.at("flow").at(index)}});
+    const bool compact = compact_records(data);
+    const auto* witnesses = compact ? &service_witnesses(paths) : nullptr;
+    std::size_t next_witness = 0;
+    for (std::size_t index = 0; index < paths.service_paths.size(); ++index) {
+        const bool witness = compact && next_witness < witnesses->size() &&
+                             static_cast<std::size_t>((*witnesses)[next_witness]) == index;
+        if (witness) ++next_witness;
+        const double flow = solution.at("flow").at(index).get<double>();
+        // Equality is intentional: preserve negative and arbitrarily small
+        // nonzero values so downstream physical validation can inspect them.
+        if (!compact || witness || flow != 0)
+            missions.push_back({{"path", paths.service_paths[index]}, {"flow", flow}});
+    }
     for (std::size_t index = 0; index < paths.empty_paths.size(); ++index)
         relocations.push_back({{"path", paths.empty_paths[index]}, {"flow", solution.at("empty_flow").at(index)}});
     const double demand = std::accumulate(data.demand.begin(), data.demand.end(), 0.0);
     const double served = std::accumulate(m.served.begin(), m.served.end(), 0.0);
     const Json totals = metric_json(data, solution, m);
-    Json result={{"assignment_scope", data.assignment_scope()}, {"model_version", data.model_version}, {"flow_policy", data.flow_policy},
+    Json result={{"delivery_time_scope","courier_home"},{"assignment_scope", data.assignment_scope()}, {"model_version", data.model_version}, {"flow_policy", data.flow_policy},
             {"objective", m.opening() + m.continuous()}, {"continuous_cost", m.continuous()},
             {"opening_cost", m.opening()}, {"demand", demand}, {"served", served},
             {"fleet", solution.at("fleet")}, {"metrics", totals},
+            {"path_record_storage", compact ? "nonzero_and_statistics_witnesses" : "registered_dense"},
+            {"path_record_counts", {{"service",missions.size()},{"empty",relocations.size()},
+                {"service_statistics_witnesses",compact ? witnesses->size() : 0}}},
             {"_solution", std::move(solution)}, {"_segments", paths.initial_segments},
             {"_missions", std::move(missions)}, {"_relocations", std::move(relocations)}};
     if(data.preprocessed_demand) {
         result["demand_formulation"]="preprocessed";
+        result["task_indexing"]="singles_then_row_major_pairs";
+        result["task_count"]=data.task_count();
+        result["task_rates_available"]=task_rates_available(data);
+        result["task_table"]=task_table(data);
         result["preprocessed_demand"]=data.preprocessed_demand_report;
         result["first_leg_consistency"]=data.first_leg_consistency;
         if(data.first_leg_consistency)
@@ -203,33 +280,50 @@ std::string number(double value) {
 
 Json solution_json(const Input& data, const PathCollection& paths,
                    const Formulation& formulation, const std::vector<double>& values) {
-    Json solution = empty_solution(data, paths);
+    // Populate the actual point directly. In particular, do not first create
+    // dense zero flow/head arrays only to replace all of them immediately.
+    Json facility=Json::array(),capacity=Json::array(),assignment=Json::array(),airline=Json::array();
     const auto& layout = formulation.layout;
     for (int u = 0; u < data.n_nodes(); ++u)
-        solution["facility"][u] = std::round(values.at(layout.facility + u));
-    for (int h = 0; h < data.n_h; ++h)
+        facility.push_back(std::round(values.at(layout.facility + u)));
+    for (int h = 0; h < data.n_h; ++h) {
+        Json row=Json::array();
         for (int level = 0; level < data.n_levels; ++level)
-            solution["capacity_level"][h][level] = std::round(values.at(layout.capacity + h * data.n_levels + level));
-    for (int r = 0; r < data.n_od; ++r)
-        for (int l = 0; l < data.n_l; ++l)
+            row.push_back(std::round(values.at(layout.capacity + h * data.n_levels + level)));
+        capacity.push_back(std::move(row));
+    }
+    for (int r = 0; r < data.assignment_entities(); ++r) {
+        Json row=Json::array();
+        for (int l = 0; l < data.n_l; ++l) {
+            Json destinations=Json::array();
             for (int m = 0; m < data.assignment_destinations(); ++m) {
                 const double value = std::round(values.at(layout.assignment_index(r,l,m)));
-                if (data.origin_assignment()) solution["assignment"][r][l] = value;
-                else solution["assignment"][r][l][m] = value;
+                if (data.origin_assignment()) row.push_back(value);
+                else destinations.push_back(value);
             }
-    for (int u = 0; u < data.n_nodes(); ++u)
+            if (!data.origin_assignment()) row.push_back(std::move(destinations));
+        }
+        assignment.push_back(std::move(row));
+    }
+    for (int u = 0; u < data.n_nodes(); ++u) {
+        Json row=Json::array();
         for (int v = 0; v < data.n_nodes(); ++v)
-            solution["airline"][u][v] = std::round(values.at(layout.airline + u * data.n_nodes() + v));
+            row.push_back(std::round(values.at(layout.airline + u * data.n_nodes() + v)));
+        airline.push_back(std::move(row));
+    }
+    Json solution={{"facility",std::move(facility)},{"capacity_level",std::move(capacity)},
+        {"assignment",std::move(assignment)},{"assignment_scope",data.assignment_scope()},
+        {"airline",std::move(airline)}};
     solution["rho"] = extract(values, formulation.rho);
     solution["idle"] = extract(values, formulation.idle);
-    solution["head"] = extract(values, formulation.head);
+    const auto head = recover_task_heads(formulation,paths,values);
+    solution["head"] = head;
     solution["courier"] = extract(values, formulation.courier);
     solution["fleet"] = variable_value(values, formulation.fleet);
     solution["flow"] = extract(values, formulation.flow);
     solution["empty_flow"] = extract(values, formulation.empty_flow);
     while (solution["flow"].size() < paths.service_paths.size()) solution["flow"].push_back(0.0);
     while (solution["empty_flow"].size() < paths.empty_paths.size()) solution["empty_flow"].push_back(0.0);
-    const auto head = solution.at("head").get<std::vector<double>>();
     std::vector<double> eta(paths.initial_segments.size(), 0);
     if (formulation.conditional_demand) {
         if (formulation.segment_eta_factor.size() != eta.size())
@@ -250,7 +344,9 @@ Json solution_json(const Input& data, const PathCollection& paths,
         }
     }
     solution["eta"] = std::move(eta);
-    return package(data, paths, std::move(solution));
+    auto result=package(data, paths, std::move(solution));
+    result["exact_model_reductions"]=formulation.reduction_metadata;
+    return result;
 }
 
 void synchronize_result_paths(const Input& data, const PathCollection& paths, Json& result) {
@@ -262,6 +358,35 @@ void synchronize_result_paths(const Input& data, const PathCollection& paths, Js
     while (solution["flow"].size() < paths.service_paths.size()) solution["flow"].push_back(0.0);
     while (solution["empty_flow"].size() < paths.empty_paths.size()) solution["empty_flow"].push_back(0.0);
     result.update(package(data, paths, std::move(solution)));
+}
+
+void validate_result_path_records(const PathCollection& paths, const Json& result) {
+    const auto& saved = result.at("_solution");
+    auto check = [&](const char* records, const char* flow, const auto& pool) {
+        if (!result.contains(records)) return;
+        const auto& rows = result.at(records);
+        const auto& values = saved.at(flow);
+        if (!rows.is_array() || !values.is_array() || values.size() > pool.size())
+            throw std::invalid_argument("Incumbent physical records do not match its column prefix");
+        std::vector<bool> seen(values.size(), false);
+        for (const auto& row : rows) {
+            const auto& id = row.at("path").at("id");
+            if (!id.is_number_integer())
+                throw std::invalid_argument("Incumbent physical record ID is not an integer");
+            const int index = id.get<int>();
+            if (index < 0 || static_cast<std::size_t>(index) >= values.size() || seen[index])
+                throw std::invalid_argument("Incumbent physical record ID is duplicated or out of range");
+            seen[index] = true;
+            const Json expected = pool[index];
+            if (row.at("path") != expected || row.at("flow") != values.at(index))
+                throw std::invalid_argument("Incumbent path identity or flow differs from the current column prefix");
+        }
+        for (std::size_t index = 0; index < values.size(); ++index)
+            if (values.at(index).get<double>() != 0 && !seen[index])
+                throw std::invalid_argument("Nonzero incumbent flow has no physical record");
+    };
+    check("_missions", "flow", paths.service_paths);
+    check("_relocations", "empty_flow", paths.empty_paths);
 }
 
 Json all_courier_result(const Input& data, const PathCollection& paths) {
@@ -283,16 +408,26 @@ std::vector<double> solution_design(const Input& data, const Json& supplied) {
         throw std::invalid_argument("Assignment scope does not match this model");
     if (solution.contains("assignment_scope") && solution.at("assignment_scope") != data.assignment_scope())
         throw std::invalid_argument("Solution assignment scope does not match this model");
+    if(data.preprocessed_demand) {
+        // Old head-group assignments must never be silently reinterpreted as
+        // independent tasks, even for K1 where the dimensions happen to match.
+        if(solution.value("assignment_scope",std::string())!="task")
+            throw std::invalid_argument("Task assignment scope is required for this model");
+        if(solution.contains("task_indexing") && solution.at("task_indexing")!="singles_then_row_major_pairs")
+            throw std::invalid_argument("Unknown task assignment indexing");
+        if(solution.contains("task_table") && solution.at("task_table")!=task_table(data))
+            throw std::invalid_argument("Task table does not match this model");
+    }
     const auto& assignments = solution.at("assignment");
-    if (!assignments.is_array() || assignments.size() != static_cast<std::size_t>(data.n_od))
-        throw std::invalid_argument("Wrong assignment OD dimension");
+    if (!assignments.is_array() || assignments.size() != static_cast<std::size_t>(data.assignment_entities()))
+        throw std::invalid_argument("Wrong assignment entity dimension");
     for (const auto& row : assignments) {
         if (!row.is_array() || row.size() != static_cast<std::size_t>(data.n_l))
             throw std::invalid_argument("Wrong assignment departure dimension");
         for (const auto& cell : row) {
             if (data.origin_assignment() ? !cell.is_number() :
                 (!cell.is_array() || cell.size() != static_cast<std::size_t>(data.n_l)))
-                throw std::invalid_argument("Assignment shape mismatch: K=1 requires [OD, departure]; legacy base-pair solutions are not a fixed design for this model");
+                throw std::invalid_argument("Assignment shape mismatch: task/origin models require [entity, departure]; base-pair models require [OD, departure, return]");
         }
     }
     std::vector<double> design(layout.count, 0);
@@ -300,7 +435,7 @@ std::vector<double> solution_design(const Input& data, const Json& supplied) {
     for (int h = 0; h < data.n_h; ++h)
         for (int level = 0; level < data.n_levels; ++level)
             design[layout.capacity + h * data.n_levels + level] = solution.at("capacity_level").at(h).at(level);
-    for (int r = 0; r < data.n_od; ++r)
+    for (int r = 0; r < data.assignment_entities(); ++r)
         for (int l = 0; l < data.n_l; ++l)
             for (int m = 0; m < data.assignment_destinations(); ++m)
                 design[layout.assignment_index(r,l,m)] = assignment_value(data,assignments,r,l,m);
@@ -308,6 +443,45 @@ std::vector<double> solution_design(const Input& data, const Json& supplied) {
         for (int v = 0; v < data.n_nodes(); ++v)
             design[layout.airline + u * data.n_nodes() + v] = solution.at("airline").at(u).at(v);
     return design;
+}
+
+Json write_complete_catalogue(const std::filesystem::path& file, const Input& data,
+                              const PathCollection& paths) {
+    if (!paths.complete || !paths.support_complete)
+        throw std::invalid_argument("Complete catalogue export requires complete paths and support");
+    const Json counts = {{"segments",paths.initial_segments.size()},
+        {"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
+    const Json header = {{"schema","mlnd-complete-catalogue/1"},{"complete",true},
+        {"scope",paths.scope},{"model_version",data.model_version},
+        {"demand_formulation",data.preprocessed_demand ? "preprocessed" : "legacy"},
+        {"max_orders",data.max_orders},{"assignment_scope",data.assignment_scope()},
+        {"flow_policy",data.flow_policy},{"first_leg_consistency",data.first_leg_consistency},
+        {"counts",counts}};
+    if (!file.parent_path().empty()) std::filesystem::create_directories(file.parent_path());
+    const auto temporary = file.string() + ".tmp";
+    std::ofstream stream(temporary);
+    if (!stream) throw std::runtime_error("Cannot open catalogue output: " + file.string());
+    const auto prefix = header.dump();
+    stream << prefix.substr(0, prefix.size()-1);
+    const auto write_paths = [&](const char* key, const auto& records) {
+        stream << ",\"" << key << "\":[";
+        bool first = true;
+        for (const auto& path : records) {
+            if (!first) stream << ',';
+            first = false;
+            stream << Json(path).dump();
+        }
+        stream << ']';
+    };
+    write_paths("segments", paths.initial_segments);
+    write_paths("service", paths.service_paths);
+    write_paths("empty", paths.empty_paths);
+    stream << "}\n";
+    stream.close();
+    if (!stream) throw std::runtime_error("Cannot write catalogue output: " + file.string());
+    std::filesystem::rename(temporary, file);
+    return {{"file",file.filename().string()},{"schema",header.at("schema")},
+        {"complete",true},{"counts",counts},{"sha256",sha256_file(file)}};
 }
 
 void write_result(const std::filesystem::path& directory, const Input& data,
@@ -325,6 +499,7 @@ void write_result(const std::filesystem::path& directory, const Input& data,
     json_file(directory / "input_reference.json", {{"instance_path", data.instance_path.string()},
               {"manifest", data.manifest}, {"model", data.model_json}, {"max_orders", data.max_orders},
               {"assignment_scope",data.assignment_scope()},
+              {"delivery_time_scope","courier_home"},
               {"first_leg_consistency",data.first_leg_consistency},
               {"demand_formulation",result.value("demand_formulation",std::string("lifted"))}});
     if(data.preprocessed_demand && !data.preprocessed_demand_report.is_null())
@@ -388,7 +563,7 @@ void write_result(const std::filesystem::path& directory, const Input& data,
         "courier_per_hour", "served_fraction", "assignment_departure", "assignment_return", "rho_departure", "mean_receipt_minutes"});
     for (int r = 0; r < data.n_od; ++r) {
         int departure = -1, destination = -1;
-        for (int l = 0; l < data.n_l; ++l)
+        if(!data.preprocessed_demand)for (int l = 0; l < data.n_l; ++l)
             for (int b = 0; b < data.assignment_destinations(); ++b)
                 if (assignment_value(data,solution.at("assignment"),r,l,b) > 0.5) {
                     departure = l; destination = data.origin_assignment() ? -1 : b;
@@ -398,6 +573,20 @@ void write_result(const std::filesystem::path& directory, const Input& data,
             departure < 0 ? "" : data.base_ids[departure], destination < 0 ? "" : data.base_ids[destination],
             departure < 0 ? "" : number(solution.at("rho").at(departure)),
             m.served[r] > 0 ? number(60 * m.receipt_weight[r] / m.served[r]) : ""});
+    }
+    if(data.preprocessed_demand) {
+        Csv tasks(directory / "task_assignments.csv", {"task", "first_od", "second_od", "rate_per_hour",
+            "assignment_departure", "rho_departure", "served_tasks_per_hour"});
+        for(int q=0;q<data.task_count();++q) {
+            int departure=-1;
+            for(int l=0;l<data.n_l;++l)
+                if(assignment_value(data,solution.at("assignment"),q,l)>.5)departure=l;
+            const double rho=departure<0?0:solution.at("rho").at(departure).get<double>();
+            const int second=data.task_second(q);
+            tasks.row({std::to_string(q),data.od_ids.at(data.task_first(q)),second<0?"":data.od_ids.at(second),
+                task_rates_available(data)?number(data.task_rate(q)):"",departure<0?"":data.base_ids.at(departure),
+                departure<0?"":number(rho),task_rates_available(data)?number(data.task_rate(q)*rho):""});
+        }
     }
     Csv links(directory / "links.csv", {"from_site", "to_site", "open", "traversals_per_hour", "flight_minutes", "fixed_cost_cny_per_hour"});
     for (int u = 0; u < data.n_nodes(); ++u)
@@ -410,7 +599,10 @@ void write_result(const std::filesystem::path& directory, const Input& data,
     std::ofstream notes(directory / "OUTPUT_README.txt");
     notes << "Native C++ outputs; no Python runtime is required.\n"
           << "result.json is the solve overview; solution.json stores all decision arrays.\n"
-          << "path_flows.json preserves the registered columns including zero flows for independent verification.\n"
+          << "path_flows.json uses original registered path IDs; solution.json retains dense indexed decision arrays.\n"
+          << "For aggregate fixed-demand models without first-leg consistency it stores every strictly nonzero flow\n"
+          << "and zero-flow witnesses preserving minimum task costs by departure, task support and maximum arc traversals.\n"
+          << "Other policies retain dense registered records. See result.json path_record_storage and path_record_counts.\n"
           << "For implicit CG this is a generated subset, not the complete feasible path universe.\n"
           << "path_flows.csv includes every nonzero flow; tiny numerical flows are not silently removed.\n"
           << "All rates are per hour; all monetary rates are CNY/hour. Path unit costs are CNY/task.\n"

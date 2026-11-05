@@ -110,15 +110,19 @@ def _manual_preprocessed(data=None):
     fixed = generalized_demand(data.demand, data.effective_delta, data.kappa, c1, c2, s1, s2)
     rho = np.zeros(data.n_l)
     rho[0] = 0.5
-    assignment = np.zeros((2, data.n_l))
+    task_count = 2 if data.max_orders == 1 else 6
+    assignment = np.zeros((task_count, data.n_l))
     assignment[0, 0] = 1.0
+    if data.max_orders == 2:
+        assignment[2:4, 0] = 1.0
     flow = np.zeros(len(paths.service_paths))
     head = np.zeros(len(paths.initial_segments))
     served = np.zeros(2)
     for r in range(2):
         for s in (None, 0, 1):
             rate = fixed.single_rates[r] if s is None else fixed.pair_rates[r, s]
-            amount = rate * assignment[r, 0] * rho[0]
+            q = r if s is None else 2 + 2*r + s
+            amount = rate * assignment[q, 0] * rho[0] if rate > 0 else 0.0
             if amount == 0:
                 continue
             p = min(
@@ -148,7 +152,12 @@ def _manual_preprocessed(data=None):
         max_orders=data.max_orders,
         flow_policy="aggregate",
         demand_formulation="preprocessed",
-        assignment_scope="origin",
+        assignment_scope="task",
+        task_indexing="singles_then_row_major_pairs",
+        task_table=[dict(task=q,first_od=q if q < 2 else (q-2)//2,
+            second_od=-1 if q < 2 else (q-2)%2,
+            rate=float(fixed.single_rates[q] if q < 2 else fixed.pair_rates[(q-2)//2,(q-2)%2]))
+            for q in range(task_count)],
         objective=float(costs),
         preprocessed_demand=dict(
             single_rates=fixed.single_rates.tolist(),
@@ -187,7 +196,7 @@ def test_single_order_uses_the_same_fixed_task_validation_and_origin_assignment(
     ))
     ops = build_operations(data, result)
     assert ops["summary"]["checks"]["passed"], ops["summary"]["checks"]
-    assert ops["summary"]["assignment_scope"] == "origin"
+    assert ops["summary"]["assignment_scope"] == "task"
     np.testing.assert_array_equal(result["preprocessed_demand"]["single_rates"], data.demand)
     assert np.asarray(result["preprocessed_demand"]["pair_rates"]).sum() == 0
     assert all(row["path"]["second_od"] is None for row in result["_missions"])
@@ -198,7 +207,8 @@ def test_independent_audit_allows_second_order_with_unassigned_own_head():
     ops = build_operations(data, result)
     assert ops["summary"]["checks"]["passed"], ops["summary"]["checks"]
     second = ops["tables"]["orders"][1]
-    assert second["assigned"] is False
+    assert second["assigned"] is True  # Its pair task is independently assigned.
+    assert result["_solution"]["assignment"][1].sum() == 0
     assert second["drone_per_hour"] == pytest.approx(second["second_per_hour"])
     assert second["second_per_hour"] > 0
     assert ops["summary"]["unassigned_direct_orders_per_hour"] + ops["summary"][
@@ -269,10 +279,9 @@ def test_first_leg_consistency_accepts_an_ex_ante_continuous_split():
         data, original, {None: (0.4, 0.6), 0: (0.4, 0.6), 1: (0.4, 0.6)}
     )
     result["first_leg_consistency"] = True
-    checked = build_operations(data, result)["summary"]
-    assert checked["checks"]["passed"], checked["checks"]
-    assert checked["first_leg_consistency"] is True
-    # The stronger first-leg condition is a subset of the unchanged aggregate model.
+    with pytest.raises(ValueError, match="incompatible with independent tasks"):
+        build_operations(data, result)
+    # Independent tasks may retain the same physical first leg by choice.
     result["first_leg_consistency"] = False
     assert build_operations(data, result)["summary"]["checks"]["passed"]
     assert result["preprocessed_demand"] == original["preprocessed_demand"]
@@ -286,11 +295,8 @@ def test_first_leg_consistency_detects_future_branch_dependent_first_legs(second
     )
     assert build_operations(data, result)["summary"]["checks"]["passed"]
     result["first_leg_consistency"] = True
-    checked = build_operations(data, result)["summary"]["checks"]
-    assert not checked["passed"]
-    assert checked["residuals"]["aggregate_double_branches"] < 1e-12
-    assert checked["residuals"]["task_reconstruction"] < 1e-12
-    assert checked["residuals"]["consistent_first_leg_double_branches"] > 0.01
+    with pytest.raises(ValueError, match="incompatible with independent tasks"):
+        build_operations(data, result)
 
 
 def test_first_leg_consistency_flag_requires_boolean_and_fixed_demand_mode():
@@ -303,7 +309,7 @@ def test_first_leg_consistency_flag_requires_boolean_and_fixed_demand_mode():
     data = instance()
     result = single_solution(data)
     result["first_leg_consistency"] = True
-    with pytest.raises(ValueError, match="requires preprocessed demand"):
+    with pytest.raises(ValueError, match="incompatible with independent tasks"):
         build_operations(data, result)
 
 
@@ -322,7 +328,7 @@ def test_first_leg_consistency_groups_identical_routes_across_different_returns(
         ],
     )
     data, result = _manual_preprocessed(data)
-    result["first_leg_consistency"] = True
+    result["first_leg_consistency"] = False
     sol = result["_solution"]
     sol["flow"][:] = 0
     sol["head"][:] = 0

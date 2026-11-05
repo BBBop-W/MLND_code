@@ -1,3 +1,7 @@
+# 当前模型更新（2026-11-05）
+
+任务指派、骑手送达时限及相关认证已直接迁移；当前用法以[入口说明](../docs/current_baseline.md)为准。下文保留参数和历史诊断接口说明。旧实验只通过冻结程序复现。
+
 # consecutive：C++ / CPLEX 实现
 
 此目录提供原生 C++17 求解入口，直接读取 `consecutive-csv/1` 的 CSV/JSON 实例，通过隐式列生成或全路径基准调用 CPLEX Concert，并写出 JSON/CSV 结果。**读取、求解、结果输出均不需要 Python 进程或 NPZ 文件**。Python 代码用于独立复核、Gurobi 对照和后续分析。
@@ -6,16 +10,16 @@
 
 `examples/` 中的实例采用原生 CSV/JSON 格式，供本目录程序或 `python -m src.experiments.native gurobi --instance ...` 使用。Python 常规入口 `main.py run --input` 需要 `input_metadata.json` / `input_arrays.npz` 快照，例如 `data/benchmarks/tsl_2l20h50od/`；两种目录不能互换。
 
-当前分支的 **K=1 使用 OD × 出发基地分配**，返回基地由服务路径选择；K=2 仍使用 OD × 出发基地 × 返回基地分配。路径中的出发/返回端点、基地流量平衡和空飞调拨均保留。两种 K 的对照现在同时包含分配域差异；历史 K=1 基地对结果也不能直接当作当前 K=1 的同模型算法基准。公式和迁移边界见 [K=1 起点分配说明](../docs/k1_origin_assignment.md)。
+当前实现使用固定广义任务模型（`preprocessed`），**每个单/双订单任务独立选择出发基地**，输出 `assignment_scope="task"`；K1 的分配及可用率乘积数组为 `(R,L)`，K2 为 `(R+R²,L)`。单单/有序双单任务率在完整路径目录上预处理后固定；返回基地由路径选择，基地流量平衡和空飞调拨均保留。当前两种 K 可以在同一分配域下比较。
 
-K=1 输出 `assignment_scope="origin"`，分配及可用率乘积数组为 `(R,L)`；K=2 保留基地对数组。K=1 明确拒绝 `--assignment-support-cuts`、`--double-support-cuts`、`--joint-base-cost-cuts`：这三项当前使用固定返回基地的证书。一般成本下界在可选返回基地上取最小值；资源 LP 保留交付和出发侧门控，K=1 不使用返回分配门控。公共模型、完整路径、Benders 和 CG 仍保留完整返回路径。
+仅历史无 preset 的 `lifted` / `conditional` 调用保留旧定义：K=1 为 `origin`，K=2 为 `base_pair`。历史基地对结果不能直接当作当前 baseline 的同模型基准，迁移边界见 [K=1 起点分配说明](../docs/k1_origin_assignment.md)。`origin` 模型拒绝依赖固定返回基地证书的 `--assignment-support-cuts`、`--double-support-cuts`、`--joint-base-cost-cuts`。一般成本下界在可选返回基地上取最小值，公共模型、完整路径、Benders 和 CG 均保留全部可行返回路径。
 
 ## 代码组成与复用
 
 | 文件组 | 职责 |
 |---|---|
 | `include/mlnd/` | 输入、路径、矩阵、求解结果和算法的公共类型与接口 |
-| `src/input.cpp`、`main.cpp` | 标准 CSV/JSON 实例校验、配置、命令行和运行入口 |
+| `src/input.cpp`、`main.cpp`、`solver_presets.cpp` | 实例校验、命令行、版本配置、统一开关和依赖校验 |
 | `src/paths.cpp` | 首段、完整服务/空飞路径及统一资源系数；完整枚举和定价共用 |
 | `src/formulation.cpp`、`linear_model.cpp` | 设计与运营约束、稀疏列系数、锥模型及 Concert 调用 |
 | `src/benders.cpp`、`dual_workspace.cpp` | 外层 Benders、固定设计 SOCP、认证对偶、列池和增量对偶 LP |
@@ -27,9 +31,9 @@ K=1 输出 `assignment_scope="origin"`，分配及可用率乘积数组为 `(R,L
 
 修改模型时先改公共构造与索引，再核对完整模型、Benders、定价、固定设计和导出；不要分别维护几套需求方程。`cpp/tests/` 中的探针由 Makefile 的对应目标构建，用于矩阵、固定设计、割、定价和求解器互验。实际可用目标以 `cpp/Makefile` 为准。
 
-原生结果的 Python 互验入口是 `src/experiments/native.py`；已验证结果的报告使用 `src/reporting/native.py` 或相应批次的 `scale_ladder.py`、`structural_comparison.py`、`bdd.py`。所有图形共用 `src/reporting/style.py`，不要另写一套 CPLEX 专用绘图样式。输入布局和现成命令见 [根 README 的报告复用指南](../README.md#报告与绘图优先复用已有入口)。
+原生结果的 Python 互验入口是 `src/experiments/native.py`；已验证结果的报告使用 `src/reporting/native.py` 或相应批次的 `scale_ladder.py`、`structural_comparison.py`、`bdd.py`。所有图形共用 `src/reporting/style.py`，不要另写一套 CPLEX 专用绘图样式。输入布局和现成命令见 [根 README 的报告复用指南](../README.md#修改和复核入口)。
 
-可选的 `--od-airline-bounds` 在 Benders 外部资源 LP 中加入按 OD 需求分解的航线门控，再投影为主问题成本割；不增加主问题变量。它适用于 lifted 和 conditional 两种需求表示，默认关闭。这些割只保证对整数设计及其凸包有效，开启后的 `root_diagnostics` 与原 `continuous_root` 分开报告，不能相互拼接计算连续 gap。数学证明、测试和对照协议见 [OD 航线割说明](../docs/od_airline_cuts_20261022.md)。
+可选的 `--od-airline-bounds` 在 Benders 外部资源 LP 中加入按 OD 需求分解的航线门控，再投影为主问题成本割；不增加主问题变量。它在历史配置中默认关闭，当前 baseline 启用。这些割只保证对整数设计及其凸包有效，开启后的 `root_diagnostics` 与原 `continuous_root` 分开报告，不能相互拼接计算连续 gap。数学证明、测试和对照协议见 [OD 航线割说明](../docs/od_airline_cuts_20261022.md)。
 
 ## 构建
 
@@ -55,9 +59,30 @@ make -C cpp -j2 \
   NLOHMANN_INCLUDE=/path/to/include
 ```
 
-`NLOHMANN_INCLUDE` 指向包含 `nlohmann/` 子目录的目录。Makefile 自动选择本机 macOS arm64/x86-64 库路径，也允许覆盖 `CPLEX_PLATFORM`、`CXX`、`BUILD_DIR`。Linux 配置还需要 OpenSSL Crypto 开发库。跨平台构建配置已提供；本轮执行验证针对本机 macOS arm64。若本机已安装 CMake，也可使用 `cpp/CMakeLists.txt`，对应 JSON 配置变量名为 `NLOHMANN_JSON_INCLUDE_DIR`。
+`NLOHMANN_INCLUDE` 指向包含 `nlohmann/` 子目录的目录。Makefile 自动选择本机 macOS arm64/x86-64 库路径，也允许覆盖 `CPLEX_PLATFORM`、`CXX`、`BUILD_DIR`。Linux 配置还需要 OpenSSL Crypto 开发库。跨平台构建配置已提供；本轮执行验证针对本机 macOS arm64。若本机已安装 CMake，也可使用 `cpp/CMakeLists.txt`，对应 JSON 配置变量名为 `NLOHMANN_JSON_INCLUDE_DIR`。普通 Make/CMake 构建只生成生产入口；探针按需构建，CMake 的探针和 BDD 诊断使用 `EXCLUDE_FROM_ALL`。例如 Make 目标 `solver-presets-probe` 对应可执行文件 `mlnd_solver_presets_probe`，CMake 可用 `--target mlnd_solver_presets_probe`。
 
-## 读取与完整模型
+## 当前推荐入口
+
+L2 上下界增强候选使用 `--preset bounds-20261030`，同时启用三态设计面割、跨基地联合队列割、设施—分配联合邻域及前置初解组合。它与下面已接受的 baseline 分开保存；适用范围、预算与验证见 [候选说明](../docs/bounds_upgrade_20261030.md)。
+
+新增可选配置 `--preset performance-20261105` 在上一轮 `accelerated-20261105` 上加入九个独立开关；历史配置保持原设置。建议使用单独的 `BUILD_DIR` 编译和新输出目录。完整目录后端、RHS/证书复用、反馈与双主问题的条件，以及 K1/非 L2 时需关闭的 ALNS 开关，见[实现与验证说明](/Users/songtaowang/Documents/MLND_code/docs/performance_implementation_20261105.md)。
+
+新 L2 K2 任务使用整合配置 `--preset performance-20261105`，适用范围见 [当前入口](../docs/current_baseline.md)。以下日期 preset 说明仅描述其参数组合；当前源码均使用新任务模型。`baseline` 仍是 `baseline-20261029` 的参数别名。此配置复用已验证的 fractional queue 策略，采用 `benders_cg`、固定任务 `preprocessed`、完整路径域、600 秒、1% 目标间隙、单线程、种子 43，以及每轮最多 512 列和 1,000,000 次外层迭代。共享 rho、队列透视、紧航线上界、任务航线上界和现有必要支持/资源加强同时开启；分数主问题 queue 分离、价格搜索和近目标主问题精化开启。它没有启用 incident clique、旧 dual-LP-first 或设施邻域新策略。
+
+```sh
+cpp/build/mlnd_cpp --preset baseline-20261029 \
+  --input examples/tsl_2l20h50od --k 2 --out outputs/NEW_BASELINE_K2
+cpp/build/mlnd_cpp --preset full-cplex-20261029 \
+  --input examples/tsl_2l20h50od --k 2 --out outputs/NEW_FULL_CPLEX_K2
+```
+
+`full-cplex-20261029` 使用相同固定任务、完整路径、共享 rho、队列透视和两类航线上界，直接求解完整 MISOCP；不启用 Benders 分离或启发式。两配置共用 CPLEX 种子、线程、目标间隙和总时间预算。把 `--k 2` 改为 `--k 1` 可运行单单模型；比较时保持实例、K、预算和求解器设置一致。
+
+将 `--preset` 放在命令前部，后续显式参数覆盖该配置。省略 preset 或显式使用 `--preset legacy` 均保留历史默认：`full_path`、`lifted`、0.5% gap、每轮 64 列、1,000 次迭代和 500,000 条目录上限；不会静默切换模型。命名新 preset 后的 `--plain` 清除全部可选加速，保留已选需求模型；历史 `legacy --plain` 保持原开关范围。`--disable NAME` 使用下表/结果中的 canonical 名称，依赖不满足时明确拒绝。
+
+`--inspect` 只读取输入，输出 canonical `preset` 与 `resolved_configuration`；后者也写入正式结果和运行开始记录，包含原始请求预算、全部开关与数值参数（schema `mlnd-solver-configuration/1`）。计算过程中剩余预算变化不覆盖此快照。`--export-catalogue` 可为完整目录运行另存 `full_catalogue.json` 及 SHA-256；它默认关闭，在求解后执行并计入 `output_seconds`，不占优化预算。完整 CPLEX 对照可加此输出选项供独立数学复核，不改变日常 `path_flows.json` 的紧凑保存策略。
+
+## 历史入口：读取与完整模型
 
 只检查输入，不运行优化：
 
@@ -67,7 +92,7 @@ cpp/build/mlnd_cpp --input examples/tsl_2l20h50od --k 1 --inspect
 
 读取器按 `model.json.ids` 对齐 CSV，检查全部输入文件的 SHA-256、单位、维度、数据类型、ID 唯一性、完整系数表和取值域，并核对观测数量与需求率、泊松容量阈值。来源记录中的历史绝对路径只用于追溯，读取器不会访问这些路径。
 
-完整模型 K=1：
+历史 lifted 完整模型 K=1（下列无 preset 示例保留旧配置）：
 
 ```sh
 cpp/build/mlnd_cpp \
@@ -76,7 +101,7 @@ cpp/build/mlnd_cpp \
   --out outputs/cpp_tsl20h_full_K1
 ```
 
-完整模型 K=2：
+历史 lifted 完整模型 K=2：
 
 ```sh
 cpp/build/mlnd_cpp \
@@ -95,9 +120,9 @@ cpp/build/mlnd_cpp \
 
 ### 统一的固定广义订单模型
 
-当前统一入口使用 `--demand-formulation preprocessed`，支持 `--method full_path|benders_full|benders_cg`、`--k 1/2` 和 `aggregate`。双单模式要求二元 κ；单单模式所有配对率为零，不使用 κ。两种模式都使用 `assignment_scope="origin"`。构建请使用 `make -C cpp -j2 BUILD_DIR=build-unified`，运行 `cpp/build-unified/mlnd_cpp`。详见 [统一算法与验证](../docs/unified_task_algorithm_20261027.md) 和 [有效割说明](../docs/unified_strengthening_validity.md)。
+当前统一入口使用 `--demand-formulation preprocessed`，支持 `--method full_path|benders_full|benders_cg`、`--k 1/2` 和 `aggregate`。双单模式要求二元 κ；单单模式所有配对率为零，不使用 κ。两种模式都使用 `assignment_scope="task"`。构建请使用 `make -C cpp -j2 BUILD_DIR=build-unified`，运行 `cpp/build-unified/mlnd_cpp`。详见 [统一算法与验证](../docs/unified_task_algorithm_20261027.md) 和 [有效割说明](../docs/unified_strengthening_validity.md)。
 它在完整路径枚举后、选址优化前固定单单和有序双单任务率，并为具有同一首单 OD 的所有任务共同指定一个出发基地；返回基地仍由路径选择。
-默认 `lifted`、现有 K=1 和条件 Benders 均保持原来的定义。
+不带 preset 的历史 `lifted`、旧 K=1 和条件 Benders 均保持原来的定义。
 
 预处理按“两个单单的最低路径运营成本之和减去对应双单的最低路径运营成本”从大到小遍历有正节省的兼容有序 OD 对，相同分数按 OD 索引排序。
 这三个最低成本均在所有候选设施的完整路径目录上计算，仅用于外生排序，不是组合匹配的最优性证明，也不包含固定设施成本。
@@ -124,28 +149,9 @@ cpp/build/mlnd_preprocessed_demand_probe
 物理路径、柜格、机队与基地流量平衡继续复用公共构造器。
 当前单单、双单都采用出发基地分配，可以在统一分配域下比较；与历史基地对模型比较时需另行说明分配域变化。
 
-在统一模型入口上增加 `--first-leg-consistency`，可要求单单与各个双单分支具有相同的首段分布。
-首段由出发基地、首单 OD、首次取餐柜、首次收餐柜及前两段实际飞行路线定义，汇总所有可能的返回基地。
-令该物理首段的总任务流为 `H_gamma`，则其单单流为 `nu_r/H_r * H_gamma`，双单 `r,s` 的流为 `nu_rs/H_r * H_gamma`，所有首段总流仍为 `H_r * alpha[r,l] * rho[l]`。
-首段分布由规划模型在得知续单类型之前共同选择，仍可在多个首段间按比例分流；此开关不要求一个 OD 只能使用唯一首段，也不预先固定返回基地。
-没有路径支持的正需求分支会使相应首段流为零，不重新计算或删除预处理任务率。
-该开关保持原来的 `flow_policy="aggregate"` 输入及物理资源，另外输出 `first_leg_consistency` 和 `first_leg_consistency_diagnostics`，记录具有全部正需求分支支持的物理首段数量。
+历史 `--first-leg-consistency` 与独立任务指派不兼容，当前入口明确拒绝；不同任务可以独立选择首段和出发基地。
 
-`--fixed-design` 固定 `facility`、`capacity_level`、`assignment`、`airline` 四组 0/1 决策，然后求解连续 SOCP；支持 `full_path`、`benders_full` 和 `benders_cg`，最后一种使用列生成（固定广义订单模式需完整预处理目录）：
-
-```sh
-cpp/build/mlnd_cpp \
-  --input examples/tsl_2l20h50od --k 2 --method full_path \
-  --fixed-design outputs/cpp_tsl20h_full_K2/solution.json \
-  --seconds 600 --gap 0.005 --threads 1 --seed 43 \
-  --out outputs/cpp_tsl20h_fixed_K2
-```
-
-`--start FILE` 提供初始设计：完整模型把四组设计变量作为部分 MIP start；Benders 先评估该设计。其他连续变量不会作为跨求解器热启动值原样使用。输入文件可以是原生 `solution.json`，或包含 `_solution` 对象的 JSON；原生入口不读取 Python 的 `.npz`。设计文件应来自同一个实例及相同 ID 顺序，分配维度必须匹配本次模型。当前 K=1 与 K=2 的分配域不同，不能直接跨 K 传入旧三维分配；如需利用旧设计，应显式转换、核验，并重新求解运营流量。
-
-固定设计的求解器目标仅含运营成本；对外输出的 `objective` 和 `bound` 会加回固定设计的设施成本，保持与完整模型一致的总成本口径。
-
-## Benders 入口与加速记录
+## 历史 Benders 入口与加速记录
 
 ```sh
 cpp/build/mlnd_cpp \
@@ -158,7 +164,7 @@ cpp/build/mlnd_cpp \
 
 ### 固定分配的条件 Benders（2026-10-22）
 
-`--demand-formulation conditional` 是可选算法模式，默认仍为 `lifted`。
+`--demand-formulation conditional` 是历史可选算法模式，无 preset 时默认仍为 `lifted`。
 它适用于 `benders_cg`、`benders_full` 及其固定整数设计入口。
 在整数运营子问题中按当前二元分配计算既有 `q*kappa*share` 系数，精确消去 `eta/u/Z/Y`，保留 `head/group_head/v`、所有单单/双单比例和订单守恒行及物理约束。
 两种 `flow_policy` 的含义、K 和路径可行域不变；公共输出的 eta 根据每条首程的实际 head 恢复。
@@ -197,7 +203,8 @@ cpp/build/mlnd_cpp --input examples/tsl_2l20h50od --k 2 \
 验证全直接配送可行点：rho、任务流和无人机为 0，直接配送量等于需求
 循环：
     求解受限 SOCP，检查最优状态及原始可行性
-    求解其显式锥对偶，检查最优状态、对偶残差及原始—对偶间隙
+    直接读取 CPLEX 当前解的行乘子、变量界价格及锥对偶向量
+    用代数计算检查对偶残差及原始—对偶间隙；失败时仅重求原 SOCP
     对全部有序出发—返回基地对进行精确标号定价
     若搜索未完成：保留已验证可行解，退出，不生成新割
     若有负约化成本列：加入至多 cg_max_columns 条，回到受限 SOCP
@@ -213,11 +220,14 @@ cpp/build/mlnd_cpp --input examples/tsl_2l20h50od --k 2 \
 
 **约化成本与证书。** 普通遗漏列取 `rc_p = c_p - pi^T A_p`；Pareto 辅助对偶中已经补入的路径还需计入非负上界乘子。所有线性行对偶均来自当前 RMP；路径不直接进入锥约束，机队和可用率通过共同模型的线性行和锥对偶关联。记录的最小约化成本是 `min(0, min_p rc_p)`。若最终存在容差内微小负值，使用 `D*max(0,-min_rc_service)` 加上 `D*N_empty_omitted*max(0,-min_rc_empty)` 下移割的常数；D 为总订单需求。前项利用订单守恒推出的 `sum service_task_flow <= D`，后项利用每条空载路径的独立流量上界 D。修正后的原始—对偶间隙仍必须达标。
 
-**对偶数值恢复。** 显式锥对偶若返回 `NumBest` 或修正后的间隙不合格，会在同一预算内尝试数值设置及 `cone_ray_lp_recovery`。对于原始锥 `w² <= F*u*v`，从当前原始最优解构造对偶可行方向 `(sqrt(F*v/u), sqrt(F*u/v), -2*sign(w))`，向可行侧修正舍入误差，再让非负倍率由 LP 优化。此 LP 将原对偶锥限制在一条可行射线上，因此其解始终可作为原对偶可行证书，不是放松原模型；锥紧时该方向对应互补方向，锥不紧时倍率 0 仍允许。LP 最优本身不证明原对偶最优，必须另经同一原始—对偶间隙及完整标号定价认证。`dual_attempts` 保留失败状态，`dual_certificate_method` 区分恢复方法；没有把 `NumBest` 改写为原锥对偶 `Optimal`。恢复仅用于普通 RMP 对偶，不据此宣称 Pareto 辅助问题最优。
+**原生对偶。** 普通整数、分数及自由设计的 CG 均直接调用 `getDuals`、`getReducedCosts`、`getQCDSlack`，不额外建立或求解证书 LP/SOCP。旋转锥的 dual slack 按原变量坐标映射，不通过除以梯度来恢复标量。固定设计的冗余边界价格和固定行价格被代数消去，再由其余行乘子及锥向量重构割系数；全路径定价和有限变量界上的残差修正保持不变。读取或精度检查失败时，在预算内重求原始 SOCP；仍未通过则保留已有有效界并报告失败，不调用自建对偶恢复模型。`dual_certificate_method=native_cplex_dual` 和 `auxiliary_optimization_calls=0` 记录这一路径。旧 `--dual-lp-first`、`--reuse-dual-lp` 参数仅为旧脚本兼容而接受，不改变普通对偶来源。
+
+可选 `--weak-dual-cuts` 将有效性和紧性分开：完整路径定价并修正后的弱割可保留，`recourse_optimal` 单独报告是否满足原紧性容差；不能以有效弱割宣称当前运营子问题已最优。`--interior-cuts` 在整数搜索阶段用少量内部设计点的原 SOCP 补充分离，最多占总预算5%；`--primal-asset-neighborhood` 配合 `--primal-polish` 交替固定设施容量、释放分配与航线，仍使用原20%启发式预算。三项在历史配置中默认关闭；当前 baseline 开启前两项，设施邻域仍关闭。数学与验证边界见 [上下界改进](../docs/bounds_improvement_20261028.md)。
+
 
 Pareto 辅助对偶使用相同标号算法逐批分离遗漏路径驻点约束，重求辅助对偶后重新定价；上界乘子进入辅助目标和锚点最优面约束。辅助步骤失败时保留此前普通认证割。`accepted` 表示数值容差下通过验证的 Magnanti–Wong 风格加强割，不声称浮点求解产生零容差的理论 Pareto 证明。
 
-`--cg-max-columns` 默认 64，只限制每轮加列量，不截断标号搜索；`--pricing-tolerance` 默认 `1e-7`，是绝对约化成本容差；`--cg-duality-tolerance` 默认 `1e-6`，乘以 `1+abs(运营成本)` 得到原始—对偶间隙容差。每轮 `cg_trace` 记录 RMP/对偶状态、目标、间隙、定价是否完整、最小约化成本、生成/扩展/支配标号数、加列数和各阶段耗时。`negative_paths`/`omitted_paths` 统计支配后被检查的完成路径，不是完整目录中所有负列/遗漏列的总数。
+`--cg-max-columns` 历史默认 64，当前 baseline 为 512，只限制每轮加列量，不截断标号搜索；`--pricing-tolerance` 默认 `1e-7`，是绝对约化成本容差；`--cg-duality-tolerance` 默认 `1e-6`，乘以 `1+abs(运营成本)` 得到原始—对偶间隙容差。每轮 `cg_trace` 记录 RMP/对偶状态、目标、间隙、定价是否完整、最小约化成本、生成/扩展/支配标号数、加列数和各阶段耗时。`negative_paths`/`omitted_paths` 统计支配后被检查的完成路径，不是完整目录中所有负列/遗漏列的总数。
 
 历史 lifted/conditional 模型的预处理只保存首段/任务分支支持；路径由贪心或定价生成时动态登记、去重并获得稳定 ID。固定任务模型的目录边界见前文。先生成便宜的单单/双单种子，再在限定预算内补齐单单及每个正需求、正 κ 的续单分支。`aggregate` 分支可选不同首段；`prefix` 寻找共用一个首段的完整分支包。首选首段无可行延长时继续尝试其他首段。该步骤不固定最终选址或流量，物理缺失、预算中断和资源不足也不会导致分支等式被删除。定价的负列堆受批量上限限制，后缀缓存最多 128 组。框架解释见 [隐式 CG 框架](../docs/implicit_cg.md)，本次种子与主问题加强以 [主问题加强文档](../docs/master_strengthening.md) 为准。
 
@@ -256,7 +266,7 @@ cpp/build/mlnd_cpp --input examples/tsl_2l20h50od --k 2 \
 |---|---|
 | `column_generation` | 在固定设计子问题中增量加入负约化成本列；`benders_full` 为 false。 |
 | `reuse_columns` | 将先前子问题发现的服务/空飞列用于后续设计。 |
-| `reuse_dual_lp` | 在同次 CG 内增量同步射线 LP 并复用 simplex basis；每轮仍重新认证原锥对偶及完整定价。 |
+| `reuse_dual_lp` | 历史兼容参数；普通 CG 已直接读取 CPLEX 对偶，不建立证书 LP。 |
 | `pareto_cuts` | 尝试在普通对偶最优面上改善核心点处的割；辅助求解、完整定价和数值证书通过后才记为接受。 |
 | `auxiliary_valid_cuts` | 辅助对偶未通过严格 Pareto 条件、但通过全局有效性及已知原始上界检查且核心点有收益时，单独保留普通有效割。 |
 | `courier_savings_bound` | 将直接骑手基准与可实现节约的界加入主问题。 |
@@ -280,11 +290,11 @@ cpp/build/mlnd_cpp --input examples/tsl_2l20h50od --k 2 \
 
 `pareto_attempts` 与 `pareto_cuts` 分别是尝试次数和接受割数，不能混用。Benders 的 `pricing_complete` 表示最后处理的子问题已完整定价并满足证书条件；`pricing_complete_scope`、`last_subproblem_stage` 与 `last_subproblem_termination_reason` 明确其范围。它不表示整个 MIP 已达到目标间隙，也不表示尚未处理的新主问题设计已完成定价。
 
-新增投影分离的数学条件、数值恢复、开关与文献依据见 [投影加强](../docs/projection_strengthening.md)。`--reuse-dual-lp true|false` 显式控制 LP 状态复用；`--root-inout-weight 0.9` 控制当前候选在混合点中的权重。`auxiliary_valid_cuts` 不计入 `pareto_cuts`。整数候选统计另存不同设计数、重复设计数及全骑手候选数；warm start 只在当前最好且通过验证的可行方案实际变化时重新提交。
+新增投影分离的数学条件、数值恢复、开关与文献依据见 [投影加强](../docs/projection_strengthening.md)。`--reuse-dual-lp true|false` 保留旧命令兼容；`--root-inout-weight 0.9` 控制当前候选在混合点中的权重。`auxiliary_valid_cuts` 不计入 `pareto_cuts`。整数候选统计另存不同设计数、重复设计数及全骑手候选数；warm start 只在当前最好且通过验证的可行方案实际变化时重新提交。
 
 容量割与 CG/Benders 割按同一候选联合生成，再重解主问题；启用 `root_cuts` 时，容量割不跳过该轮分数设计 CG。根轮次仍受时间预算、最优性终止和认证条件约束。中断后可以续算的整数 CG 保持原候选，不重复分离容量割。Pareto、受限 MIP 和局部分支频率按实际整数 CG 调用计数。`cut_schedule` 保存该规则，`candidate_id` 关联割和候选处理记录；每次处理的 `capacity_cuts_added`、`benders_cuts_added` 与统计中的 `root_master_solves`、`root_cg_calls`、`integer_master_solves`、`integer_cg_calls` 可用于核对调度，`master_starts` 仅表示 MIP start 次数。
 
-默认启用上述适用的加速功能。`--plain` 同时关闭可选加强，仍保留规范 CG、必要的物理检查及对偶/定价认证；或用 `--disable NAME` 分别关闭上表除 `column_generation` 外的功能。关闭 `courier_savings_bound` 同时关闭两条静态解析割，动态 `capacity_cuts` 可独立开关，关闭 `restricted_mip` 同时关闭其局部搜索。
+历史默认启用上表中的适用加速；当前 baseline 的完整开关以 `resolved_configuration.flags` 为准。新命名 preset 的 `--plain` 关闭全部可选加强，仍保留规范 CG、必要的物理检查及对偶/定价认证；历史 plain 保持旧成员范围。可用 `--disable NAME` 分别关闭上表除 `column_generation` 外的功能。关闭 `courier_savings_bound` 同时关闭两条静态解析割，动态 `capacity_cuts` 可独立开关，关闭 `restricted_mip` 同时关闭其局部搜索。
 
 预算和频率可通过 `--capacity-cut-limit 100 --root-cut-rounds 20 --root-budget-fraction 0.1 --heuristic-budget-fraction 0.2 --local-branching-radius 8 --pareto-frequency 10 --pareto-budget-fraction 0.05 --pareto-call-seconds 30` 设置。新参数为 `--master-initial-gap 0.05 --master-slice-seconds 30 --resource-lp-seconds 5 --resource-lp-cut-limit 100 --heuristic-pool-size 4 --neighborhood-cut-seconds 15 --neighborhood-cut-budget-fraction 0.05`；各加强可独立关闭，`--plain` 也关闭新增加强。`strengthening_parameters` 保存实参，`master_structure` 保存主问题规模。`master_solves`、`root_diagnostics`、`resource_lp_attempts`、`resource_lp_cuts` 和 Pareto 诊断保存阶段证据，详见 [下界方法及适用性](../docs/lower_bound_research.md) 与 [实现说明](../docs/master_strengthening.md)。`root_cuts` 和 `neighborhood_cuts` 都是 `ordinary_cuts` 的子集，不能重复相加。
 
@@ -293,7 +303,8 @@ cpp/build/mlnd_cpp --input examples/tsl_2l20h50od --k 2 \
 ```text
 result.json           求解概览、上下界、状态、阶段耗时和算法记录
 solution.json         全部决策数组，按实例索引顺序排列
-path_flows.json       已登记路径、资源系数及其流量，包括零流量；CG 为生成子集
+path_flows.json       解的路径记录、资源系数及流量；具体完整/非零子集口径见 path_record_storage
+full_catalogue.json   仅 --export-catalogue 请求时写出完整物理路径目录
 input_reference.json  输入目录、manifest、model 和本次 K
 metrics.json          成本、服务量、任务量和无人机资源汇总
 costs.csv             分项小时成本
@@ -485,6 +496,12 @@ tests/            输入、路径、模型等价回归
 
 构造路径和模型时不重新拟合需求、不更换 κ，也不重新解释固定资产折旧。原始数据、论文和冻结基准不属于此实现的写入对象。
 
-当前和历史需求实现均支持 `--structural-strengthening`，开启分配关联聚合、共同 ρ 联合线性化和排队 perspective 三项加强；默认关闭以保留旧版对照。它们保持整数模型不变，强化两种方法共享的连续根松弛，主问题仍不增加运营辅助变量。独立开关、数学依据和验证范围见 [结构加强说明](../docs/structural_strengthening.md)。
+`--queue-polymatroid-cuts` 为整数有效队列成本割，历史配置默认关闭、当前 baseline 开启，仅用于完整直达路径目录下的 preprocessed/task/aggregate Benders。单开使用任务收益EPI；与 `--airline-resource-cuts` 同开时复用其资源价格，`--airline-resource-balance` 提供基地平衡势。新割只增加主问题线性行，LB仍来自主问题重求。构造、适用边界和验证见 [L2队列割说明](../docs/l2_queue_polymatroid_cut_design_20261028.md)，有效性入口为 `make queue-polymatroid-probe` 后运行相应可执行文件。
+
+`--queue-price-search` 在上述割池上复用普通 SOCP 的原生资源行乘子，每次最多评估 7 组完整路径价格，以当前主问题点选择更强 EPI 行；不额外求解对偶模型。`--target-master-refinement` 要求 `--search-scheduling`，在距离目标 gap 很近且下界停滞时，最多用 5 秒收紧一次主问题 MIP 容差。两者分别最多分配总时限的 2%，历史配置默认关闭、当前 baseline 开启。实现与验证范围见 [价格搜索与目标认证](../docs/l2_price_search_implementation_20261028.md)；公开接口测试入口是 `queue-price-search-probe` 和 `master-target-probe`。
+
+`--queue-fractional-separation` 将native价格搜索延后到当前完整master的LP松弛点；仅在相对该点theta有足够提升时加入queue行，并重求LP后读取认证下界。每次至多3次LP/2条行，LP和price各有总时限2%的额度，历史配置默认关闭、当前 baseline 开启；要求上述queue与price开关。构造与预算边界见 [当前分数主问题分离](../docs/l2_fractional_queue_implementation_20261029.md)。公开验证入口为 `queue-fractional-probe`、`queue-fractional-control-probe`。
+
+当前和历史需求实现均支持 `--structural-strengthening`，开启分配关联聚合、共同 ρ 联合线性化和排队 perspective 三项加强；历史配置默认关闭，当前两 preset 仅开启共同 ρ 和队列 perspective，分配关联聚合仍关闭。它们保持整数模型不变，强化两种方法共享的连续根松弛，主问题仍不增加运营辅助变量。独立开关、数学依据和验证范围见 [结构加强说明](../docs/structural_strengthening.md)。
 
 四组算法的新旧比较使用 `python -m src.experiments.structural_benchmark`，冻结修改前后的二进制与同一 TSL 输入。每个 K 分别比较旧/新 lifted 与旧/新 conditional；连续根消融独立运行，不作为免费初始化传给算法。回归入口为 `make structural-strengthening-probe structural-cg-cut-probe`。

@@ -33,7 +33,7 @@ Json witness() {
     const double expected=4*(-std::expm1(-7*d.delta));
     require(std::abs(d.pair_rates(0,1)-expected)<1e-12,"Pair opportunity rate is incorrect");
     auto f=build_formulation(d,paths);
-    require(f.layout.airline-f.layout.assignment==4,"Preprocessed assignment is not origin-only");
+    require(f.layout.airline-f.layout.assignment==12,"Preprocessed assignment is not task-level");
     std::map<std::string,int> var;
     for(std::size_t j=0;j<f.matrix.variables.size();++j) {
         const auto name=f.matrix.variables[j].name;var[name]=j;
@@ -49,6 +49,8 @@ Json witness() {
     const double rho=.1;
     x[f.layout.assignment_index(0,0)]=1;x[f.rho[0]]=rho;
     x[f.idle[0]]=rho/(1-rho);x[var.at("v_0_0")]=rho;
+    const int pair=d.task_index(0,1);
+    x[f.layout.assignment_index(pair,0)]=1;x[var.at("v_"+std::to_string(pair)+"_0")]=rho;
     std::vector<double> served(2),heads(f.lift_groups.size());
     double busy=0,return_one=0;
     for(int second:{-1,1})for(int destination=0;destination<2;++destination) {
@@ -96,13 +98,14 @@ Json edge_cases() {
     auto missing=fixture();missing.allowed_links=constant(4,4,0);auto mp=enumerate_paths(missing);
     preprocess_generalized_demand(missing,mp);const auto mf=build_formulation(missing,mp);
     int rows=0;
-    for(const auto& row:mf.matrix.rows)if(row.name.rfind("orders_",0)==0) {
-        ++rows;require(row.coefficients.size()==1,"No-support head must force v to zero");
-        require(row.coefficients[0].second<0,"No-support head coefficient missing");
+    for(int q=0;q<missing.task_count();++q)for(int l=0;l<missing.n_l;++l) {
+        const auto& row=mf.matrix.rows.at(mf.task_rows.at(q*missing.n_l+l));
+        ++rows;require(row.coefficients.size()==1,"No-support task must force its own v to zero");
+        require(row.coefficients[0].second==missing.task_rate(q),"No-support task coefficient missing");
     }
-    require(rows==4,"Missing universal head rows for unsupported groups");
+    require(rows==12,"Missing universal task rows for unsupported groups");
     return {{"self_pair_rate",d.pair_rates(0,0)},{"zero_window_preserves_demand",true},
-        {"fractional_kappa_rejected",true},{"unsupported_head_rows",rows}};
+        {"fractional_kappa_rejected",true},{"unsupported_task_rows",rows}};
 }
 Json first_leg_witness(bool restricted,bool proportional) {
     auto d=fixture();auto paths=enumerate_paths(d);preprocess_generalized_demand(d,paths);
@@ -111,6 +114,13 @@ Json first_leg_witness(bool restricted,bool proportional) {
     preprocess_generalized_demand(d,paths);
     require(reconstruction==d.preprocessed_demand_report,"First-leg flag changed reconstructed demand");
     d.first_leg_support_report=first_leg_support(d,paths);
+    if(restricted) {
+        bool rejected=false;
+        try{build_formulation(d,paths);}catch(const std::invalid_argument&){rejected=true;}
+        require(rejected,"Historical first-leg coupling was accepted for independent tasks");
+        return {{"restricted",true},{"proportional",proportional},
+            {"incompatible_coupling_rejected",true},{"demand_unchanged",true}};
+    }
     auto f=build_formulation(d,paths);
     std::map<std::string,int> var;
     for(std::size_t j=0;j<f.matrix.variables.size();++j)var[f.matrix.variables[j].name]=j;
@@ -122,6 +132,8 @@ Json first_leg_witness(bool restricted,bool proportional) {
     const double rho=.1;
     x[f.layout.assignment_index(0,0)]=1;x[f.rho[0]]=rho;
     x[f.idle[0]]=rho/(1-rho);x[var.at("v_0_0")]=rho;
+    const int pair=d.task_index(0,1);
+    x[f.layout.assignment_index(pair,0)]=1;x[var.at("v_"+std::to_string(pair)+"_0")]=rho;
     double busy=0,return_one=0;
     for(int second:{-1,1})for(int pickup=0;pickup<2;++pickup)for(int destination=0;destination<2;++destination) {
         const auto p=std::find_if(paths.service_paths.begin(),paths.service_paths.end(),[&](const ServicePath& p){
@@ -146,9 +158,8 @@ Json first_leg_witness(bool restricted,bool proportional) {
         const auto c=f.matrix.cones[l];x[c.up]=x[f.idle[l]]+1;x[c.down]=1-x[f.rho[l]];x[c.one]=1;
     }
     const auto residual=point_residuals(f.matrix,x);
-    require(residual.at("passed").get<bool>()==(!restricted||proportional),
-            "First-leg branch consistency did not distinguish different branch mixtures");
-    require(f.lift_groups.size()==static_cast<std::size_t>(restricted?8:4),"Incorrect physical first-leg grouping");
+    require(residual.at("passed").get<bool>(),"Independent task pickup mixtures were coupled");
+    require(f.lift_groups.size()==4,"Incorrect physical head grouping");
     require(d.first_leg_support_report.at("first_leg_groups")==8,"Support counted return bases separately");
     require(d.first_leg_support_report.at("complete_first_leg_groups")==8,"All fixture first legs support both branches");
     return {{"restricted",restricted},{"proportional",proportional},{"groups",f.lift_groups.size()},

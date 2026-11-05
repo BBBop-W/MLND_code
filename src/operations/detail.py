@@ -61,7 +61,12 @@ def enrich_operations(inputs, data, result, payload):
     if preprocessed:
         fixed_single = np.asarray(result["preprocessed_demand"]["single_rates"], float)
         fixed_pair = np.asarray(result["preprocessed_demand"]["pair_rates"], float)
-        fixed_head = fixed_single + fixed_pair.sum(axis=1)
+        single_assignment = assignment[:data.n_od]
+        pair_assignment = assignment[data.n_od:].reshape(data.n_od, data.n_od, data.n_l) if data.max_orders == 2 else np.zeros((data.n_od, data.n_od, data.n_l))
+        order_offers = fixed_single[:, None] * single_assignment
+        pair_offers = fixed_pair[:, :, None] * pair_assignment
+        order_offers += pair_offers.sum(axis=1) + pair_offers.sum(axis=0)
+        unassigned_orders = data.demand - order_offers.sum(axis=1)
     facility = np.asarray(sol["facility"], float)
     airlines = np.asarray(sol["airline"], float)
     rho, idle = np.asarray(sol["rho"], float), np.asarray(sol["idle"], float)
@@ -205,7 +210,7 @@ def enrich_operations(inputs, data, result, payload):
                 od[r][role + "_flow"] += flow
                 od[r]["pickup_weight"] += flow * pickup
                 od[r]["loaded_weight"] += flow * loaded
-                od[r]["terminal_weight"] += flow * data.receipt_mean[r, j]
+                od[r]["terminal_weight"] += flow * data.home_receipt_mean[r, j]
                 od[r]["rider_weight"] += flow * data.rider_mean[r, i]
                 od[r]["drone_wait_weight"] += wait_drones
                 od[r]["first_rider_cost_per_hour"] += flow * data.first_cost[r, i]
@@ -215,7 +220,7 @@ def enrich_operations(inputs, data, result, payload):
                     return_base=target,
                     pickup_minutes=60 * pickup,
                     loaded_flight_minutes=60 * loaded,
-                    terminal_minutes=60 * data.receipt_mean[r, j],
+                    terminal_minutes=60 * data.home_receipt_mean[r, j],
                     origin_rider_minutes=60 * data.rider_mean[r, i],
                     drone_pickup_wait_minutes=60 * wait,
                     receipt_minutes=60 * row["receipt_hours"],
@@ -280,7 +285,7 @@ def enrich_operations(inputs, data, result, payload):
             assignment[:, i] if origin_assignment else assignment[:, i, :].sum(axis=1)
         )
         offered = float(
-            (fixed_single + 2 * fixed_pair.sum(axis=1)) @ assigned
+            order_offers[:, i].sum()
             if preprocessed
             else data.demand @ assigned
         )
@@ -391,8 +396,8 @@ def enrich_operations(inputs, data, result, payload):
             else None,
         )
     for r, row in enumerate(tables["orders"]):
-        selected = np.argwhere(assignment[r] > 0.5)
-        selected_pair = tuple(map(int, selected[0])) if len(selected) else None
+        selected = np.argwhere(order_offers[r] > 0 if preprocessed else assignment[r] > 0.5)
+        selected_pair = tuple(map(int, selected[0])) if len(selected) == 1 or (not preprocessed and len(selected)) else None
         received = row["mean_receipt_minutes"]
         row.update(
             assigned=bool(len(selected)),
@@ -401,9 +406,8 @@ def enrich_operations(inputs, data, result, payload):
             if selected_pair and not origin_assignment
             else None,
             assignment_scope=summary["assignment_scope"],
-            assigned_availability=float(rho[selected_pair[0]])
-            if selected_pair
-            else 0.0,
+            assigned_availability=(_ratio(float(order_offers[r] @ rho), float(order_offers[r].sum()))
+                if preprocessed else float(rho[selected_pair[0]]) if selected_pair else 0.0),
             drone_fraction=_ratio(row["drone_per_hour"], row["demand_per_hour"]),
             direct_courier_cost_per_hour=float(
                 row["direct_per_hour"] * data.ground_cost[r]
@@ -416,8 +420,7 @@ def enrich_operations(inputs, data, result, payload):
             else None,
             unassigned_direct_orders_per_hour=(
                 float(
-                    fixed_head[r] * (1 - assignment[r].sum())
-                    + fixed_pair[:, r] @ (1 - assignment.sum(axis=1))
+                    unassigned_orders[r]
                 )
                 if preprocessed
                 else float(row["demand_per_hour"])
@@ -426,8 +429,7 @@ def enrich_operations(inputs, data, result, payload):
             ),
             unavailability_direct_orders_per_hour=(
                 float(
-                    fixed_head[r] * (assignment[r] @ (1 - rho))
-                    + fixed_pair[:, r] @ (assignment @ (1 - rho))
+                    order_offers[r] @ (1 - rho)
                 )
                 if preprocessed
                 else float(row["direct_per_hour"])
@@ -467,6 +469,13 @@ def enrich_operations(inputs, data, result, payload):
             }
         )
 
+    if preprocessed:
+        tables["task_assignments"] = [dict(
+            task=task["task"], first_od=task["first_od"], second_od=task["second_od"],
+            departure=l, assignment=float(assignment[task["task"], l]),
+            task_rate=float(task["rate"]),
+            executed_tasks_per_hour=float(task["rate"] * assignment[task["task"], l] * rho[l]),
+        ) for task in result["task_table"] for l in range(data.n_l)]
     pair_rows, single_rows, assignment_rows = [], [], []
     for pool in tables["pools"]:
         departure, arrival = pool["departure"], pool["return_base"]
@@ -476,10 +485,10 @@ def enrich_operations(inputs, data, result, payload):
             else assignment[:, departure, arrival]
         )
         if preprocessed:
-            offers = fixed_pair * assigned[:, None]
-            singles = fixed_single * assigned
+            offers = fixed_pair * pair_assignment[:, :, departure]
+            singles = fixed_single * single_assignment[:, departure]
             theta = singles + offers.sum(axis=1)
-            # Attribute both occurrences to the departure of their task's head.
+            # Attribute both occurrences to their independently assigned task's departure.
             h = singles + offers.sum(axis=1) + offers.sum(axis=0)
             lam = float(h.sum())
         else:
@@ -520,8 +529,8 @@ def enrich_operations(inputs, data, result, payload):
                     od=r,
                     departure=departure,
                     return_base=arrival,
-                    assigned=bool(assigned[r] > 0.5),
-                    assignment=float(assigned[r]),
+                    assigned=bool(h[r] > 0) if preprocessed else bool(assigned[r] > 0.5),
+                    assignment=None if preprocessed else float(assigned[r]),
                     assignment_scope=summary["assignment_scope"],
                     demand_per_hour=float(data.demand[r]),
                     availability=float(rho[departure]),
@@ -745,7 +754,7 @@ def enrich_operations(inputs, data, result, payload):
     ]
     if preprocessed:
         payload["metric_notes"].append(
-            "Fixed generalized demands are assigned by the first OD. An OD can be served as a continuation of a different head even when its own head is unassigned. Courier fallback is split using every containing task's head assignment and availability."
+            "Each fixed single or pair task independently selects a departure base. OD summaries aggregate every containing task, counting both occurrences of an AA pair. Courier fallback uses each task's assignment and departure availability."
         )
     return payload
 
@@ -972,12 +981,12 @@ def metric_dictionary(tables, *, preprocessed=False):
     if preprocessed:
         meanings.update(
             {
-                "assigned": "Whether tasks headed by this OD have a departure-base assignment; continuation occurrences may be assigned through other heads",
-                "assignment_scope": "origin assigns all singleton/pair tasks sharing a first OD to one departure base; physical return remains free",
+                "assigned": "Whether any task containing this OD is assigned; OD departure is null when containing tasks use multiple bases",
+                "assignment_scope": "task assigns each singleton or ordered pair independently to one departure base; physical return remains free",
                 "continuation_probability": "Share of offered tasks at this departure base that are fixed double tasks",
                 "offered_orders_per_hour": "Order occurrences within generalized tasks assigned to this departure base, counting both positions",
                 "expected_served_orders_per_hour": "Assigned generalized-task order occurrences multiplied by this task departure base's availability",
-                "unassigned_direct_orders_per_hour": "Order occurrences in tasks whose first OD has no departure-base assignment",
+                "unassigned_direct_orders_per_hour": "Order occurrences in tasks with no departure-base assignment",
                 "unavailability_direct_orders_per_hour": "Order occurrences in assigned tasks falling back together through their departure-base unavailability",
             }
         )

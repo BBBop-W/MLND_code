@@ -128,7 +128,7 @@ class DirectContinuationFilter:
                 + data.effective_delta / 2
                 + second_waits
                 + loaded[self.i, self.j]
-                + data.receipt_mean[self.s, self.j]
+                + data.home_receipt_mean[self.s, self.j]
             )
             allowed_transfer = data.allowed_links[
                 data.n_l + segment.delivery, data.n_l + self.i

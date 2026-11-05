@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
         arrays["od_destination"] = d.od_destination;
 #define MLND_MATRIX(name) arrays[#name] = d.name.values
         MLND_MATRIX(flight_times); MLND_MATRIX(rider_mean); MLND_MATRIX(first_cost);
-        MLND_MATRIX(terminal_cost); MLND_MATRIX(receipt_mean); MLND_MATRIX(removal_mean);
+        MLND_MATRIX(terminal_cost); MLND_MATRIX(home_receipt_mean); MLND_MATRIX(receipt_mean); MLND_MATRIX(removal_mean);
         MLND_MATRIX(slot_cost); MLND_MATRIX(slot_counts); MLND_MATRIX(link_cost);
         MLND_MATRIX(kappa); MLND_MATRIX(allowed_links); MLND_MATRIX(bases);
         MLND_MATRIX(hubs); MLND_MATRIX(origins); MLND_MATRIX(destinations);

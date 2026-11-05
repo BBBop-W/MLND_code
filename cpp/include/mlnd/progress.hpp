@@ -3,6 +3,7 @@
 #include "mlnd/input.hpp"
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -22,8 +23,12 @@ std::string utc_timestamp();
 
 class RunProgress {
 public:
-    RunProgress(std::filesystem::path directory, double started, double budget, Json metadata);
+    // Optional monotonic clock uses the same epoch as started; production
+    // callers omit it. This permits deterministic deadline/interruption tests.
+    RunProgress(std::filesystem::path directory, double started, double budget, Json metadata,
+                std::function<double()> clock = {});
     double elapsed() const;
+    double budget_seconds() const { return budget_; }
     double remaining() const;
     void record(Json event);
     void heartbeat(const std::string& stage, Json details = Json::object());
@@ -41,6 +46,7 @@ private:
     std::filesystem::path directory_;
     double started_, budget_, last_heartbeat_ = -1e100, best_checkpoint_ = INFINITY, global_lower_ = 0;
     Json metadata_;
+    std::function<double()> clock_;
     Json last_model_size_=nullptr,last_path_sizes_=nullptr;
     std::ofstream events_;
     std::size_t sequence_ = 0, solver_sequence_ = 0, checkpoints_ = 0;

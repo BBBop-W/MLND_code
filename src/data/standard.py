@@ -19,7 +19,8 @@ from src.data.instances import to_planning_data
 from src.experiments.storage import load_inputs, sha256, write_json
 from src.model.locker_capacity import occupancy_limits
 
-SCHEMA = "consecutive-csv/1"
+SCHEMA = "consecutive-csv/2"
+LEGACY_SCHEMA = "consecutive-csv/1"
 # Table: ID columns, ID domains, numeric columns. Names match PlanningData.
 TABLES = {
     "base_costs": (("base_id",), ("bases",), ("base_cost",)),
@@ -46,10 +47,23 @@ TABLES = {
             "pickup_share",
             "last_rider_cost",
             "last_rider_mean",
+            "home_receipt_mean",
         ),
     ),
     "kappa": (("first_od", "second_od"), ("ods", "ods"), ("kappa",)),
 }
+
+def tables_for_schema(schema):
+    if schema not in (LEGACY_SCHEMA, SCHEMA):
+        raise ValueError("Unsupported input schema")
+    if schema == SCHEMA:
+        return TABLES
+    return {
+        name: (keys, domains, tuple(c for c in columns if c != "home_receipt_mean"))
+        for name, (keys, domains, columns) in TABLES.items()
+    }
+
+
 BASE_HEADERS = {
     "sites.csv": ("site_id", "type", "x_km", "y_km", "activity_rate"),
     "od_nodes.csv": ("node_id", "role", "x_km", "y_km", "raw_endpoint_count"),
@@ -171,6 +185,8 @@ def export_standard(snapshot, market, output):
     snapshot, market, output = map(Path, (snapshot, market, output))
     data = load_inputs(snapshot)
     planning = to_planning_data(data)
+    schema = SCHEMA if "home_receipt_mean" in data else LEGACY_SCHEMA
+    tables = tables_for_schema(schema)
     source = data["metadata"]["source_metadata"]
     od_rows = _read_csv(market / "od_demand.csv", BASE_HEADERS["od_demand.csv"])
     nodes = _read_csv(market / "od_nodes.csv")
@@ -214,7 +230,7 @@ def export_standard(snapshot, market, output):
         "od_origin",
         "od_destination",
         "demand",
-        *(c for _, _, cols in TABLES.values() for c in cols if c != "occupancy_limit"),
+        *(c for _, _, cols in tables.values() for c in cols if c != "occupancy_limit"),
     }
     arrays = {k: v for k, v in data.items() if isinstance(v, np.ndarray)}
     if set(arrays) != known_arrays:
@@ -261,9 +277,9 @@ def export_standard(snapshot, market, output):
     )
     metadata = dict(source)
     metadata.update(
-        schema_version=SCHEMA,
+        schema_version=schema,
         legacy_layout="five-file-v2",
-        exchange_schema=SCHEMA,
+        exchange_schema=schema,
         frozen_input_metadata=data["metadata"],
         daily_periods=daily,
         optional_missing={
@@ -284,7 +300,7 @@ def export_standard(snapshot, market, output):
     )
     write_json(output / "metadata.json", metadata)
     model = {
-        "schema": SCHEMA,
+        "schema": schema,
         "values": {
             k: v
             for k, v in data.items()
@@ -300,13 +316,13 @@ def export_standard(snapshot, market, output):
         "capacity_definition": CAPACITY_DEFINITION,
         "table_layouts": {
             name: {"id_columns": cols, "domains": domains, "value_columns": values}
-            for name, (cols, domains, values) in TABLES.items()
+            for name, (cols, domains, values) in tables.items()
         },
         "numeric_encoding": "UTF-8 RFC4180 CSV; decimal round-trip precision; bool=0/1; inf only for unavailable flight times",
     }
     write_json(output / "model.json", model)
     thresholds = occupancy_limits(planning.slot_counts, planning.slot_epsilon[:, None])
-    for name, (keys, domains, columns) in TABLES.items():
+    for name, (keys, domains, columns) in tables.items():
 
         def rows():
             for index in itertools.product(*(range(len(ids[d])) for d in domains)):
@@ -325,7 +341,7 @@ def export_standard(snapshot, market, output):
     write_json(
         output / "manifest.json",
         {
-            "schema": SCHEMA,
+            "schema": schema,
             "files": {name: sha256(output / name) for name in INPUT_FILES},
         },
     )
@@ -338,14 +354,16 @@ def load_standard(path, *, case=None, verify_hashes=True):
     """Read resolved inputs by ID, without defaults, aggregation or calibration."""
     path = Path(path)
     manifest = json.loads((path / "manifest.json").read_text())
-    if manifest["schema"] != SCHEMA or set(manifest["files"]) != set(INPUT_FILES):
+    schema = manifest["schema"]
+    tables = tables_for_schema(schema)
+    if set(manifest["files"]) != set(INPUT_FILES):
         raise ValueError("Unsupported or incomplete manifest")
     if verify_hashes:
         for name, digest in manifest["files"].items():
             if sha256(path / name) != digest:
                 raise ValueError(f"SHA-256 mismatch: {name}")
     model = json.loads((path / "model.json").read_text())
-    if model["schema"] != SCHEMA or model["units"] != UNITS:
+    if model["schema"] != schema or model["units"] != UNITS:
         raise ValueError("Unsupported schema or units")
     if model.get("capacity_definition") != CAPACITY_DEFINITION:
         raise ValueError("Unsupported capacity_definition")
@@ -453,7 +471,7 @@ def load_standard(path, *, case=None, verify_hashes=True):
             raise ValueError("Inconsistent OD counts/exposure/distance")
     epsilon = {}
     thresholds = None
-    for name, (keys, domains, columns) in TABLES.items():
+    for name, (keys, domains, columns) in tables.items():
         shape = tuple(len(ids[d]) for d in domains)
         expected_layout = {
             "id_columns": list(keys),
@@ -505,7 +523,7 @@ def load_standard(path, *, case=None, verify_hashes=True):
             raise ValueError(f"Nonfinite array: {key}")
     metadata = json.loads((path / "metadata.json").read_text())
     if (
-        metadata["exchange_schema"] != SCHEMA
+        metadata["exchange_schema"] != schema
         or metadata["coordinate_system"] != "local_km"
     ):
         raise ValueError("Unsupported metadata or coordinates")
@@ -530,7 +548,7 @@ def validate_standard(path, reference=None):
         expected = dict(data, max_orders=k)
         _assert_same(expected, variant)
     return {
-        "schema": SCHEMA,
+        "schema": json.loads((Path(path) / "manifest.json").read_text())["schema"],
         "passed": True,
         "reference_exact_match": reference is not None,
         "reference_files": {

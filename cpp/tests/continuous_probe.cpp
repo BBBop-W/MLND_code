@@ -99,21 +99,25 @@ Json tiny_tests() {
         auto warm_options=options; warm_options.reuse_dual_lp=true;
         const auto warm=solve_continuous_cg(d,warm_pool,warm_options);
         require(warm.at("bound_valid") && warm.at("pricing_complete") && warm.at("primal_valid"),
-                "Persistent-dual CG failed to certify the full path domain");
+                "Native-dual CG with legacy reuse flag failed to certify the full path domain");
         require(warm.at("certified_lower_bound").get<double>()<=full+tolerance &&
                 std::abs(warm.at("continuous_objective").get<double>()-full)<=tolerance &&
                 warm.at("continuous_objective").get<double>()-warm.at("certified_lower_bound").get<double>()<=tolerance,
-                "Persistent-dual CG changed the full continuous optimum");
-        int warm_bases=0;
+                "Legacy reuse flag changed the full continuous optimum");
+        int native_reads=0;
         for (const auto& iteration:warm.at("cg_trace")) {
             if (iteration.contains("certified_full_lower_bound"))
                 require(iteration.at("certified_full_lower_bound").get<double>()<=full+tolerance,
-                    "Persistent dual leaked an invalid nonterminal lower bound");
-            for (const auto& attempt:iteration.at("dual_attempts"))
-                if (attempt.contains("dual_lp_workspace") && attempt.at("dual_lp_workspace").at("basis_submitted").get<bool>())
-                    ++warm_bases;
+                    "Native dual leaked an invalid nonterminal lower bound");
+            for (const auto& attempt:iteration.at("dual_attempts")) {
+                require(attempt.at("method")=="native_cplex_dual",
+                        "Ordinary CG solved an auxiliary dual instead of reading CPLEX");
+                require(attempt.value("auxiliary_optimization_calls",-1)==0,
+                        "Native dual extraction performed another optimization");
+                ++native_reads;
+            }
         }
-        require(warm_bases>0,"Incremental CG did not exercise persistent dual basis reuse");
+        require(native_reads>0,"Incremental CG did not read a native dual");
         const auto design=result.at("design").get<std::vector<double>>();
         require(point_residuals(design_model(d,false).matrix,design).at("passed").get<bool>(),
                 "Free-design CG returned an invalid strategic point");
@@ -164,7 +168,7 @@ Json tiny_tests() {
             {"cg_continuous_objective",objective},{"cg_iterations",result.at("cg_iterations")},
             {"nonterminal_bounds",nonterminal_bounds},{"fractional_anchor",fractional},
             {"free_cg",result},{"implicit_cg",implicit_result},{"persistent_dual_cg",warm},
-            {"persistent_dual_basis_submissions",warm_bases},{"passed",true}});
+            {"native_dual_reads",native_reads},{"passed",true}});
     }
     return {{"tests",records},{"passed",true}};
 }

@@ -18,6 +18,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from src.data.standard import load_standard
+from src.data.instances import home_receipt_mean
 from src.model.locker_capacity import occupancy_limits
 
 
@@ -48,6 +49,7 @@ def main():
         expected_arrays = {
             key: value for key, value in source.items() if isinstance(value, np.ndarray)
         }
+        expected_arrays["home_receipt_mean"] = home_receipt_mean(source)
         assert set(actual["arrays"]) == set(expected_arrays)
         for key, expected in expected_arrays.items():
             np.testing.assert_array_equal(
@@ -61,7 +63,7 @@ def main():
             atol=1e-12,
             rtol=1e-12,
         )
-        checks.append({"name": f"K{k}_all_25_arrays_exact", "passed": True})
+        checks.append({"name": f"K{k}_all_{len(expected_arrays)}_arrays_exact", "passed": True})
 
     def edit_csv(path, edit):
         with path.open(newline="") as stream:

@@ -143,6 +143,7 @@ def test_direct_existence_matches_complete_enumeration(small_input, seed):
         first_cost=1,
         terminal_cost=1,
         receipt_mean=rng.uniform(0, 0.05, (2, 3)),
+        home_receipt_mean=None,
         removal_mean=0,
         deadline=rng.uniform(0.08, 0.4, 2),
         base_cost=1,

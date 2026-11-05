@@ -86,7 +86,7 @@ def build_initial_segment(data, b, first_od, pickup, delivery, legs, *, id=-1):
     if t1 + 1e-12 < data.effective_delta:
         raise PathInfeasible("The continuation window exceeds the first loaded flight")
     q1 = t0 + first_wait(float(data.rider_mean[first_od, pickup]), t0)
-    final = q1 + t1 + float(data.receipt_mean[first_od, delivery])
+    final = q1 + t1 + float(data.home_receipt_mean[first_od, delivery])
     if final > data.deadline[first_od] + 1e-12:
         raise PathInfeasible("The first order violates its mean receipt-time limit")
     return InitialSegment(
@@ -163,7 +163,7 @@ def build_service_path(
     if operating > data.operating_limit + 1e-12:
         raise PathInfeasible("The complete path violates its mean operating-time limit")
     receipt = tuple(
-        q + t + float(data.receipt_mean[rn, jn])
+        q + t + float(data.home_receipt_mean[rn, jn])
         for rn, jn, q, t in zip(ods, deliveries, pickup_times, loaded_times)
     )
     if any(value > data.deadline[rn] + 1e-12 for rn, value in zip(ods, receipt)):

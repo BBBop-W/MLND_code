@@ -20,7 +20,7 @@
 
 namespace mlnd {
 namespace {
-constexpr const char* schema = "consecutive-csv/1";
+constexpr const char* current_schema = "consecutive-csv/2";
 using Row = std::vector<std::string>;
 using Rows = std::vector<Row>;
 using Index = std::unordered_map<std::string, int>;
@@ -207,7 +207,9 @@ Input read_input(const std::filesystem::path& path, int max_orders, bool verify_
     Input d;
     d.instance_path = std::filesystem::absolute(path);
     d.manifest = read_json(path / "manifest.json");
-    require(d.manifest.at("schema") == schema && keys(d.manifest.at("files")) == input_files,
+    const std::string schema=d.manifest.at("schema").get<std::string>();
+    const bool explicit_home=schema==current_schema;
+    require((explicit_home || schema=="consecutive-csv/1") && keys(d.manifest.at("files")) == input_files,
             "unsupported or incomplete manifest");
     for (const auto& file : input_files)
         if (verify_hashes) require(sha256_file(path/file) == d.manifest.at("files").at(file).get<std::string>(),
@@ -348,12 +350,14 @@ Input read_input(const std::filesystem::path& path, int max_orders, bool verify_
     table("od_costs",{"od_id"},{"ods"},{"ground_cost","deadline"},[&](int i,int,const Row& row,int c) {
         d.ground_cost[i] = number(row[c],"ground_cost"); d.deadline[i] = number(row[c+1],"deadline");
     });
-    table("od_hub",{"od_id","hub_id"},{"ods","hubs"},
-        {"rider_mean","first_cost","terminal_cost","receipt_mean","removal_mean","pickup_share","last_rider_cost","last_rider_mean"},
+    Row od_columns={"rider_mean","first_cost","terminal_cost","receipt_mean","removal_mean","pickup_share","last_rider_cost","last_rider_mean"};
+    if(explicit_home) {od_columns.push_back("home_receipt_mean");d.home_receipt_mean=Matrix<double>(r,h);}
+    table("od_hub",{"od_id","hub_id"},{"ods","hubs"},od_columns,
         [&](int i,int j,const Row& row,int c) {
         std::array<Matrix<double>*,8> matrices = {&d.rider_mean,&d.first_cost,&d.terminal_cost,&d.receipt_mean,
             &d.removal_mean,&d.pickup_share,&d.last_rider_cost,&d.last_rider_mean};
         for (std::size_t k = 0; k < matrices.size(); ++k) (*matrices[k])(i,j) = number(row[c+k],"od_hub coefficient");
+        if(explicit_home)d.home_receipt_mean(i,j)=number(row[c+8],"home_receipt_mean");
     });
     table("kappa",{"first_od","second_od"},{"ods","ods"},{"kappa"},[&](int i,int j,const Row& row,int c) {
         d.kappa(i,j) = number(row[c],"kappa");
@@ -370,6 +374,7 @@ Input read_input(const std::filesystem::path& path, int max_orders, bool verify_
     array_spec("slot_counts",{h,s},"int64"); array_spec("slot_cost",{h,s},"float64");
     for (const char* name : {"rider_mean","first_cost","terminal_cost","receipt_mean","removal_mean","pickup_share","last_rider_cost","last_rider_mean"})
         array_spec(name,{r,h},"float64");
+    if(explicit_home)array_spec("home_receipt_mean",{r,h},"float64");
     array_spec("bases",{d.n_l,2},"float64"); array_spec("hubs",{h,2},"float64");
     array_spec("origins",{static_cast<int>(d.origin_ids.size()),2},"float64");
     array_spec("destinations",{static_cast<int>(d.destination_ids.size()),2},"float64");
@@ -412,6 +417,36 @@ Input read_input(const std::filesystem::path& path, int max_orders, bool verify_
     d.metadata = read_json(path/"metadata.json");
     require(d.metadata.at("exchange_schema") == schema && d.metadata.at("coordinate_system") == "local_km",
             "unsupported metadata or coordinates");
+    if(!explicit_home) {
+        d.home_receipt_mean=Matrix<double>(r,h);
+        const bool mixed=std::any_of(d.pickup_share.values.begin(),d.pickup_share.values.end(),[](double x){return x>0;});
+        Json terminal=Json::object();
+        if(d.metadata.contains("frozen_input_metadata")) {
+            const auto& frozen=d.metadata.at("frozen_input_metadata");
+            if(frozen.contains("resolved_config") && frozen.at("resolved_config").contains("terminal"))
+                terminal=frozen.at("resolved_config").at("terminal");
+        }
+        const bool direct=terminal.contains("courier_receipt_minutes") && !terminal.at("courier_receipt_minutes").is_null();
+        require(!mixed || direct || terminal.contains("courier_removal_minutes"),
+            "mixed receipt data require explicit home_receipt_mean or frozen courier terminal parameters");
+        auto broadcast=[&](const Json& value,int i,int j) {
+            if(value.is_number())return value.get<double>();
+            require(value.is_array() && !value.empty(),"courier time must broadcast to OD x hub");
+            if(value.at(0).is_number()) {
+                require(value.size()==1 || value.size()==static_cast<std::size_t>(h),"courier time hub dimension mismatch");
+                return value.at(value.size()==1?0:j).get<double>();
+            }
+            require(value.size()==1 || value.size()==static_cast<std::size_t>(r),"courier time OD dimension mismatch");
+            for(const auto& row:value)require(row.is_array() && (row.size()==1 || row.size()==static_cast<std::size_t>(h)),"courier time hub dimension mismatch");
+            const auto& row=value.at(value.size()==1?0:i);
+            return row.at(row.size()==1?0:j).get<double>();
+        };
+        for(int i=0;i<r;++i)for(int j=0;j<h;++j)
+            d.home_receipt_mean(i,j)=!mixed?d.receipt_mean(i,j):direct
+                ?broadcast(terminal.at("courier_receipt_minutes"),i,j)/60.
+                :broadcast(terminal.at("courier_removal_minutes"),i,j)/60.+d.last_rider_mean(i,j);
+    }
+    nonnegative(d.home_receipt_mean.values,"home_receipt_mean");
     return d;
 }
 } // namespace mlnd

@@ -58,6 +58,7 @@ class PlanningData:
     candidate_routes: tuple[tuple[int, ...], ...] | None = None
     route_mode: str = "direct"
     flow_policy: str = "aggregate"
+    home_receipt_mean: np.ndarray | None = None
 
     def __post_init__(self):
         if self.flow_policy not in ("prefix", "aggregate"):
@@ -93,6 +94,10 @@ class PlanningData:
         }
         for name, shape in shapes.items():
             object.__setattr__(self, name, _array(getattr(self, name), shape, name))
+        object.__setattr__(self, "home_receipt_mean", _array(
+            self.receipt_mean if self.home_receipt_mean is None else self.home_receipt_mean,
+            (r, h), "home_receipt_mean",
+        ))
         if np.any(self.kappa > 1):
             raise ValueError("kappa must lie in [0, 1]")
         if np.any((self.slot_epsilon <= 0) | (self.slot_epsilon >= 1)):

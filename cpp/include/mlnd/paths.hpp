@@ -71,6 +71,11 @@ struct PathCollection {
     std::string scope = "direct";
     std::map<std::array<int,8>,int> service_registry;
     std::map<BasePair,int> empty_registry;
+    // Output-only sufficient-statistic witnesses for an append-only pool.
+    // Paths are immutable after registration; a size change invalidates this
+    // cache. No formulation, pricing, or path-feasibility code uses it.
+    mutable std::size_t output_witness_service_size = std::numeric_limits<std::size_t>::max();
+    mutable std::vector<int> output_service_witnesses;
 };
 
 using ServiceSignature = std::array<int,8>;

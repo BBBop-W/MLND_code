@@ -29,26 +29,32 @@ bool eligible_loaded_occurrence(const Input& d,int r,int i,int j) {
     if (i==j || !d.allowed_links(d.n_l+i,d.n_l+j)) return false;
     const double loaded=d.flight_times(d.n_l+i,d.n_l+j);
     return loaded<=d.operating_limit+1e-12 &&
-        loaded+d.receipt_mean(r,j)<=d.deadline[r]+1e-12;
+        loaded+d.delivery_receipt(r,j)<=d.deadline[r]+1e-12;
 }
 
-// Bound served occurrences of raw OD r departing from l. In the generalized
-// task model, an occurrence can be the head r or the second order of another
-// head h. Only the head owns a departure assignment. In particular, an AA
-// task contributes twice: once in head_rates[A], once in pair_rates(A,A).
+// Occurrence relaxations are grouped by raw OD and physical departure pool,
+// independently of the task-assignment dimension in the master.
+int occurrence_group_count(const Input& d) { return d.n_od*d.assignment_pool_count(); }
+int occurrence_group(const Input& d,int r,int l,int b=0) {
+    return (r*d.n_l+l)*d.assignment_destinations()+b;
+}
+
+// Every task contributes its raw-OD multiplicity times its fixed rate.
+// An AA task contributes twice to the A occurrence supply.
 Coefficients occurrence_assignment_supply(const Input& d,const DesignLayout& layout,int group) {
     if (!d.preprocessed_demand)
         return {{layout.assignment+group,d.demand.at(group/d.assignment_pool_count())}};
-    if (d.head_rates.size()!=static_cast<std::size_t>(d.n_od) ||
-        d.pair_rates.values.size()!=static_cast<std::size_t>(d.n_od*d.n_od))
-        throw std::invalid_argument("Generalized occurrence bounds need fixed head and pair rates");
+    if (d.single_rates.size()!=static_cast<std::size_t>(d.n_od) ||
+        d.pair_rates.rows!=d.n_od || d.pair_rates.cols!=d.n_od)
+        throw std::invalid_argument("Generalized occurrence bounds need complete fixed task rates");
     const int r=group/d.n_l,l=group%d.n_l;
     Coefficients supply;
-    for (int h=0;h<d.n_od;++h) {
-        const double rate=d.pair_rates(h,r)+(h==r?d.head_rates[r]:0.0);
+    for (int q=0;q<d.task_count();++q) {
+        const int multiplicity=(d.task_first(q)==r)+(d.task_second(q)==r);
+        const double rate=multiplicity*d.task_rate(q);
         if (!std::isfinite(rate) || rate<0)
             throw std::invalid_argument("Generalized occurrence supplies must be finite and nonnegative");
-        if (rate>0) supply.emplace_back(layout.assignment_index(h,l),rate);
+        if (rate>0) supply.emplace_back(layout.assignment_index(q,l),rate);
     }
     return supply;
 }
@@ -68,9 +74,9 @@ AnalyticalMasterBounds analytical_master_bounds(const Input& d) {
         throw std::invalid_argument("Invalid master-bound fleet cost or task cardinality");
     const int L = d.n_l, H = d.n_h, R = d.n_od;
     AnalyticalMasterBounds result;
-    result.unit_cost.resize(d.assignment_count());
-    result.unit_saving.resize(d.assignment_count());
-    result.pair_possible.resize(d.assignment_count());
+    result.unit_cost.resize(occurrence_group_count(d));
+    result.unit_saving.resize(occurrence_group_count(d));
+    result.pair_possible.resize(occurrence_group_count(d));
     result.slot_time.resize(R);
     result.courier_cost = std::inner_product(d.demand.begin(), d.demand.end(), d.ground_cost.begin(), 0.0);
     std::vector<double> outbound(L, infinity), inbound(L, infinity);
@@ -97,7 +103,7 @@ AnalyticalMasterBounds analytical_master_bounds(const Input& d) {
         result.slot_time[r] = std::isfinite(slot_time) ? lower_nonnegative(slot_time) : 0;
         double best_saving = 0;
         for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
-            const int index = d.assignment_offset(r,l,b);
+            const int index = occurrence_group(d,r,l,b);
             const bool possible = std::isfinite(loaded_cost) && std::isfinite(outbound[l]) && std::isfinite(inbound[b]);
             result.pair_possible[index] = possible;
             if (!possible) continue; // Absence of a required arc proves zero service.
@@ -167,7 +173,7 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
     // Use the same domain checks as the analytical bounds. No generated path
     // or design-dependent reachability is used to exclude an occurrence.
     analytical_master_bounds(d);
-    const int L = d.n_l, H = d.n_h, G = d.assignment_count();
+    const int L = d.n_l, H = d.n_h, G = occurrence_group_count(d);
     const DesignLayout layout(d);
     CapacitySavingsNetwork out;
     out.source = 0; out.sink = 1 + G + H; out.nodes = out.sink + 1;
@@ -183,7 +189,7 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
     }
     if (d.origin_assignment()) inbound[0] = *std::min_element(inbound.begin(),inbound.end());
     for (int r = 0; r < d.n_od; ++r) for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b) {
-        const int g = d.assignment_offset(r,l,b);
+        const int g = occurrence_group(d,r,l,b);
         if (!std::isfinite(outbound[l]) || !std::isfinite(inbound[b])) continue;
         for (int j = 0; j < H; ++j) {
             const int index = g * H + j;
@@ -214,7 +220,7 @@ CapacitySavingsNetwork capacity_savings_network(const Input& d) {
     for (int r = 0; r < d.n_od; ++r) {
         double best = 0;
         for (int l = 0; l < L; ++l) for (int b = 0; b < d.assignment_destinations(); ++b)
-            best = std::max(best,alpha[d.assignment_offset(r,l,b)]);
+            best = std::max(best,alpha[occurrence_group(d,r,l,b)]);
         total_savings += d.demand[r]*best;
     }
     total_savings = upper_nonnegative(total_savings);
@@ -320,7 +326,7 @@ ResourceSavingsModel resource_savings_model(const Input& d,const CapacitySavings
                                            bool airline_bounds,bool tight_airline_bounds,
                                            bool od_airline_bounds) {
     const DesignLayout layout(d);
-    const int L=d.n_l, G=d.assignment_count(), H=d.n_h, N=d.n_nodes();
+    const int L=d.n_l, G=occurrence_group_count(d), H=d.n_h, N=d.n_nodes();
     if (allocations.eligible.size()!=static_cast<std::size_t>(G*H) ||
         allocations.unit_saving.size()!=static_cast<std::size_t>(G*H) ||
         allocations.slot_time.size()!=static_cast<std::size_t>(G*H))

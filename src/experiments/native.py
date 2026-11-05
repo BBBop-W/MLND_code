@@ -32,6 +32,12 @@ def load_native_result(directory):
         if result.get("assignment_scope", scope) != scope:
             raise ValueError("Native result and solution assignment_scope disagree")
         result["assignment_scope"] = scope
+    for key in ("task_indexing", "task_table", "delivery_time_scope"):
+        if key in solution:
+            value = solution.pop(key)
+            if key in result and result[key] != value:
+                raise ValueError(f"Native result and solution {key} disagree")
+            result[key] = value
     records = json.loads((directory / "path_flows.json").read_text())
     if set(records) != {"segments", "missions", "relocations"}:
         raise ValueError(
@@ -139,10 +145,13 @@ def load_solution_file(path):
     result = {
         key: np.asarray(item, dtype=float)
         for key, item in value.items()
-        if key != "assignment_scope"
+        if key not in ("assignment_scope", "task_indexing", "task_table", "delivery_time_scope")
     }
     if scope is not None:
         result["assignment_scope"] = scope
+    for key in ("task_indexing", "task_table", "delivery_time_scope"):
+        if key in value:
+            result[key] = value[key]
     return result
 
 

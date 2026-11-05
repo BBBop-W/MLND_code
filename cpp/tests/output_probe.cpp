@@ -2,13 +2,60 @@
 // solution, plus append-only pool growth after an incumbent snapshot. No
 // optimization is performed; full solves are checked separately.
 #include "mlnd/output.hpp"
+#include "mlnd/preprocessed_demand.hpp"
+#include <chrono>
 #include <iostream>
+#include <map>
+
+namespace {
+auto statistics(const mlnd::Json& result) {
+    std::map<std::tuple<int,int,int>,double> costs;
+    std::map<std::pair<int,int>,int> traversals;
+    for (const auto& record : result.at("_missions")) {
+        const auto& p = record.at("path");
+        const auto key=std::make_tuple(p.at("first_od").get<int>(),
+            p.at("second_od").is_null() ? -1 : p.at("second_od").get<int>(),p.at("b").at(0).get<int>());
+        const double cost=p.at("cost");
+        auto [entry, inserted]=costs.emplace(key,cost);
+        if (!inserted) entry->second=std::min(entry->second,cost);
+    }
+    for (const char* name : {"_missions","_relocations"})
+        for (const auto& record : result.at(name))
+            for (const auto& arc : record.at("path").at("arc_counts")) {
+                const auto key=std::make_pair(arc.at(0).get<int>(),arc.at(1).get<int>());
+                traversals[key]=std::max(traversals[key],arc.at(2).get<int>());
+            }
+    return std::make_pair(costs,traversals);
+}
+}
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 4) throw std::invalid_argument("usage: mlnd_output_probe INSTANCE K OUTPUT_DIR");
+        if (argc != 4 && (argc != 5 || std::string(argv[4]) != "--compact-only"))
+            throw std::invalid_argument("usage: mlnd_output_probe INSTANCE K OUTPUT_DIR [--compact-only]");
+        const auto begun=std::chrono::steady_clock::now();
         const auto input = mlnd::read_input(argv[1], std::stoi(argv[2]));
         const auto paths = mlnd::enumerate_paths(input);
+        if (argc == 5) {
+            auto fixed=input;
+            mlnd::preprocess_generalized_demand(fixed,paths);
+            const auto start=std::chrono::steady_clock::now();
+            auto compact=mlnd::all_courier_result(fixed,paths);
+            mlnd::validate_result_path_records(paths,compact);
+            const double package_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+            compact["max_orders"]=fixed.max_orders;
+            compact["catalogue_complete"]=paths.complete;
+            compact["catalogue"]={{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()},
+                                  {"segments",paths.initial_segments.size()}};
+            const auto write_start=std::chrono::steady_clock::now();
+            mlnd::write_result(argv[3],fixed,paths,compact);
+            std::cout << mlnd::Json{{"passed",true},{"solver_invoked",false},
+                {"service_paths",paths.service_paths.size()},{"saved_service_records",compact.at("_missions").size()},
+                {"objective",compact.at("objective")},{"package_and_record_check_seconds",package_seconds},
+                {"write_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-write_start).count()},
+                {"total_seconds",std::chrono::duration<double>(std::chrono::steady_clock::now()-begun).count()}}.dump()<<'\n';
+            return 0;
+        }
         const auto formulation = mlnd::build_formulation(input, paths);
         std::vector<double> values(formulation.matrix.variables.size(), 0);
         for (int r = 0; r < input.n_od; ++r) values[formulation.courier[r]] = input.demand[r];
@@ -80,10 +127,82 @@ int main(int argc, char** argv) {
         if (synchronized != earlier) throw std::runtime_error("Output synchronization is not idempotent");
         mlnd::write_result(argv[3], input, paths, baseline);
         mlnd::write_result(std::filesystem::path(argv[3]) / "generated_pool", input, generated, earlier);
+        mlnd::Json compact_checks=nullptr;
+        if (input.flow_policy == "aggregate") {
+            auto fixed=input;
+            mlnd::preprocess_generalized_demand(fixed,paths);
+            auto compact=mlnd::all_courier_result(fixed,paths);
+            auto dense_input=fixed;
+            dense_input.first_leg_consistency=true; // exercise the legacy record fallback only
+            const auto dense=mlnd::all_courier_result(dense_input,paths);
+            if (compact.at("_solution")!=dense.at("_solution") ||
+                compact.at("metrics")!=dense.at("metrics") || statistics(compact)!=statistics(dense))
+                throw std::runtime_error("Compact records changed decisions, resources or reconstruction statistics");
+            mlnd::validate_result_path_records(paths,compact);
+            mlnd::validate_result_path_records(paths,dense);
+            auto marked_compact=compact;
+            std::vector<bool> recorded(paths.service_paths.size(),false);
+            for (const auto& row:compact.at("_missions"))
+                recorded[row.at("path").at("id").get<int>()]=true;
+            int marked_id=static_cast<int>(paths.service_paths.size()-1);
+            for (std::size_t index=0;index<recorded.size();++index)
+                if (!recorded[index]) { marked_id=static_cast<int>(index);break; }
+            marked_compact["_solution"]["flow"][marked_id]=1e-250;
+            mlnd::synchronize_result_paths(fixed,paths,marked_compact);
+            auto find_marked=[&]() -> const mlnd::Json& {
+                for (const auto& row:marked_compact.at("_missions"))
+                    if (row.at("path").at("id")==marked_id) return row;
+                throw std::runtime_error("Tiny nonzero flow lost its physical record");
+            };
+            if (find_marked().at("flow")!=1e-250)
+                throw std::runtime_error("Tiny positive flow was rounded away");
+            marked_compact["_solution"]["flow"][marked_id]=-1e-250;
+            mlnd::synchronize_result_paths(fixed,paths,marked_compact);
+            if (find_marked().at("flow")!=-1e-250)
+                throw std::runtime_error("Tiny negative flow was rounded away");
+            mlnd::validate_result_path_records(paths,marked_compact);
+            const auto stable=marked_compact;
+            mlnd::synchronize_result_paths(fixed,paths,marked_compact);
+            if (stable!=marked_compact) throw std::runtime_error("Compact synchronization is not idempotent");
+            int rejected=0;
+            auto reject=[&](mlnd::Json malformed) {
+                try { mlnd::validate_result_path_records(paths,malformed); }
+                catch (const std::exception&) { ++rejected; return; }
+                throw std::runtime_error("Corrupt compact record was accepted");
+            };
+            auto corrupt=marked_compact;
+            corrupt["_missions"].push_back(corrupt["_missions"].front()); reject(corrupt);
+            corrupt=marked_compact;corrupt["_missions"][0]["path"]["id"]=-1;reject(corrupt);
+            corrupt=marked_compact;corrupt["_missions"][0]["path"]["id"]=paths.service_paths.size();reject(corrupt);
+            corrupt=marked_compact;corrupt["_missions"][0]["flow"]=99;reject(corrupt);
+            corrupt=marked_compact;corrupt["_missions"][0]["path"]["cost"]=99;reject(corrupt);
+            corrupt=marked_compact;
+            auto& records=corrupt["_missions"];
+            for (auto it=records.begin();it!=records.end();++it)
+                if (it->at("path").at("id")==marked_id) { records.erase(it);break; }
+            reject(corrupt);
+            auto compact_pool=mlnd::prepare_path_support(fixed);
+            mlnd::register_service_path(compact_pool,paths.service_paths.front());
+            auto growing=mlnd::all_courier_result(fixed,compact_pool);
+            if (paths.service_paths.size()>1) mlnd::register_service_path(compact_pool,paths.service_paths[1]);
+            mlnd::synchronize_result_paths(fixed,compact_pool,growing);
+            if (compact_pool.output_witness_service_size!=compact_pool.service_paths.size() ||
+                growing.at("objective")!=compact.at("objective"))
+                throw std::runtime_error("Compact witness cache failed after pool growth");
+            mlnd::validate_result_path_records(compact_pool,growing);
+            compact["max_orders"]=fixed.max_orders;
+            mlnd::write_result(std::filesystem::path(argv[3])/"compact",fixed,paths,compact);
+            compact_checks={{"saved_service_records",compact.at("_missions").size()},
+                {"registered_service_paths",paths.service_paths.size()},
+                {"task_minima_origin_support_and_arc_maxima_preserved",true},
+                {"tiny_positive_and_negative_flows_preserved",true},{"corrupt_records_rejected",rejected},
+                {"tiny_flow_exercises_omitted_zero_record",!recorded[marked_id]},
+                {"legacy_dense_records_accepted",true},{"cache_pool_growth",true}};
+        }
         std::cout << mlnd::Json{{"passed", true}, {"max_orders", input.max_orders},
             {"objective", baseline.at("objective")}, {"files_written", true},
             {"earlier_incumbent_pool_growth", true}, {"nonzero_flow_preserved", true},
-            {"registration_and_synchronization_idempotent", true}}.dump() << '\n';
+            {"registration_and_synchronization_idempotent", true},{"compact_checks",compact_checks}}.dump() << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

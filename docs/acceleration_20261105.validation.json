@@ -1,0 +1,564 @@
+{
+  "date": "2026-11-05",
+  "preset": "accelerated-20261105",
+  "scope": "Four authorized acceleration families; synthetic correctness tests, not a production performance comparison.",
+  "build": {
+    "directory": "/tmp/mlnd-acceleration-20261105-build",
+    "binary": "/tmp/mlnd-acceleration-20261105-build/mlnd_cpp",
+    "binary_sha256": "b5259cb12e58353584ec8435758b0dfd1f031f40bddbeec8129d4deaa9429153",
+    "flags": "-O3 -DNDEBUG -std=c++17 -fPIC -fexceptions -ffp-contract=off -Wall -Wextra -Wpedantic",
+    "parallel_jobs": 1,
+    "success": true,
+    "warnings_or_errors": false
+  },
+  "verification": {
+    "self_contained_probes_passed": 16,
+    "cli_option_parsing_passed": true,
+    "production_binaries_changed": false,
+    "experiment_outputs_read": false,
+    "large_instance_performance_comparison": false
+  },
+  "tests": [
+    {
+      "probe": "task_reduction",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.69,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-task_reduction.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-task_reduction.stderr",
+      "output_sha256": "523c411db11e953ed0632b8d156ba8b3fdc99419d3739f6cfa460d5499461e1a"
+    },
+    {
+      "probe": "certified_cut_pool",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.615,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-certified_cut_pool.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-certified_cut_pool.stderr",
+      "checks": 11,
+      "output_sha256": "3ec4d35ecc4641430f9539b5d69b68930240758ab4589461cbc3d37455b7a9f8"
+    },
+    {
+      "probe": "primal_neighborhood",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.625,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-primal_neighborhood.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-primal_neighborhood.stderr",
+      "cases": 3,
+      "output_sha256": "161a8523e9e9f239567a3637623fbe76268821c283020b418cdf111bb4d4ec0a"
+    },
+    {
+      "probe": "solver_presets",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.628,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-solver_presets.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-solver_presets.stderr",
+      "checks": 32,
+      "output_sha256": "7e6e67e95ff587f1ed6f45bbdff51b4517ad1e3687ae5110a7f72fbe7ba457a4"
+    },
+    {
+      "probe": "primal_polish",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.691,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-primal_polish.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-primal_polish.stderr",
+      "cases": 4,
+      "output_sha256": "ee16ead86a52d462081fac15370a1d001d38cfca902a3194e5c6c673e2d42509"
+    },
+    {
+      "probe": "alns_repair",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.681,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-alns_repair.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-alns_repair.stderr",
+      "output_sha256": "afb747b4668678f27a6e602ced1efe70cefa7865b7b4c476e1c5cab1a54653db"
+    },
+    {
+      "probe": "branch_pricing",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.617,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-branch_pricing.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-branch_pricing.stderr",
+      "output_sha256": "620fb9cb77e6c7f97fb7ccfa2fc2ab225a926ab84ca2838a0dafe3f20cf25266"
+    },
+    {
+      "probe": "pricing_speed",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 1.681,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-pricing_speed.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-pricing_speed.stderr",
+      "output_sha256": "83206cedfc3b677ae9d0bc68b17979868827abe7f20607d1895ba8c4b73350a0"
+    },
+    {
+      "probe": "native_dual",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.631,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-native_dual.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-native_dual.stderr",
+      "output_sha256": "0e9b65e648dd6a4e3e3fe265e7d63d65a2f2db1c75d0e64b0e495dc3844fb777"
+    },
+    {
+      "probe": "lb_integration",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.735,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-lb_integration.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-lb_integration.stderr",
+      "output_sha256": "0f37b77f25e9a5bd38d4ab8c8220fe18029380f61a51121cf4ede787d8c34b40"
+    },
+    {
+      "probe": "acceleration_integration",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.745,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-acceleration_integration.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-acceleration_integration.stderr",
+      "cases": 2,
+      "output_sha256": "f8aad2e45434b64f49cacd07d80dd2bc12e086118b67f2a9f11528aa9d9859f0"
+    },
+    {
+      "probe": "pricing_state",
+      "args": [
+        "--solve"
+      ],
+      "exit_code": 0,
+      "wall_seconds": 0.552,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-pricing_state.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-pricing_state.stderr",
+      "output_sha256": "094b99ad8f4c010b9c227dfe78c7293fcbc02166bbd767b17b7bc04bbdd1ba21"
+    },
+    {
+      "probe": "search_integration",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.813,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-search_integration.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-search_integration.stderr",
+      "cases": 4,
+      "output_sha256": "7f94af38dafcebe7dbfb9ba7598a80c0a63e874e4f772ca0429fa1feb957cfe5"
+    },
+    {
+      "probe": "alns_integration",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 1.047,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-alns_integration.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-alns_integration.stderr",
+      "output_sha256": "e678306d76d1624566701c85531d1d0fa45752c501ab0694bb644abf10eaf596"
+    },
+    {
+      "probe": "alns_support",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 0.623,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-alns_support.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-alns_support.stderr",
+      "cases": 5,
+      "output_sha256": "2ea1b0baa445dcff0506d4c57f28371235cef78ff6b011df7b12821934ecdc39"
+    },
+    {
+      "probe": "speed_integration",
+      "args": [],
+      "exit_code": 0,
+      "wall_seconds": 20.319,
+      "passed": true,
+      "output": "/tmp/mlnd-acceleration-20261105-speed_integration.json",
+      "stderr": "/tmp/mlnd-acceleration-20261105-speed_integration.stderr",
+      "output_sha256": "bbb626411a5f394b25f47ce950d5b59e2fd86e579577d96bc9d676d9c0228ff4"
+    }
+  ],
+  "model_projection": {
+    "edges": {
+      "empty_support_preserved": true,
+      "first_leg_compression_disabled": true,
+      "legacy_unchanged": true,
+      "literal_head_bounds_preserved": true,
+      "tiny_positive_paths": 16
+    },
+    "insertion": [
+      {
+        "active_service_columns": 56,
+        "batch": false,
+        "idempotent": true
+      },
+      {
+        "active_service_columns": 56,
+        "batch": true,
+        "idempotent": true
+      }
+    ],
+    "passed": true,
+    "projection_cases": [
+      {
+        "fractional": false,
+        "k": 1,
+        "original_objective": 57.395962045933935,
+        "original_rows": 155,
+        "original_variables": 81,
+        "reduced_objective": 57.39596204575006,
+        "reduced_rows": 135,
+        "reduced_variables": 61,
+        "zero_columns": 0
+      },
+      {
+        "fractional": true,
+        "k": 1,
+        "original_objective": 122.8761695376325,
+        "original_rows": 155,
+        "original_variables": 81,
+        "reduced_objective": 122.87616954193803,
+        "reduced_rows": 135,
+        "reduced_variables": 61,
+        "zero_columns": 0
+      },
+      {
+        "fractional": false,
+        "k": 2,
+        "original_objective": 55.695720968861174,
+        "original_rows": 163,
+        "original_variables": 145,
+        "reduced_objective": 55.6957209675884,
+        "reduced_rows": 143,
+        "reduced_variables": 101,
+        "zero_columns": 24
+      },
+      {
+        "fractional": true,
+        "k": 2,
+        "original_objective": 117.2865144047217,
+        "original_rows": 163,
+        "original_variables": 145,
+        "reduced_objective": 117.2865144047217,
+        "reduced_rows": 143,
+        "reduced_variables": 101,
+        "zero_columns": 24
+      }
+    ]
+  },
+  "pricing_and_state": {
+    "continuation": {
+      "optimizer_calls": 0,
+      "passed": true,
+      "state": {
+        "builds": 5,
+        "hits": 4,
+        "last_rebuild_reason": "registered_columns_changed",
+        "live_models": 0
+      }
+    },
+    "graph_and_pricing": {
+      "exact_differential_checks": 8,
+      "graph": {
+        "completed_builds": 2,
+        "construction_attempts": 2,
+        "hits": 1,
+        "identity_misses": 1,
+        "live_graphs": 1
+      },
+      "interrupted_graph": {
+        "completed_builds": 1,
+        "construction_attempts": 2,
+        "hits": 0,
+        "identity_misses": 0,
+        "live_graphs": 1
+      },
+      "passed": true
+    },
+    "passed": true,
+    "solve_comparison": {
+      "accelerated_iterations": 12,
+      "accelerated_objective": 16.861084893520378,
+      "discovery_rounds": 9,
+      "numerical_profile_reset": true,
+      "passed": true,
+      "reference_iterations": 11,
+      "reference_objective": 16.861084897547318,
+      "resumed_iterations": 1
+    }
+  },
+  "combined_configuration": {
+    "cases": [
+      {
+        "bound": 48.64848956847055,
+        "cut_pool": {
+          "active": 4,
+          "active_limit": 256,
+          "before_final_restore": {
+            "active": 4,
+            "dormant": 0,
+            "epochs": 0,
+            "exact_duplicates_skipped": 0,
+            "physical_rows_removed": 0,
+            "reactivations": 0,
+            "registered": 4,
+            "scope": "unconditional_certified_affine_cuts",
+            "sleep_method": "redundant_rhs_with_stable_row_indices",
+            "suspensions": 0
+          },
+          "deduplication_enabled": true,
+          "dormant": 0,
+          "epochs": 0,
+          "exact_duplicates_skipped": 0,
+          "management_enabled": true,
+          "minimum_inactive_age": 8,
+          "physical_rows_removed": 0,
+          "reactivations": 0,
+          "registered": 4,
+          "scope": "unconditional_certified_affine_cuts",
+          "sleep_method": "redundant_rhs_with_stable_row_indices",
+          "suspensions": 0
+        },
+        "full_objective": 48.95411712502386,
+        "graph_cache": {
+          "completed_builds": 1,
+          "construction_attempts": 1,
+          "hits": 3,
+          "identity_misses": 0,
+          "live_graphs": 1
+        },
+        "k": 1,
+        "objective": 48.95411717595884,
+        "recourse_cache": {
+          "builds": 0,
+          "hits": 0,
+          "last_rebuild_reason": "unused",
+          "live_models": 0
+        },
+        "termination_reason": "gap_limit"
+      },
+      {
+        "bound": 49.09252237262476,
+        "cut_pool": {
+          "active": 22,
+          "active_limit": 256,
+          "before_final_restore": {
+            "active": 22,
+            "dormant": 0,
+            "epochs": 0,
+            "exact_duplicates_skipped": 0,
+            "physical_rows_removed": 0,
+            "reactivations": 0,
+            "registered": 22,
+            "scope": "unconditional_certified_affine_cuts",
+            "sleep_method": "redundant_rhs_with_stable_row_indices",
+            "suspensions": 0
+          },
+          "deduplication_enabled": true,
+          "dormant": 0,
+          "epochs": 0,
+          "exact_duplicates_skipped": 0,
+          "management_enabled": true,
+          "minimum_inactive_age": 8,
+          "physical_rows_removed": 0,
+          "reactivations": 0,
+          "registered": 22,
+          "scope": "unconditional_certified_affine_cuts",
+          "sleep_method": "redundant_rhs_with_stable_row_indices",
+          "suspensions": 0
+        },
+        "full_objective": 49.264289318702986,
+        "graph_cache": {
+          "completed_builds": 1,
+          "construction_attempts": 1,
+          "hits": 20,
+          "identity_misses": 0,
+          "live_graphs": 1
+        },
+        "k": 2,
+        "objective": 49.26428935649182,
+        "recourse_cache": {
+          "builds": 1,
+          "hits": 0,
+          "last_rebuild_reason": "first_model",
+          "live_models": 1
+        },
+        "termination_reason": "gap_limit"
+      }
+    ],
+    "passed": true
+  },
+  "cut_pool_witness": {
+    "checks": 11,
+    "passed": true,
+    "pool": {
+      "active": 2,
+      "dormant": 0,
+      "epochs": 2,
+      "exact_duplicates_skipped": 1,
+      "physical_rows_removed": 0,
+      "reactivations": 2,
+      "registered": 2,
+      "scope": "unconditional_certified_affine_cuts",
+      "sleep_method": "redundant_rhs_with_stable_row_indices",
+      "suspensions": 2
+    },
+    "recovered": 3.1,
+    "reference": 3.1,
+    "relaxed": 0.1
+  },
+  "review_fixes": [
+    "State snapshot cost included in subproblem wall time.",
+    "Continuous-root cumulative and per-stage times share one timestamp."
+  ],
+  "validation_setup_notes": [
+    "Combined test follows existing L2 K2 ALNS scope; K1 disables ALNS and its support-completion option.",
+    "Combined test prepares task airline bounds exactly as the production CLI requires.",
+    "continuous_matrix_probe is an argument-driven diagnostic, not a self-contained test; only built here. lb_integration_probe covers the self-contained continuous-root integration."
+  ],
+  "limits": [
+    "Small synthetic tests, not full repository regression or performance evidence.",
+    "Combined tiny solves finish before real long-period ALNS and default cut-sleep ages; those behaviors have separate controlled tests.",
+    "Numerical profile continuation checks use controlled state, not an induced real CPLEX numerical failure.",
+    "Standalone continuous-root entry points do not share the outer event graph cache across calls.",
+    "Sleeping cuts keep physical row indices and storage; active limit is soft."
+  ],
+  "source_changes": [
+    {
+      "path": "cpp/src/benders.cpp",
+      "sha256_before": "2c574f113a1c17cd051b4e82ae5027aa3162179b1c10f4bc4a3bf6cb785c5206",
+      "sha256_after": "56bfa101028dffc7c9512d3d4799f8c93699e2de80ff4b703fbc6f5c3e86544c"
+    },
+    {
+      "path": "cpp/src/heuristics.cpp",
+      "sha256_before": "d6b3b265337718a685cab6fca039cf17ac564fdb281a37a7c6e88b434b322656",
+      "sha256_after": "10b71104c6b7184db414ba7dd736f1e2a7ef6a7c1e9ed990e1f8053ebdb412e2"
+    },
+    {
+      "path": "cpp/src/primal_alns.cpp",
+      "sha256_before": "b838315c1a50ee6a193dbf73d239dc98b3d2dded775a6ff072c45764d8436dd0",
+      "sha256_after": "1cc1a845952b5098db90dc6beec43646beb938d899f4c7f0e6f777af5674c4ae"
+    },
+    {
+      "path": "cpp/src/output.cpp",
+      "sha256_before": "1d1245c70eac9abcb586eb9d0b7a2ede6123aaaa24429aac61c380aad67cf12f",
+      "sha256_after": "58c00561f5b3ad1893e36fb7ef83dbcff369313aaec94cf2c29b2bc8a003d940"
+    },
+    {
+      "path": "cpp/src/solver_presets.cpp",
+      "sha256_before": "0ea7cfa8519ef4b5ce97acc64a951643977e1c7940b25ca6df5d7c3c6ab43456",
+      "sha256_after": "192e00b8af056cff7fd94bf232817e608359dd48fce9e2aabf55830668a55189"
+    },
+    {
+      "path": "cpp/src/formulation.cpp",
+      "sha256_before": "5749a5448f649e5c6fdb972ed076fe5b6c3dc406045b209da544098f2179f1b4",
+      "sha256_after": "e0fc086b33969cd579346e821517956770c430669a9eb6730b98c5264bf70165"
+    },
+    {
+      "path": "cpp/src/pricing.cpp",
+      "sha256_before": "cf137b5262d68fa59da4f155b52d0614fae572f0e7bfde1ce9b748e7325c45b4",
+      "sha256_after": "06c852236a4fb0ae1219c93f263b9b2a342192c8801c4770b13f910de7d52963"
+    },
+    {
+      "path": "cpp/src/main.cpp",
+      "sha256_before": "d8833eb437fca6fff99110839195a43ddfa9325c11b7ddc55baedada0372ad6d",
+      "sha256_after": "c6f018b2102899e2d7c5c68a6fef21e6075095f97ef97326f3d5e4fe20dbe9f6"
+    },
+    {
+      "path": "cpp/src/primal_support.cpp",
+      "sha256_before": "a632374d58ff12b5787fd6c8ad3e63122236d2b3e4c5607350c0c140dc3f3163",
+      "sha256_after": "dd93df8b7f807cb8df6add2cc2de74928a90b408952b4cc1e4cbfa54b223d3fb"
+    },
+    {
+      "path": "cpp/include/mlnd/formulation.hpp",
+      "sha256_before": "5b4a93703fc8b4b582acaa3405438fe1bdaea5e36fd0edb9f07342e71c11c347",
+      "sha256_after": "d842adfc6042287d80a995066cf00da37815f309bba102ce4cf43e93176980e0"
+    },
+    {
+      "path": "cpp/include/mlnd/pricing.hpp",
+      "sha256_before": "14cad68d9e8ba3f6cb06dc9b5db1498173f2696ea66887bc6c4d34181d2909e1",
+      "sha256_after": "ed1f3d04dc35a249ae800e606550fdbf7c3a057b2e7b26bbab0e5797d6e5d1db"
+    },
+    {
+      "path": "cpp/include/mlnd/primal_support.hpp",
+      "sha256_before": "d4b948c7041b6fbdd89c863888c395bea0ae9ed9866032b8fe8b42293424dbd2",
+      "sha256_after": "ab639486897e868db92031cc9e41e2c89d88006fbba47a20b17e48cb0fcb8cc1"
+    },
+    {
+      "path": "cpp/include/mlnd/linear_model.hpp",
+      "sha256_before": "a1aa79bcd367c2f35e1b1c8df0db1592c2c174a7cdf8d237df17ea78836203dc",
+      "sha256_after": "85ff37326431b5535dfdfc0681091cdf301de885e876796b731e472404920144"
+    },
+    {
+      "path": "cpp/include/mlnd/heuristics.hpp",
+      "sha256_before": "d0e7b6fd850bf519973878e9456c7304f6a96169d4a94b4426f18fe7f4ed1c8e",
+      "sha256_after": "f4f9f2da2389bce9b938e4809ffb03528b645488c9fd1b2a94be878f439ac0ea"
+    },
+    {
+      "path": "cpp/tests/solver_presets_probe.cpp",
+      "sha256_before": "a57768f226c8ecf0ca700b3b8e12e67a4795e7827a13ce835fa7e1eb984eca35",
+      "sha256_after": "a7f3c754fac07b4e19ef91bf462c36e8bb58cd6ab206b01ff6e8d49ee9a69498"
+    },
+    {
+      "path": "cpp/tests/primal_polish_probe.cpp",
+      "sha256_before": "950d996a0fa341441b354615f0755ca8ac79b0e162944b70e120df86c920c893",
+      "sha256_after": "f64d87eb45b9a5f15248b205485eeb8ff6cc394c6abd2b95b454c0aadd195865"
+    },
+    {
+      "path": "cpp/tests/alns_repair_probe.cpp",
+      "sha256_before": "acb13d74a8bae649b364e60a747cb089ead1cf9de4ee2665902a327fe70903cb",
+      "sha256_after": "7a95bb61ad876144419ee7b1b684cb9a59afc72826f89c53fee9e91f8fc489f8"
+    },
+    {
+      "path": "README.md",
+      "sha256_before": "4b87d60bc4355e9072694fcd8a473b876cb72b40723ce7c07f3c624ce33468a8",
+      "sha256_after": "e1fea2021219a9cf148d1b1f6ae00a7ac2ad4819f731901e53c44d43333de0b0"
+    },
+    {
+      "path": "cpp/Makefile",
+      "sha256_before": "3b3a70a1bc0fafe52a37cdf19e1165b5b33de4240e59d86f80532a6549b2f121",
+      "sha256_after": "b024294d70766d7c88bc03a4d3ee49a8e9ba725e4f192e3cca6d976b1997378f"
+    },
+    {
+      "path": "cpp/include/mlnd/certified_cut_pool.hpp",
+      "sha256_before": null,
+      "sha256_after": "cff3209ceee153dd6019014b2ccfece59fa3bc49b6be3696a41ade5c5f5e788a"
+    },
+    {
+      "path": "cpp/tests/task_reduction_probe.cpp",
+      "sha256_before": null,
+      "sha256_after": "ea5d480cfe1f92556fa265e5fce734ec4ccdc6f4d385195b960bddd7640be2bd"
+    },
+    {
+      "path": "cpp/tests/pricing_state_probe.cpp",
+      "sha256_before": null,
+      "sha256_after": "adcc355bad2f9cbfab6207c19b73a46b6517d474fc4a62fd11dfdc9688506a3b"
+    },
+    {
+      "path": "cpp/tests/primal_neighborhood_probe.cpp",
+      "sha256_before": null,
+      "sha256_after": "a450d33bf9e07c0f0c0e43de896c86b33f18eba838914e4d5178a71b0f54c384"
+    },
+    {
+      "path": "cpp/tests/certified_cut_pool_probe.cpp",
+      "sha256_before": null,
+      "sha256_after": "d041cfb2d577823cf26b2ba044c3a9e3bf749eab2a8cdb2b1f80b0ba4e931e61"
+    },
+    {
+      "path": "cpp/tests/acceleration_integration_probe.cpp",
+      "sha256_before": null,
+      "sha256_after": "eaf4592874598cb56e548ffb5003bfd842c6b1a669b2ccee6d2dffa81162f5bf"
+    }
+  ]
+}
