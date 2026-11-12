@@ -12,7 +12,16 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
-#ifdef __APPLE__
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <bcrypt.h>
+#elif defined(__APPLE__)
 #include <CommonCrypto/CommonDigest.h>
 #else
 #include <openssl/sha.h>
@@ -176,7 +185,20 @@ std::set<std::string> keys(const Json& object) {
 std::string sha256_file(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) fail("cannot hash " + path.string());
-#ifdef __APPLE__
+#ifdef _WIN32
+    struct HashContext {
+        BCRYPT_ALG_HANDLE algorithm = nullptr;
+        BCRYPT_HASH_HANDLE hash = nullptr;
+        ~HashContext() {
+            if (hash) BCryptDestroyHash(hash);
+            if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+        }
+    } context;
+    require(BCryptOpenAlgorithmProvider(&context.algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0,
+            "cannot initialize SHA-256 provider");
+    require(BCryptCreateHash(context.algorithm, &context.hash, nullptr, 0, nullptr, 0, 0) >= 0,
+            "cannot initialize SHA-256 hash");
+#elif defined(__APPLE__)
     CC_SHA256_CTX context;
     CC_SHA256_Init(&context);
 #else
@@ -186,14 +208,22 @@ std::string sha256_file(const std::filesystem::path& path) {
     std::array<char, 65536> buffer{};
     while (stream) {
         stream.read(buffer.data(), buffer.size());
-#ifdef __APPLE__
+#ifdef _WIN32
+        require(BCryptHashData(context.hash, reinterpret_cast<PUCHAR>(buffer.data()),
+                              static_cast<ULONG>(stream.gcount()), 0) >= 0,
+                "cannot update SHA-256 hash");
+#elif defined(__APPLE__)
         CC_SHA256_Update(&context, buffer.data(), static_cast<CC_LONG>(stream.gcount()));
 #else
         SHA256_Update(&context, buffer.data(), static_cast<std::size_t>(stream.gcount()));
 #endif
     }
+    require(stream.eof() && !stream.bad(), "cannot finish reading hash input " + path.string());
     std::array<unsigned char, 32> digest{};
-#ifdef __APPLE__
+#ifdef _WIN32
+    require(BCryptFinishHash(context.hash, digest.data(), static_cast<ULONG>(digest.size()), 0) >= 0,
+            "cannot finish SHA-256 hash");
+#elif defined(__APPLE__)
     CC_SHA256_Final(digest.data(), &context);
 #else
     SHA256_Final(digest.data(), &context);

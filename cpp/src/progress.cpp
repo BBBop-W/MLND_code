@@ -4,6 +4,16 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#include <system_error>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace mlnd {
 namespace {
@@ -21,7 +31,11 @@ std::string utc_timestamp() {
     const auto now = std::chrono::system_clock::now();
     const auto seconds = std::chrono::system_clock::to_time_t(now);
     std::tm utc{};
-    gmtime_r(&seconds, &utc);
+#ifdef _WIN32
+    if (gmtime_s(&utc, &seconds) != 0) throw std::runtime_error("Cannot convert UTC timestamp");
+#else
+    if (!gmtime_r(&seconds, &utc)) throw std::runtime_error("Cannot convert UTC timestamp");
+#endif
     const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
     std::ostringstream out;
     out << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setw(3) << std::setfill('0') << millis << 'Z';
@@ -29,7 +43,7 @@ std::string utc_timestamp() {
 }
 
 void atomic_json_file(const std::filesystem::path& path, const Json& value) {
-    std::filesystem::create_directories(path.parent_path());
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
     auto temporary = path;
     temporary += ".tmp";
     {
@@ -39,7 +53,15 @@ void atomic_json_file(const std::filesystem::path& path, const Json& value) {
         stream.flush();
         if (!stream) throw std::runtime_error("Cannot finish atomic JSON output " + temporary.string());
     }
+#ifdef _WIN32
+    // Both names are in the same directory/volume. Use an explicit Win32
+    // replacement without first deleting the old checkpoint.
+    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        throw std::filesystem::filesystem_error("Cannot replace atomic JSON output", temporary, path,
+            std::error_code(static_cast<int>(GetLastError()), std::system_category()));
+#else
     std::filesystem::rename(temporary, path);
+#endif
 }
 
 RunProgress::RunProgress(std::filesystem::path directory, double started, double budget, Json metadata,

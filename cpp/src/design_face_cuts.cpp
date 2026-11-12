@@ -9,10 +9,10 @@
 namespace mlnd {
 namespace {
 bool supported(const Input& d) {
-    return d.preprocessed_demand && d.origin_assignment() && d.n_l==2 && d.max_orders==2 &&
+    return d.preprocessed_demand && d.origin_assignment() && d.n_l>0 && d.max_orders==2 &&
         d.flow_policy=="aggregate" && !d.first_leg_consistency && d.route_mode=="direct" && !d.has_candidate_routes;
 }
-bool certified_face(const Json& face,int head,int state,double& lower) {
+bool certified_face(const Json& face,int head,int state,int bases,double& lower) {
     try {
         if(!face.is_object() || !face.value("bound_valid",false) ||
            face.value("assignment_scope",std::string())!="task" ||
@@ -22,7 +22,8 @@ bool certified_face(const Json& face,int head,int state,double& lower) {
            !face.value("objective_includes_fixed_costs",false) || !face.value("other_designs_free",false) ||
            !face.value("support_complete",false) || !face.value("catalogue_complete",false) ||
            face.value("is_integer_solution",true) || face.value("direct_global_bound_update",true) ||
-           face.value("face_fix_rows",0)!=2)return false;
+           face.value("bases",0)!=bases || face.value("state_count",0)!=bases+1 ||
+           face.value("face_fix_rows",0)!=bases)return false;
         lower=face.at("certified_lower_bound").get<double>();
         const auto& certificate=face.at("lower_bound_certificate");
         if(!std::isfinite(lower) || certificate.value("method",std::string())!=
@@ -40,19 +41,23 @@ bool certified_face(const Json& face,int head,int state,double& lower) {
 }
 }
 
-TaskSavingsCut assemble_design_face_cut(const Input& d,int head,const std::array<Json,3>& faces,
+TaskSavingsCut assemble_design_face_cut(const Input& d,int head,const std::vector<Json>& faces,
         double global_lower,const std::vector<double>& design,double theta_value,int theta) {
     const double started=wall_time();TaskSavingsCut cut;cut.status="invalid_design_face_input";
     const DesignLayout layout(d);
-    if(!supported(d) || head<0 || head>=d.task_count() || !std::isfinite(global_lower) ||
+    if(!supported(d) || faces.size()!=static_cast<std::size_t>(d.n_l+1) ||
+       head<0 || head>=d.task_count() || !std::isfinite(global_lower) ||
        !std::isfinite(theta_value) || theta<layout.count || design.size()!=static_cast<std::size_t>(layout.count))return cut;
     for(double x:design)if(!std::isfinite(x) || x<0 || x>1)return cut;
-    if(design[layout.assignment_index(head,0)]+design[layout.assignment_index(head,1)]>1+1e-8)return cut;
+    double assigned=0;
+    for(int l=0;l<d.n_l;++l)assigned+=design[layout.assignment_index(head,l)];
+    if(assigned>1+1e-8)return cut;
     const auto master=design_model(d,false);
-    std::array<double,3> bounds{global_lower,global_lower,global_lower};
+    const int state_count=d.n_l+1;
+    std::vector<double> bounds(state_count,global_lower);
     Json states=Json::array();int certified=0,improved=0;
-    for(int state=0;state<3;++state) {
-        double lower=0;const bool valid=certified_face(faces[state],head,state,lower);
+    for(int state=0;state<state_count;++state) {
+        double lower=0;const bool valid=certified_face(faces[state],head,state,d.n_l,lower);
         if(valid){++certified;bounds[state]=std::max(global_lower,lower);}
         if(bounds[state]>global_lower)++improved;
         states.push_back({{"state",state},{"face_certificate_valid",valid},
@@ -66,7 +71,7 @@ TaskSavingsCut assemble_design_face_cut(const Input& d,int head,const std::array
         if(!std::isfinite(cost))return cut;
         coefficients[j]=cost;absolute+=std::abs(cost);
     }
-    for(int l=0;l<2;++l)
+    for(int l=0;l<d.n_l;++l)
         coefficients[layout.assignment_index(head,l)]-=static_cast<long double>(bounds[l+1])-bounds[0];
     cut.row={"head_design_face_cut",'G',0,{{theta,1}}};
     for(int j=0;j<layout.count;++j)if(coefficients[j]!=0) {
@@ -85,10 +90,11 @@ TaskSavingsCut assemble_design_face_cut(const Input& d,int head,const std::array
     for(const auto& [j,c]:cut.row.coefficients)if(j!=theta) {violation-=static_cast<long double>(c)*design[j];key<<j<<':'<<c<<';';}
     cut.violation=static_cast<double>(violation);
     if(!std::isfinite(cut.violation))return cut;
-    cut.valid=true;cut.key=key.str();cut.fallback=certified<3;
+    cut.valid=true;cut.key=key.str();cut.fallback=certified<state_count;
     cut.status=improved?"certified_head_design_face_cut":"global_bound_fallback_only";
     cut.violated=cut.violation>1e-7*(1+std::abs(global_lower)+std::abs(theta_value));
     cut.certificate={{"kind","head_design_face"},{"assignment_scope","task"},{"head",head},{"states",states},
+        {"bases",d.n_l},{"state_count",state_count},
         {"global_lower",global_lower},{"face_bounds",bounds},{"certified_faces",certified},
         {"improved_faces",improved},{"complete_domain",true},{"global_integer_valid",true},
         {"validity_scope","all_original_integer_designs_and_their_convex_hull"},
@@ -103,7 +109,8 @@ DesignFaceResult separate_design_face(const Input& d,PathCollection& paths,const
         int head,const std::vector<double>& design,double theta_value,int theta,double global_lower,double seconds,
         CgColumnSeeds* seeds) {
     const double started=wall_time();DesignFaceResult result;
-    result.diagnostics={{"head",head},{"assignment_scope","task"},{"calls",0},{"global_lower",std::isfinite(global_lower)?Json(global_lower):Json(nullptr)},
+    result.diagnostics={{"head",head},{"assignment_scope","task"},{"bases",d.n_l},{"state_count",d.n_l+1},
+        {"calls",0},{"global_lower",std::isfinite(global_lower)?Json(global_lower):Json(nullptr)},
         {"budget_seconds",std::isfinite(seconds)?Json(seconds):Json(nullptr)},{"direct_global_bound_update",false}};
     auto finish=[&](const char* status) {
         result.seconds=wall_time()-started;result.diagnostics["status"]=status;
@@ -114,11 +121,12 @@ DesignFaceResult separate_design_face(const Input& d,PathCollection& paths,const
         return finish("unsupported_design_face_scope");
     if(!std::isfinite(global_lower))return finish("global_lower_unavailable");
     const double deadline=started+seconds;
-    std::array<Json,3> faces{Json::object(),Json::object(),Json::object()};
-    for(int state=0;state<3;++state) {
+    const int state_count=d.n_l+1;
+    std::vector<Json> faces(state_count,Json::object());
+    for(int state=0;state<state_count;++state) {
         const double left=deadline-wall_time();
         if(left<=0)break;
-        SolverOptions face_options=options;face_options.seconds=left/(3-state);face_options.log=false;
+        SolverOptions face_options=options;face_options.seconds=left/(state_count-state);face_options.log=false;
         // The public oracle packages expected budget/enumeration/solver
         // failures. Invalid configuration and logical contradictions must
         // remain visible instead of masquerading as missing evidence.

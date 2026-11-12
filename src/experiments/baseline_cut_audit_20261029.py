@@ -234,13 +234,23 @@ def validate_profile(profile, constants, demand, catalogue):
 
 
 def replay_joint_queue_row(row, constants):
-    """Check the nine categorical vertices and the external-task lifting bound."""
+    """Check all two-task categorical vertices and the external-task lift."""
     cert, profile = row["certificate"], row["certificate"]["profile"]
     Q, L, count, start = (constants[k] for k in ("Q", "L", "design_count", "assignment"))
-    require(L == 2 and cert["kind"] == "queue_joint" and cert["complete_domain"] is True,
+    require(L >= 1 and cert["kind"] == "queue_joint" and cert["complete_domain"] is True,
             "joint queue domain")
-    require(cert["global_integer_valid"] is True and cert["direct_global_bound_update"] is False
-            and cert["ordinary_auxiliary_optimization_calls"] == 0, "joint queue validity scope")
+    require(cert["global_integer_valid"] is True and cert["direct_global_bound_update"] is False,
+            "joint queue validity scope")
+    method = cert.get("coefficient_method", "L2_facet_enumeration")
+    require(method in {"L2_facet_enumeration", "complete_state_coefficient_lp"}, "joint coefficient method")
+    expected_calls = int(method == "complete_state_coefficient_lp")
+    require(cert["ordinary_auxiliary_optimization_calls"] == expected_calls, "joint coefficient LP count")
+    if expected_calls:
+        require(cert["all_states_validated"] is True and cert["states_checked"] == (L + 1) ** 2
+                and cert["state_count_per_task"] == L + 1 and cert["bases"] == L,
+                "incomplete general-base state validation")
+    else:
+        require(L == 2, "legacy joint facet domain")
     require(cert.get("assignment_scope", "origin") == profile.get("assignment_scope", "origin")
             == constants["assignment_scope"], "joint queue assignment scope")
     selected = cert["selected_heads"]
@@ -252,37 +262,37 @@ def replay_joint_queue_row(row, constants):
     unsupported = profile["unsupported"]
     lower = [D(v) for v in profile["lower_coefficients"]]
     affine = [D(v) for v in cert["affine_coefficients"]]
-    require(len(signed) == len(unsupported) == 2 * Q and len(lower) == count
-            and len(affine) == 5 and all(v.is_finite() for v in signed + lower + affine),
+    require(len(signed) == len(unsupported) == L * Q and len(lower) == count
+            and len(affine) == 1 + 2 * L and all(v.is_finite() for v in signed + lower + affine),
             "joint profile dimensions/finite values")
-    require(len(cert["vertices"]) == 9, "joint vertex count")
+    require(len(cert["vertices"]) == (L + 1) ** 2, "joint vertex count")
     for index, vertex in enumerate(cert["vertices"]):
-        states = [index // 3, index % 3]
+        states = [index // (L + 1), index % (L + 1)]
         require(vertex["states"] == states, "joint vertex identity")
         value = ZERO
-        for base in range(2):
-            active = [2 * q + base for q, state in zip(selected, states) if state == base + 1]
+        for base in range(L):
+            active = [L * q + base for q, state in zip(selected, states) if state == base + 1]
             if not any(unsupported[g] for g in active):
                 value -= conjugate(sum((signed[g] for g in active), ZERO), constants["F"])
         close(vertex["queue_value"], value, "joint vertex value")
         safe = D(vertex["safe_queue_value"])
         require(safe.is_finite() and safe <= value + D(2e-12) * (1 + abs(value)), "unsafe joint vertex")
-        plane = affine[0] + sum(affine[1 + 2 * i + state - 1]
+        plane = affine[0] + sum(affine[1 + L * i + state - 1]
                                for i, state in enumerate(states) if state)
         require(plane <= safe + D(2e-12) * (1 + abs(safe) + abs(plane)), "joint plane excludes a vertex")
     require(cert["lifting_rule"] == "JL_positive_marginal_at_full_positive_sum", "joint lifting rule")
-    sums = [sum((max(ZERO, signed[2 * q + l]) for q in range(Q)
-                 if not unsupported[2 * q + l]), ZERO) for l in range(2)]
-    require(len(cert["external_positive_sums"]) == 2 and len(cert["external_penalties"]) == 2 * Q,
+    sums = [sum((max(ZERO, signed[L * q + l]) for q in range(Q)
+                 if not unsupported[L * q + l]), ZERO) for l in range(L)]
+    require(len(cert["external_positive_sums"]) == L and len(cert["external_penalties"]) == L * Q,
             "joint lifting dimensions")
     for got, expected in zip(cert["external_positive_sums"], sums):
         close(got, expected, "joint positive sum")
     for i, q in enumerate(selected):
-        for l in range(2):
-            lower[start + 2 * q + l] += affine[1 + 2 * i + l]
+        for l in range(L):
+            lower[start + L * q + l] += affine[1 + L * i + l]
     for q in range(Q):
-        for l in range(2):
-            g = 2 * q + l
+        for l in range(L):
+            g = L * q + l
             got = D(cert["external_penalties"][g])
             expected = ZERO
             if q not in selected and not unsupported[g] and signed[g] > 0:
@@ -316,7 +326,7 @@ def replay_joint_queue_row(row, constants):
     value = D(row["rhs"]) - sum(D(c) * design[j] for j, c in sparse.items() if j != count)
     close(cert["value_at_separation_point"], value, "joint separation value")
     close(row["violation"], value - D(cert["separation_theta"]), "joint separation violation")
-    return dict(kind="queue_joint", selected_tasks=selected, vertex_checks=9, lifted_tasks=Q - 2,
+    return dict(kind="queue_joint", selected_tasks=selected, vertex_checks=(L + 1) ** 2, lifted_tasks=Q - 2,
                 recomputed_violation=float(value - D(cert["separation_theta"])))
 
 

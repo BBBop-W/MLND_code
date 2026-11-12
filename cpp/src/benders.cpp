@@ -859,8 +859,8 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
     if (!free_design) validate_design(d, design, fractional);
     if (free_design && (!fractional || core))
         throw std::invalid_argument("Free-design CG requires continuous variables and no Pareto anchor");
-    if (face_head>=0 && (!free_design || face_head>=d.assignment_entities() || face_state<0 || face_state>2 || d.n_l!=2))
-        throw std::invalid_argument("Design-face CG requires one valid L2 head state and free designs");
+    if (face_head>=0 && (!free_design || face_head>=d.assignment_entities() || face_state<0 || face_state>d.n_l || d.n_l<=0))
+        throw std::invalid_argument("Design-face CG requires one valid task state and free designs");
     const char* free_scope=face_head>=0?"complete_domain_head_design_face":continuous_scope(options);
     const bool continuous_recovery = free_design || robust_continuous_recovery;
     if (continuous_recovery && (!fractional || core))
@@ -937,7 +937,7 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
         state->primal_polish_attempted_for_columns=false;state->primal_retry_reason.clear();
     }
     if (free_design) for (auto& variable : f.matrix.variables) variable.binary = false;
-    if (face_head>=0) for(int l=0;l<2;++l)
+    if (face_head>=0) for(int l=0;l<d.n_l;++l)
         // Keep these ordinary equality rows in the native dual. Registering
         // them as all-design fixes would incorrectly eliminate free costs.
         f.matrix.row("head_design_face_"+std::to_string(l),'E',face_state==l+1?1.0:0.0,
@@ -1973,7 +1973,8 @@ Json continuous_cg_result(const Input& d, PathCollection& paths, const SolverOpt
         result["assignment_scope"]=d.assignment_scope();
         result["other_designs_free"]=true;
         result["direct_global_bound_update"]=false;
-        result["face_fix_rows"]=2;
+        result["bases"]=d.n_l;result["state_count"]=d.n_l+1;
+        result["face_fix_rows"]=d.n_l;
         result["validity_scope"]="all_original_integer_designs_in_declared_head_state";
     }
     InitialColumns seeds;
@@ -2112,11 +2113,11 @@ Json solve_continuous_cg(const Input& d, PathCollection& paths, const SolverOpti
 
 Json solve_design_face_cg(const Input& d, PathCollection& paths, const SolverOptions& options,
                           int head, int state,CgColumnSeeds* seeds,double no_gain_upper) {
-    if(!d.preprocessed_demand || !d.origin_assignment() || d.n_l!=2 || d.max_orders!=2 ||
+    if(!d.preprocessed_demand || !d.origin_assignment() || d.n_l<=0 || d.max_orders!=2 ||
        d.flow_policy!="aggregate" || d.first_leg_consistency || d.route_mode!="direct" ||
        d.has_candidate_routes || !paths.complete || !paths.support_complete ||
-       head<0 || head>=d.assignment_entities() || state<0 || state>2)
-        throw std::invalid_argument("Design faces require complete direct K2 preprocessed origin L2 tasks");
+       head<0 || head>=d.assignment_entities() || state<0 || state>d.n_l)
+        throw std::invalid_argument("Design faces require complete direct K2 preprocessed origin tasks");
     SolverOptions face_options=options;
     face_options.column_generation=true;face_options.pareto=false;face_options.conditional_demand=false;
     // A nontight native dual is useful only after the existing full-domain
@@ -2766,7 +2767,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     };
     auto separate_face = [&](const std::vector<double>& point,const char* stage,double stage_deadline) {
         if(!options.design_face_cuts || !d.preprocessed_demand || !d.origin_assignment() ||
-           d.n_l!=2 || d.max_orders!=2 || !pending_design.empty() ||
+           d.n_l<=0 || d.max_orders!=2 || !pending_design.empty() ||
            point.size()!=master.matrix.variables.size() || wall_time()-last_design_face<60)return false;
         const double allowance=std::min({12.0,.08*options.seconds-design_face_seconds,
                                          .2*remaining(stage_deadline)});
@@ -2774,9 +2775,14 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         int head=-1;double score=-1;
         for(int r=0;r<d.assignment_entities();++r) {
             if(face_heads.count(r) || d.task_rate(r)<=0)continue;
-            const double a=std::clamp(point[master.layout.assignment_index(r,0)],0.0,1.0);
-            const double b=std::clamp(point[master.layout.assignment_index(r,1)],0.0,1.0);
-            const double candidate=a*(1-a)+b*(1-b)+std::min(a,b)+1e-9*d.task_rate(r);
+            double fractional=0,other_mass=0,largest=0;
+            for(int l=0;l<d.n_l;++l) {
+                const double a=std::clamp(point[master.layout.assignment_index(r,l)],0.0,1.0);
+                fractional+=a*(1-a);
+                if(a>largest){other_mass+=largest;largest=a;}else other_mass+=a;
+            }
+            // Sum outside the largest base equals min(alpha_1,alpha_2) for L2.
+            const double candidate=fractional+other_mass+1e-9*d.task_rate(r);
             if(candidate>score){score=candidate;head=r;}
         }
         if(head<0)return false;
@@ -4401,7 +4407,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["design_face_summary"]={{"enabled",options.design_face_cuts},{"calls",design_face_records.size()},
         {"cuts",design_face_count},{"seconds",design_face_seconds},{"budget_fraction",.08},
         {"call_limit_seconds",12.0},{"cooldown_seconds",60.0},{"direct_global_bound_update",false},
-        {"scope","complete_domain_three_state_head_faces"}};
+        {"scope","complete_domain_multistate_task_faces"},{"bases",d.n_l},{"state_count",d.n_l+1}};
     best["queue_joint_summary"]={{"enabled",options.queue_joint_cuts},{"cuts",joint_queue_count},
         {"cached_separation_seconds",joint_queue_seconds},{"cached_budget_fraction",.01},
         {"fractional_budget_source","shared_existing_queue_price_budget"},

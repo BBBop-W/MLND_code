@@ -14,6 +14,16 @@
 namespace mlnd {
 namespace {
 constexpr double resource_tolerance = 1e-12;
+// Each operand is nonnegative. Round both the product and the sum outward,
+// so this envelope does not depend on extended long-double precision or on
+// a fixed bound on the number of task contributions. Exact zero terms add no
+// padding; nonfinite results are rejected by the caller's certificate guard.
+long double add_nonnegative_product_up(long double total,long double rate,long double value) {
+    if(rate==0 || value==0)return total;
+    const auto infinity=std::numeric_limits<long double>::infinity();
+    const long double product=std::nextafter(rate*value,infinity);
+    return std::nextafter(total+product,infinity);
+}
 using SegmentKey = std::array<int,5>;
 template<std::size_t N> struct KeyHash {
     std::size_t operator()(const std::array<int,N>& key) const {
@@ -318,7 +328,7 @@ LabelPricingResult price_catalogue(const Input& d,const PathCollection& paths,co
                 ++result.branch_groups;
                 largest=std::max(largest,-branch_minima[branch_index(r,l,s)]);
             }
-            correction+=static_cast<long double>(rate)*largest;
+            correction=add_nonnegative_product_up(correction,rate,largest);
         }
         const long double safe=correction+64*std::numeric_limits<double>::epsilon()*(1+correction);
         branch_rounded=std::nextafter(static_cast<double>(safe),std::numeric_limits<double>::infinity());
@@ -784,7 +794,7 @@ LabelPricingResult LabelPricingOracle::price(const Formulation& f,const std::vec
             ++result.branch_groups;
             largest=std::max(largest,-minima[index(r,l,s)]);
         }
-        correction+=static_cast<long double>(rate)*largest;
+        correction=add_nonnegative_product_up(correction,rate,largest);
     }
     if(!std::isfinite(correction))return finish_branch("invalid_numerics");
     const long double safe=correction+64*std::numeric_limits<double>::epsilon()*(1+correction);

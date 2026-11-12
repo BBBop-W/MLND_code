@@ -111,6 +111,75 @@ JointFacet joint_facet(const std::array<JointVertex,9>& vertices,
     }
     best.complete=true;return best;
 }
+
+struct GeneralJointFacet {
+    std::vector<long double> coefficients;
+    long double correction=0;
+    int optimization_calls=0,states_checked=0;
+    bool valid=false,optimal=false;
+    std::string status="not_solved";
+};
+
+// The LP supplies coefficients only. A complete scan of the original state
+// table, followed by a conservative intercept correction and a second scan,
+// certifies the returned row independently of the LP's termination status.
+GeneralJointFacet general_joint_facet(const std::vector<double>& values,
+        const std::vector<double>& point,int bases,double deadline) {
+    GeneralJointFacet out;
+    const int states=bases+1,dimension=1+2*bases;
+    if(values.size()!=static_cast<std::size_t>(states)*states ||
+       point.size()!=static_cast<std::size_t>(dimension))return out;
+    LinearModel model;model.minimize=false;
+    for(int j=0;j<dimension;++j)
+        model.variable("joint_coefficient_"+std::to_string(j),-IloInfinity,IloInfinity,point[j]);
+    for(int first=0;first<states;++first)for(int second=0;second<states;++second) {
+        if(wall_time()>=deadline){out.status="table_build_budget_exhausted";return out;}
+        Coefficients row{{0,1}};
+        if(first)row.emplace_back(first,1);
+        if(second)row.emplace_back(bases+second,1);
+        model.row("joint_state_"+std::to_string(first)+"_"+std::to_string(second),
+                  'L',values[static_cast<std::size_t>(first)*states+second],std::move(row));
+    }
+    try {
+        if(wall_time()>=deadline){out.status="lp_build_budget_exhausted";return out;}
+        SolverOptions options;options.threads=1;options.log=false;
+        NativeSolver solver(model,options,"joint_queue_coefficient_lp");
+        const double remaining=deadline-wall_time();
+        if(remaining<=0){out.status="lp_budget_exhausted";return out;}
+        ++out.optimization_calls;const auto solved=solver.optimize(remaining);
+        out.status=solved.status;out.optimal=solved.optimal;
+        if((!solved.has_solution&&!solved.candidate_available)||
+           solved.values.size()!=static_cast<std::size_t>(dimension))return out;
+        long double magnitude=1;
+        for(double value:solved.values) {
+            if(!std::isfinite(value))return out;
+            out.coefficients.push_back(value);magnitude+=std::abs(static_cast<long double>(value));
+        }
+        auto activity=[&](int first,int second) {
+            return out.coefficients[0]+(first?out.coefficients[first]:0)+
+                   (second?out.coefficients[bases+second]:0);
+        };
+        long double maximum=0;
+        for(int first=0;first<states;++first)for(int second=0;second<states;++second) {
+            if(wall_time()>=deadline){out.status="validation_budget_exhausted";return out;}
+            const double value=values[static_cast<std::size_t>(first)*states+second];
+            maximum=std::max(maximum,activity(first,second)-value);
+            magnitude=std::max(magnitude,std::abs(static_cast<long double>(value)));
+        }
+        out.correction=maximum+(1e-12L+512*std::numeric_limits<long double>::epsilon())*magnitude;
+        if(!std::isfinite(out.correction))return out;
+        out.coefficients[0]-=out.correction;
+        for(int first=0;first<states;++first)for(int second=0;second<states;++second) {
+            if(wall_time()>=deadline){out.status="validation_budget_exhausted";return out;}
+            ++out.states_checked;
+            if(!(activity(first,second)<=values[static_cast<std::size_t>(first)*states+second]))return out;
+        }
+        out.valid=true;
+    } catch(const IloException&) {out.status="coefficient_lp_exception";}
+      catch(const std::exception&) {out.status="coefficient_lp_exception";}
+    return out;
+}
+
 }
 
 QueueNativePrices native_queue_resource_prices(const Input& d,const Formulation& f,
@@ -506,7 +575,11 @@ TaskSavingsCut QueuePolymatroidCuts::separate(const std::vector<double>& design,
 TaskSavingsCut QueuePolymatroidCuts::separate_joint(const std::vector<double>& design,
         double theta_value,int theta,double seconds) {
     const double started=wall_time();TaskSavingsCut best;best.status="no_applicable_joint_queue_profile";
-    int attempted=0,completed=0,facets=0;bool budget_exhausted=false;
+    int attempted=0,completed=0,facets=0,lp_calls=0,states_checked=0;bool budget_exhausted=false;
+    constexpr std::size_t pair_limit=8;
+    std::size_t eligible_pairs=0;
+    bool candidate_selection_complete=false;
+    Json selected_pairs=Json::array();
     auto finish=[&]() {
         best.seconds=wall_time()-started;
         metadata_["joint_calls"]=metadata_.value("joint_calls",0)+1;
@@ -516,14 +589,17 @@ TaskSavingsCut QueuePolymatroidCuts::separate_joint(const std::vector<double>& d
         metadata_["last_joint"]={{"status",best.status},{"time_budget",seconds},
             {"seconds",best.seconds},{"pairs_attempted",attempted},{"pairs_completed",completed},
             {"candidate_bases_examined",facets},{"budget_exhausted",budget_exhausted},
-            {"path_scans",0},{"auxiliary_optimization_calls",0},{"pair_limit",8},
-            {"scope","complete_profile_L2_K2_integer_design"},{"direct_global_bound_update",false}};
+            {"path_scans",0},{"auxiliary_optimization_calls",lp_calls},{"pair_limit",pair_limit},
+            {"eligible_pairs",eligible_pairs},{"candidate_selection_complete",candidate_selection_complete},
+            {"candidate_pairs_retained",selected_pairs.size()},{"selected_pairs",selected_pairs},
+            {"states_checked",states_checked},{"bases",bases_},
+            {"scope","complete_profile_general_L_K2_task_integer_design"},{"direct_global_bound_update",false}};
         return best;
     };
     if(!std::isfinite(seconds)||seconds<=0) {
         best.status="joint_budget_exhausted";budget_exhausted=true;return finish();
     }
-    if(bases_!=2||heads_<2||data_.max_orders!=2||!paths_.complete||!paths_.support_complete||
+    if(bases_<1||heads_<2||data_.max_orders!=2||!paths_.complete||!paths_.support_complete||
        paths_.service_paths.size()!=service_count_||paths_.empty_paths.size()!=empty_count_) {
         best.status="joint_scope_unavailable";return finish();
     }
@@ -531,74 +607,125 @@ TaskSavingsCut QueuePolymatroidCuts::separate_joint(const std::vector<double>& d
         throw std::invalid_argument("Joint queue separation point is invalid");
     for(int j=0;j<layout_.count;++j)if(!std::isfinite(design[j])||design[j]<-1e-8||design[j]>1+1e-8)
         throw std::invalid_argument("Joint queue separation needs a unit-box design");
-    for(int r=0;r<heads_;++r)
-        if(design[layout_.assignment_index(r,0)]+design[layout_.assignment_index(r,1)]>1+1e-8)
+    for(int r=0;r<heads_;++r) {
+        double sum=0;for(int l=0;l<bases_;++l)sum+=design[layout_.assignment_index(r,l)];
+        if(sum>1+1e-8)
             throw std::invalid_argument("Joint queue separation needs exclusive task assignments");
+    }
     const double deadline=started+seconds;
     struct Pair {std::size_t profile=0;int first=0,second=0;double score=0;};
     std::vector<Pair> pairs;
+    pairs.reserve(pair_limit);
+    // The tie order is the original profile/task traversal order. Keeping the
+    // worst retained candidate at the heap root reproduces stable_sort's first
+    // eight entries without storing the O(profiles * tasks^2) candidate list.
+    const auto better=[](const Pair& a,const Pair& b) {
+        if(a.score!=b.score)return a.score>b.score;
+        return std::tie(a.profile,a.first,a.second)<std::tie(b.profile,b.first,b.second);
+    };
     for(std::size_t index=1;index<profiles_.size();++index) {
         const auto& profile=profiles_[index];
         if(!profile.certificate.value("complete_domain",false)||
-           profile.savings.size()!=static_cast<std::size_t>(heads_*2)||
+           profile.savings.size()!=static_cast<std::size_t>(heads_*bases_)||
            profile.unsupported.size()!=profile.savings.size()||
            profile.lower_coefficients.size()!=static_cast<std::size_t>(layout_.count))continue;
-        for(int first=0;first<heads_;++first)for(int second=first+1;second<heads_;++second) {
+        for(int first=0;first<heads_&&!budget_exhausted;++first)for(int second=first+1;second<heads_;++second) {
             if(wall_time()>=deadline){budget_exhausted=true;break;}
-            bool odd_complements=false,unsupported=false;double fractionality=0;
-            for(int r:{first,second})for(int l=0;l<2;++l) {
-                const int group=2*r+l;const bool missing=profile.unsupported[group];
+            bool odd_complements=false,unsupported=false,signed_profile=false;double fractionality=0;
+            for(int r:{first,second})for(int l=0;l<bases_;++l) {
+                const int group=r*bases_+l;const bool missing=profile.unsupported[group];
                 odd_complements^=missing||profile.savings[group]<0;unsupported|=missing;
+                signed_profile|=profile.savings[group]<0;
                 const double alpha=std::clamp(design[layout_.assignment_index(r,l)],0.0,1.0);
                 fractionality+=std::min(alpha,1-alpha);
             }
-            // Nonnegative supported profiles already have compatible base
-            // chains. Opposite complement parity is the signed obstruction;
-            // unsupported branches additionally require explicit zero gating.
-            if(odd_complements||unsupported)pairs.push_back({index,first,second,fractionality});
+            // Two-task nonnegative supported profiles admit a maximal coupling
+            // for every L. Complement parity is an L2-only screening rule;
+            // for other L retain every signed or unsupported candidate.
+            if(unsupported||(bases_==2?odd_complements:signed_profile)) {
+                ++eligible_pairs;
+                const Pair candidate{index,first,second,fractionality};
+                if(pairs.size()<pair_limit) {
+                    pairs.push_back(candidate);std::push_heap(pairs.begin(),pairs.end(),better);
+                } else if(better(candidate,pairs.front())) {
+                    std::pop_heap(pairs.begin(),pairs.end(),better);
+                    pairs.back()=candidate;std::push_heap(pairs.begin(),pairs.end(),better);
+                }
+            }
         }
         if(budget_exhausted)break;
     }
-    std::stable_sort(pairs.begin(),pairs.end(),[](const Pair& a,const Pair& b){return a.score>b.score;});
+    candidate_selection_complete=!budget_exhausted;
+    std::sort(pairs.begin(),pairs.end(),better);
+    for(const auto& pair:pairs)selected_pairs.push_back({{"profile",pair.profile},
+        {"first",pair.first},{"second",pair.second},{"score",pair.score}});
     for(const auto& pair:pairs) {
-        if(attempted>=8)break;
         if(wall_time()>=deadline){budget_exhausted=true;break;}
         ++attempted;const auto& profile=profiles_[pair.profile];
         const std::array<int,2> selected{pair.first,pair.second};
+        const int state_count=bases_+1;
         std::array<JointVertex,9> vertices{};Json vertex_records=Json::array();
-        bool finite=true;
-        for(int first=0;first<3;++first)for(int second=0;second<3;++second) {
-            auto& vertex=vertices[3*first+second];vertex.coordinates={1,first==1?1.0L:0.0L,
-                first==2?1.0L:0.0L,second==1?1.0L:0.0L,second==2?1.0L:0.0L};
+        std::vector<double> state_values;
+        std::vector<long double> affine_coefficients;
+        Json facet_basis=nullptr;
+        long double facet_correction=0;
+        bool facet_complete=false,lp_optimal=false;
+        int facet_examined=0,pair_lp_calls=0,pair_states_checked=0;
+        std::string lp_status="not_used";
+        bool finite=true,table_complete=true;
+        for(int first=0;first<state_count;++first)for(int second=0;second<state_count;++second) {
+            if(wall_time()>=deadline){table_complete=false;break;}
             long double value=0,magnitude=0;
-            for(int l=0;l<2;++l) {
+            for(int l=0;l<bases_;++l) {
                 long double saving=0,absolute=0;bool blocked=false;
                 for(int i=0;i<2;++i)if((i==0?first:second)==l+1) {
-                    const int group=2*selected[i]+l;blocked|=profile.unsupported[group];
+                    const int group=bases_*selected[i]+l;blocked|=profile.unsupported[group];
                     saving+=profile.savings[group];absolute+=std::abs(profile.savings[group]);
                 }
                 if(!blocked){value-=conjugate(saving,fleet_cost_);magnitude+=absolute;}
             }
-            vertex.value=rounded_lower(value,magnitude);finite=finite&&std::isfinite(vertex.value);
+            const double safe=rounded_lower(value,magnitude);
+            finite=finite&&std::isfinite(safe);state_values.push_back(safe);
+            if(bases_==2) {
+                auto& vertex=vertices[3*first+second];
+                vertex.coordinates={1,first==1?1.0L:0.0L,first==2?1.0L:0.0L,
+                    second==1?1.0L:0.0L,second==2?1.0L:0.0L};vertex.value=safe;
+            }
             vertex_records.push_back({{"states",{first,second}},
-                {"queue_value",static_cast<double>(value)},{"safe_queue_value",static_cast<double>(vertex.value)}});
+                {"queue_value",static_cast<double>(value)},{"safe_queue_value",safe}});
         }
+        if(!table_complete){budget_exhausted=true;break;}
         if(!finite)continue;
-        JointAffine point{1,design[layout_.assignment_index(pair.first,0)],design[layout_.assignment_index(pair.first,1)],
-            design[layout_.assignment_index(pair.second,0)],design[layout_.assignment_index(pair.second,1)]};
-        const auto facet=joint_facet(vertices,point,deadline);facets+=facet.examined;
-        completed+=facet.complete;
-        if(!facet.valid)continue;
+        std::vector<double> point(1+2*bases_,1);
+        for(int i=0;i<2;++i)for(int l=0;l<bases_;++l)
+            point[1+bases_*i+l]=design[layout_.assignment_index(selected[i],l)];
+        if(bases_==2) {
+            JointAffine old_point{};std::copy(point.begin(),point.end(),old_point.begin());
+            const auto facet=joint_facet(vertices,old_point,deadline);
+            facets+=facet.examined;completed+=facet.complete;
+            if(!facet.valid)continue;
+            affine_coefficients.assign(facet.coefficients.begin(),facet.coefficients.end());
+            facet_basis=facet.basis;facet_correction=facet.correction;
+            facet_complete=facet.complete;facet_examined=facet.examined;pair_states_checked=9;
+        } else {
+            const auto facet=general_joint_facet(state_values,point,bases_,deadline);
+            lp_calls+=facet.optimization_calls;pair_lp_calls=facet.optimization_calls;
+            states_checked+=facet.states_checked;
+            if(!facet.valid)continue;
+            ++completed;affine_coefficients=facet.coefficients;facet_correction=facet.correction;
+            lp_optimal=facet.optimal;lp_status=facet.status;pair_states_checked=facet.states_checked;
+        }
+        if(bases_==2)states_checked+=pair_states_checked;
         std::vector<long double> coefficients(profile.lower_coefficients.begin(),profile.lower_coefficients.end());
-        long double constant=profile.constant+facet.coefficients[0];
-        for(int i=0;i<2;++i)for(int l=0;l<2;++l)
-            coefficients[layout_.assignment_index(selected[i],l)]+=facet.coefficients[1+2*i+l];
-        std::array<long double,2> positive_sums{};
-        for(int r=0;r<heads_;++r)for(int l=0;l<2;++l)if(!profile.unsupported[2*r+l])
-            positive_sums[l]+=std::max(0.0,profile.savings[2*r+l]);
-        std::vector<double> penalties(heads_*2,0);
-        for(int r=0;r<heads_;++r)if(r!=pair.first&&r!=pair.second)for(int l=0;l<2;++l) {
-            const int group=2*r+l;const double saving=profile.savings[group];
+        long double constant=profile.constant+affine_coefficients[0];
+        for(int i=0;i<2;++i)for(int l=0;l<bases_;++l)
+            coefficients[layout_.assignment_index(selected[i],l)]+=affine_coefficients[1+bases_*i+l];
+        std::vector<long double> positive_sums(bases_,0);
+        for(int r=0;r<heads_;++r)for(int l=0;l<bases_;++l)if(!profile.unsupported[r*bases_+l])
+            positive_sums[l]+=std::max(0.0,profile.savings[r*bases_+l]);
+        std::vector<double> penalties(heads_*bases_,0);
+        for(int r=0;r<heads_;++r)if(r!=pair.first&&r!=pair.second)for(int l=0;l<bases_;++l) {
+            const int group=r*bases_+l;const double saving=profile.savings[group];
             if(profile.unsupported[group]||saving<=0)continue;
             const long double sum=positive_sums[l];
             const long double penalty=conjugate(sum,fleet_cost_)-conjugate(sum-saving,fleet_cost_);
@@ -629,15 +756,19 @@ TaskSavingsCut QueuePolymatroidCuts::separate_joint(const std::vector<double>& d
         cut.valid=true;cut.key=key.str();cut.status="queue_joint_vertex_certified";
         cut.violated=cut.violation>1e-7*(1+std::abs(courier_cost_)+std::abs(theta_value));
         cut.dual_savings=courier_cost_-static_cast<double>(lower);
-        std::vector<double> affine;for(long double a:facet.coefficients)affine.push_back(static_cast<double>(a));
+        std::vector<double> affine;for(long double a:affine_coefficients)affine.push_back(static_cast<double>(a));
         cut.certificate={{"kind","queue_joint"},{"profile_index",pair.profile},{"profile",profile.certificate},
             {"selected_heads",selected},{"selected_tasks",selected},{"assignment_scope","task"},{"vertices",vertex_records},{"affine_coefficients",affine},
-            {"facet_basis",facet.basis},{"facet_validation_correction",static_cast<double>(facet.correction)},
-            {"facet_enumeration_complete",facet.complete},{"candidate_bases_examined",facet.examined},
-            {"external_positive_sums",{static_cast<double>(positive_sums[0]),static_cast<double>(positive_sums[1])}},
+            {"facet_basis",facet_basis},{"facet_validation_correction",static_cast<double>(facet_correction)},
+            {"facet_enumeration_complete",facet_complete},{"candidate_bases_examined",facet_examined},
+            {"coefficient_method",bases_==2?"L2_facet_enumeration":"complete_state_coefficient_lp"},
+            {"coefficient_lp_optimal",lp_optimal},{"coefficient_lp_status",lp_status},
+            {"auxiliary_optimization_calls",pair_lp_calls},{"states_checked",pair_states_checked},
+            {"all_states_validated",true},{"state_count_per_task",state_count},{"bases",bases_},
+            {"external_positive_sums",positive_sums},
             {"external_penalties",penalties},{"lifting_rule","JL_positive_marginal_at_full_positive_sum"},
-            {"global_integer_valid",true},{"complete_domain",true},{"scope","L2_K2_three_state_integer_design"},
-            {"path_scans",0},{"ordinary_auxiliary_optimization_calls",0},{"numerical_margin",margin_},
+            {"global_integer_valid",true},{"complete_domain",true},{"scope","general_L_K2_two_task_integer_design"},
+            {"path_scans",0},{"ordinary_auxiliary_optimization_calls",pair_lp_calls},{"numerical_margin",margin_},
             {"conversion_error",static_cast<double>(conversion)},{"arithmetic_error",static_cast<double>(arithmetic)},
             {"intercept_correction",static_cast<double>(correction)},
             {"separation_design",std::vector<double>(design.begin(),design.begin()+layout_.count)},

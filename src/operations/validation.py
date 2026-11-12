@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from src.model.assignment import saved_assignment_scope
-from src.model.generalized_demand import generalized_demand
+from src.model.generalized_demand import generalized_demand, physical_task_statistics
 from scipy.stats import poisson
 
 from src.data.instances import to_planning_data
@@ -339,10 +339,6 @@ def build_operations(inputs, result, *, tolerance=5e-5):
     ) = empty_tasks = 0.0
     path_rows, order_rows, arc_rows = [], [], []
     traversal_bounds = {kind: np.zeros((n, n)) for kind in ("service", "empty")}
-    single_cost = np.full(r, np.inf)
-    double_cost = np.full((r, r), np.inf)
-    single_support = np.zeros((r, bases), dtype=bool)
-    double_support = np.zeros((r, r, bases), dtype=bool)
     for kind, records in [
         ("service", result.get("_missions", [])),
         ("empty", result.get("_relocations", [])),
@@ -390,16 +386,6 @@ def build_operations(inputs, result, *, tolerance=5e-5):
                 continue
             for (u, v), count in q["arcs"].items():
                 traversal_bounds[kind][u, v] = max(traversal_bounds[kind][u, v], count)
-            if preprocessed and kind == "service":
-                first_od, second_od = int(path["first_od"]), path.get("second_od")
-                if second_od is None:
-                    single_cost[first_od] = min(single_cost[first_od], q["cost"])
-                    single_support[first_od, q["b"][0]] = True
-                else:
-                    double_cost[first_od, second_od] = min(
-                        double_cost[first_od, second_od], q["cost"]
-                    )
-                    double_support[first_od, second_od, q["b"][0]] = True
             # Zero records still undergo structural and cached-coefficient checks.
             # Every positive flow, however small, contributes to all resources.
             if flow == 0:
@@ -465,10 +451,16 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         traversal_bounds["service"] + (bases - 1) * traversal_bounds["empty"]
     )
     check("link_activation_bound", link_load - activation * y)
+    preprocessing_domain = None
     if preprocessed:
         metadata = result.get("preprocessed_demand")
         if not isinstance(metadata, dict):
             raise ValueError("Preprocessed result is missing fixed-demand provenance")
+        single_cost, double_cost, single_support, double_support, path_count = physical_task_statistics(data)
+        preprocessing_domain = dict(
+            complete=True, source="input_physical_domain",
+            service_paths_enumerated=path_count, output_witnesses_trusted_for_completeness=False,
+        )
         reference = generalized_demand(
             data.demand,
             data.effective_delta,
@@ -496,6 +488,12 @@ def build_operations(inputs, result, *, tolerance=5e-5):
         check("preprocessed_single_nonnegative", -reference.single_rates)
         check("preprocessed_pair_nonnegative", -reference.pair_rates)
         check("preprocessed_eta_zero", np.abs(eta))
+        # The native design model fixes exactly zero-rate task assignments to
+        # zero. Flow equalities alone cannot detect such unused assignments.
+        # Use independently reconstructed rates, with no small-rate threshold.
+        task_rates = (np.concatenate((reference.single_rates, reference.pair_rates.ravel()))
+                      if data.max_orders == 2 else reference.single_rates)
+        check("zero_rate_task_assignment", np.abs(a[task_rates == 0]))
         v = a * rho[None, :]
         if "v" in sol:
             saved_v = np.asarray(sol["v"], float)
@@ -785,6 +783,8 @@ def build_operations(inputs, result, *, tolerance=5e-5):
             physical_errors=physical_errors,
         ),
     )
+    if preprocessing_domain is not None:
+        summary["preprocessing_domain_validation"] = preprocessing_domain
     payload = dict(summary=summary, tables=tables)
     if passed:
         from .detail import enrich_operations

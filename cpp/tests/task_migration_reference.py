@@ -29,9 +29,17 @@ from src.model.paths import enumerate_paths
 from path_reference import compare, signature
 
 
+def native_binary(directory, name):
+    """Resolve the exact file used both for execution and its SHA-256 record."""
+    binary = directory / (name + (".exe" if sys.platform == "win32" else ""))
+    if not binary.is_file():
+        raise FileNotFoundError(f"Build the native test target first: {binary}")
+    return binary
+
+
 def table(path, headers, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as stream:
+    with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.writer(stream, lineterminator="\n")
         writer.writerow(headers)
         writer.writerows(rows)
@@ -108,8 +116,8 @@ def prepare(output):
 def parity(instance, k, binary_dir, output):
     raw = load_standard(instance, case=f"K{k}")
     planning = to_planning_data(raw)
-    completed = subprocess.run([str(binary_dir / "mlnd_input_probe"), str(instance), str(k)],
-                               text=True, capture_output=True, check=True)
+    completed = subprocess.run([str(native_binary(binary_dir, "mlnd_input_probe")), str(instance), str(k)],
+                               text=True, encoding="utf-8", capture_output=True, check=True)
     native_input = json.loads(completed.stdout)
     arrays = {key: value for key, value in raw.items() if isinstance(value, np.ndarray)}
     arrays["home_receipt_mean"] = home_receipt_mean(raw)
@@ -117,9 +125,9 @@ def parity(instance, k, binary_dir, output):
     for key, expected in arrays.items():
         np.testing.assert_array_equal(np.asarray(native_input["arrays"][key]).reshape(expected.shape), expected)
     target = output / f"{instance.name}_K{k}_paths.json"
-    subprocess.run([str(binary_dir / "mlnd_path_catalogue"), str(instance), str(k), str(target)],
-                   text=True, capture_output=True, check=True)
-    native_paths = json.loads(target.read_text())
+    subprocess.run([str(native_binary(binary_dir, "mlnd_path_catalogue")), str(instance), str(k), str(target)],
+                   text=True, encoding="utf-8", capture_output=True, check=True)
+    native_paths = json.loads(target.read_text(encoding="utf-8"))
     assert native_paths["paths"].pop("support_complete") is True
     reference = asdict(enumerate_paths(planning))
     differences = dict(float_values_compared=0, float_values_with_roundoff=0,
@@ -147,22 +155,22 @@ def solve(instance, k, preset, binary, output, seconds):
     provenance = dict(command=command, binary_sha256=sha256(binary))
     started = time.perf_counter()
     if (target / "result.json").exists():
-        previous = json.loads((target / "result.json").read_text())
+        previous = json.loads((target / "result.json").read_text(encoding="utf-8"))
         if not (target / "solution.json").exists() or previous.get("objective") is None:
             target.rename(target.with_name(target.name + f"_failed_{time.time_ns()}"))
     if (target / "result.json").exists():
-        assert json.loads((target / "test_command.json").read_text()) == provenance
+        assert json.loads((target / "test_command.json").read_text(encoding="utf-8")) == provenance
     else:
         target.mkdir(parents=True, exist_ok=True)
         write_json(target / "test_command.json", provenance)
-        completed = subprocess.run(command, text=True, capture_output=True, timeout=seconds + 45)
-        (target / "test_stdout.log").write_text(completed.stdout)
-        (target / "test_stderr.log").write_text(completed.stderr)
+        completed = subprocess.run(command, text=True, encoding="utf-8", capture_output=True, timeout=seconds + 45)
+        (target / "test_stdout.log").write_text(completed.stdout, encoding="utf-8")
+        (target / "test_stderr.log").write_text(completed.stderr, encoding="utf-8")
         assert completed.returncode == 0, completed.stderr
     validation = validate_native(target, instance, max_orders=k)
     assert validation["passed"], validation["checks"]
-    result = json.loads((target / "result.json").read_text())
-    solution = json.loads((target / "solution.json").read_text())
+    result = json.loads((target / "result.json").read_text(encoding="utf-8"))
+    solution = json.loads((target / "solution.json").read_text(encoding="utf-8"))
     q_count = 2 if k == 1 else 6
     assert np.asarray(solution["assignment"]).shape == (q_count, 2)
     assert result["assignment_scope"] == solution["assignment_scope"] == "task"
@@ -196,6 +204,7 @@ def main():
     args = parser.parse_args()
     assert 0 < args.seconds <= 15
     output, binary_dir = args.output.resolve(), args.binary_dir.resolve()
+    binary = native_binary(binary_dir, "mlnd_cpp")
     output.mkdir(parents=True, exist_ok=True)
     instances = prepare(output)
     old, new = (load_standard(instances[schema]) for schema in (1, 2))
@@ -207,7 +216,7 @@ def main():
         for k in (1, 2):
             path_checks.append(parity(instance, k, binary_dir, output))
             for preset in ("full-cplex-20261029", "performance-20261105"):
-                row = solve(instance, k, preset, binary_dir / "mlnd_cpp", output, args.seconds)
+                row = solve(instance, k, preset, binary, output, args.seconds)
                 rows.append(row)
                 print(json.dumps(row), flush=True)
     comparisons = []
@@ -227,7 +236,7 @@ def main():
     report = dict(passed=True, schema="task-migration-end-to-end/1", dimensions=dict(n_l=2, n_h=2, n_od=2),
                   protocol=dict(seconds=args.seconds, threads=1, seed=43, target_gap=1e-6, serial=True),
                   schema1_frozen_home_matches_schema2=True, mixed_receipt_preserved=True,
-                  binary_sha256=sha256(binary_dir / "mlnd_cpp"),
+                  binary_sha256=sha256(binary),
                   path_checks=path_checks, runs=rows, bound_comparisons=comparisons)
     write_json(output / "report.json", report)
     print(json.dumps(report, indent=2))

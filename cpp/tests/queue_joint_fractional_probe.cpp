@@ -47,6 +47,11 @@ Json exercise() {
     // Close priced base-1 outgoing arcs so the signed profile is stronger than
     // the unpriced profile at this target; this is not a feasible integer design.
     target[layout.airline+6]=target[layout.airline+7]=0;
+    // Independent-task indexing includes zero-rate pair tasks. Leave these
+    // unassigned; initializing every coordinate to one would assign each of
+    // them to both bases and invalidate the joint separator's input point.
+    for(int q=0;q<d.task_count();++q)for(int l=0;l<d.n_l;++l)
+        target[layout.assignment_index(q,l)]=0;
     for(int r=0;r<2;++r)for(int l=0;l<2;++l)target[layout.assignment_index(r,l)]=.5;
     LinearModel master;master.constant=2;
     for(int j=0;j<layout.count;++j) {

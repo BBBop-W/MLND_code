@@ -1,5 +1,9 @@
-"""The consecutive-delivery planning solvers."""
+"""Historical Python solver; load Gurobi only when optimization is requested."""
 
-from .api import solve
+
+def solve(*args, **kwargs):
+    from .api import solve as implementation
+
+    return implementation(*args, **kwargs)
 
 __all__ = ["solve"]

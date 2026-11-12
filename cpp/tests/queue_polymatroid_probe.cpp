@@ -41,7 +41,7 @@ Input physical_fixture(int cardinality=1) {
     if(cardinality==1) {d.single_rates=d.demand;d.head_rates=d.demand;}
     else {
         // Exact raw-order conservation, including AA's two occurrences and
-        // the second OD served under a different head's assignment.
+        // the second OD served through its independently assigned double task.
         d.demand={4,7};d.single_rates={.5,4.5};d.pair_rates(0,0)=.5;
         d.pair_rates(0,1)=2;d.pair_rates(1,0)=.5;d.head_rates={3,5};
     }
@@ -121,7 +121,17 @@ ReferencePoint fixed_recourse(const Input& d,const PathCollection& paths,
     if(incoming_second&&d.max_orders==2) {
         const bool unassigned=design[full.layout.assignment_index(1,0)]==0&&
                               design[full.layout.assignment_index(1,1)]==0;
-        if(unassigned&&solved.values[full.courier[1]]<d.demand[1]-1e-5)*incoming_second=true;
+        // A double task has its own assignment. Check actual AB service flow,
+        // not just reduced courier demand, to witness OD 1 arriving as the
+        // second order while its SINGLE-task assignment remains zero.
+        if(unassigned&&solved.values[full.courier[1]]<d.demand[1]-1e-5)
+            for(std::size_t j=0;j<paths.service_paths.size();++j) {
+                const auto& path=paths.service_paths[j];
+                if(path.first_od==0&&path.second_od==1&&full.flow[j]>=0&&
+                   solved.values[full.flow[j]]>1e-5&&
+                   design[full.layout.assignment_index(d.task_index(0,1),path.b[0])]==1)
+                    *incoming_second=true;
+            }
     }
     return {design,objective_value(full.matrix,solved.values)};
 }
@@ -204,6 +214,27 @@ Json independent_validity(int cardinality) {
     std::vector<ReferencePoint> points;bool incoming_second=false;
     for(int first=-1;first<2;++first)for(int second=-1;second<2;++second)
         points.push_back(fixed_recourse(d,paths,options,open_design(d,first,second),&incoming_second));
+    int explicit_double_designs=0;
+    if(cardinality==2) {
+        // Singles no longer activate doubles implicitly. Exercise every
+        // positive double task at both bases, with all singles unassigned.
+        for(int q=d.n_od;q<d.task_count();++q)if(d.task_rate(q)>0)
+            for(int l=0;l<d.n_l;++l) {
+                auto design=open_design(d,-1,-1);
+                design[layout.assignment_index(q,l)]=1;
+                points.push_back(fixed_recourse(d,paths,options,design,&incoming_second));
+                ++explicit_double_designs;
+            }
+        // Also check shared availability with independently assigned singles
+        // and doubles at both bases, rather than testing pairs only alone.
+        for(int offset=0;offset<d.n_l;++offset) {
+            auto design=open_design(d,-1,-1);
+            for(int q=0;q<d.task_count();++q)if(d.task_rate(q)>0)
+                design[layout.assignment_index(q,(q+offset)%d.n_l)]=1;
+            points.push_back(fixed_recourse(d,paths,options,design,&incoming_second));
+            ++explicit_double_designs;
+        }
+    }
     points.push_back(fixed_recourse(d,paths,options,open_design(d,0,0,false),&incoming_second));
     points.push_back(fixed_recourse(d,paths,options,std::vector<double>(layout.count,0),&incoming_second));
     const auto integer_count=points.size();
@@ -224,12 +255,15 @@ Json independent_validity(int cardinality) {
         require(violation<=1e-6*(1+std::abs(point.operating_cost)),
                 "Queue cut excludes an original integer recourse point or its convex mixture");
     }
-    if(cardinality==2)require(incoming_second,"K2 oracle never served the second OD without its own assignment");
+    if(cardinality==2)require(incoming_second,
+        "K2 oracle never served the second OD through its assigned double task while its single task was unassigned");
     const double optimum=check_full_integer_optimum(d,paths,options,cuts,layout.count);
     return {{"bases",2},{"K",cardinality},{"integer_full_recourse_solves",integer_count},
         {"convex_mixture_points",points.size()-integer_count},{"cuts",cuts.size()},
         {"cross_checks",cuts.size()*points.size()},{"maximum_violation",maximum_violation},
         {"full_integer_optimum",optimum},{"incoming_second_without_own_assignment",incoming_second},
+        {"incoming_second_without_single_assignment",incoming_second},
+        {"explicit_double_task_designs",explicit_double_designs},{"assignment_scope","task"},
         {"negative_empty_paths",certificate.at("negative_empty_paths")},
         {"fractional_scope","convex mixtures of original integer epigraph points; not the original continuous root"},
         {"passed",true}};
@@ -256,11 +290,11 @@ Json signed_savings_witness() {
     const double courier=std::inner_product(d.demand.begin(),d.demand.end(),d.ground_cost.begin(),0.0);
     const auto reference=fixed_recourse(d,paths,options,x);
     const double bound=cut_value(cut,x,layout.count);
-    // With every physical link closed, K=C0. The two assigned groups have
+    // With every physical link closed, K=C0. The two assigned single tasks have
     // negative total signed saving, so the exact integer queue minimum is C0.
     // Clamping the negative B to zero would lose a large amount at this point.
     require(std::abs(reference.operating_cost-courier)<1e-4,"Closed-link witness unexpectedly serves a drone task");
-    require(std::abs(bound-courier)<1e-3,"Signed EPI lost the negative group's shared-rho coupling");
+    require(std::abs(bound-courier)<1e-3,"Signed EPI lost the negative task's shared-rho coupling");
     require(bound<=reference.operating_cost+1e-5,"Signed EPI excludes original fixed recourse");
     return {{"bases",2},{"B_head0_base0",savings.at(0)},{"B_head1_base0",savings.at(2)},
         {"bound",bound},{"courier_cost",courier},{"reference_recourse",reference.operating_cost},

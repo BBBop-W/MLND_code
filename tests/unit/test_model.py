@@ -8,7 +8,8 @@ import pytest
 from scipy.integrate import quad
 
 from src.model.demand import demand_rates
-from src.model.paths import EnumerationStopped, enumerate_paths
+from src.model.paths import EnumerationStopped, enumerate_paths, iter_paths
+from src.model.generalized_demand import physical_task_statistics
 from src.model.resources import (
     PathInfeasible,
     build_empty_path,
@@ -212,6 +213,26 @@ def test_budget_guards_raise_without_claiming_complete():
         with pytest.raises(EnumerationStopped) as caught:
             enumerate_paths(data, **kwargs)
         assert caught.value.reason == reason
+
+
+@pytest.mark.parametrize("orders,mode", [(1, "direct"), (2, "direct"), (2, "simple")])
+def test_streamed_paths_and_task_statistics_preserve_catalogue(orders, mode):
+    data = make_data(max_orders=orders, route_mode=mode)
+    full = enumerate_paths(data)
+    streamed = dict(segment=[], service=[], empty=[])
+    for family, path in iter_paths(data):
+        streamed[family].append(path)
+    assert tuple(streamed["segment"]) == full.initial_segments
+    assert tuple(streamed["service"]) == full.service_paths
+    assert tuple(streamed["empty"]) == full.empty_paths
+    c1, c2, s1, s2, count = physical_task_statistics(data)
+    assert count == len(full.service_paths)
+    for r in range(data.n_od):
+        for s in (None, *range(data.n_od)):
+            paths = [p for p in full.service_paths if p.first_od == r and p.second_od == s]
+            assert (c1[r] if s is None else c2[r, s]) == min((p.cost for p in paths), default=np.inf)
+            for base in range(data.n_l):
+                assert (s1[r, base] if s is None else s2[r, s, base]) == any(p.b[0] == base for p in paths)
 
 
 def test_empty_activity_uses_flight_time_without_turnaround():

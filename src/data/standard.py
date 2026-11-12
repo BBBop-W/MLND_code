@@ -392,6 +392,11 @@ def load_standard(path, *, case=None, verify_hashes=True):
     }
     if set(data) != required_scalars:
         raise ValueError("Missing or unknown model scalar")
+    for field in ("n_l", "n_h", "n_od", "max_orders"):
+        if not isinstance(data[field], int) or isinstance(data[field], bool):
+            raise ValueError(f"Integer model scalar required: {field}")
+    if data["max_orders"] not in (1, 2):
+        raise ValueError("max_orders must be 1 or 2")
     if model["cases"] != {"K1": {"max_orders": 1}, "K2": {"max_orders": 2}}:
         raise ValueError("Cases may change max_orders only")
     for field, domain in (("n_l", "bases"), ("n_h", "hubs"), ("n_od", "ods")):
@@ -443,9 +448,17 @@ def load_standard(path, *, case=None, verify_hashes=True):
     period = period_rows[0]
     exposure = float(period["exposure_hours"])
     counts = [int(r["order_count"]) for r in ods]
-    expected_exposure = len(set(period["dates"].split(";"))) * (
-        float(period["end_hour"]) - float(period["start_hour"])
-    )
+    start, end = float(period["start_hour"]), float(period["end_hour"])
+    if not 0 <= start < end <= 24:
+        raise ValueError("Invalid period hour window")
+    dates = period["dates"].split(";")
+    # Match native std::getline: one terminal separator creates no final
+    # field, while leading/interior empty fields and repeated dates are invalid.
+    if dates[-1] == "":
+        dates.pop()
+    if not dates or any(not date for date in dates) or len(set(dates)) != len(dates):
+        raise ValueError("Empty or duplicate period date")
+    expected_exposure = len(dates) * (end - start)
     if (
         exposure <= 0
         or exposure != expected_exposure

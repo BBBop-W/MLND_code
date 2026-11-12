@@ -6,8 +6,8 @@ from dataclasses import asdict
 import numpy as np
 import pytest
 
-from src.model.generalized_demand import generalized_demand
-from src.model.paths import enumerate_paths
+from src.model.generalized_demand import generalized_demand, physical_task_statistics
+from src.model.paths import EnumerationStopped, enumerate_paths
 from src.operations.validation import build_operations
 from test_operations import instance
 
@@ -115,6 +115,9 @@ def _manual_preprocessed(data=None):
     assignment[0, 0] = 1.0
     if data.max_orders == 2:
         assignment[2:4, 0] = 1.0
+    task_rates = (np.concatenate((fixed.single_rates, fixed.pair_rates.ravel()))
+                  if data.max_orders == 2 else fixed.single_rates)
+    assignment[task_rates == 0] = 0
     flow = np.zeros(len(paths.service_paths))
     head = np.zeros(len(paths.initial_segments))
     served = np.zeros(2)
@@ -230,6 +233,74 @@ def test_independent_audit_detects_tampered_preprocessing_and_branch_flows():
     checks = build_operations(data, changed)["summary"]["checks"]
     assert not checks["passed"]
     assert checks["residuals"]["first_leg_task_flow"] == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("max_orders,demand,task", [(1, [0., 3.], 0), (2, [4., 3.], 2)])
+def test_independent_audit_rejects_assigned_zero_rate_tasks(max_orders, demand, task):
+    data, result = _manual_preprocessed(instance(
+        demand=demand, kappa=np.ones((2, 2)), max_orders=max_orders,
+        flow_policy="aggregate", delta=0,
+    ))
+    assert build_operations(data, result)["summary"]["checks"]["passed"]
+    assert result["task_table"][task]["rate"] == 0
+    # This changes no flow or cost: only the native zero-rate assignment bound
+    # can distinguish it from the original, feasible point.
+    result["_solution"]["assignment"][task, 0] = 1
+    checks = build_operations(data, result)["summary"]["checks"]
+    assert not checks["passed"]
+    assert checks["residuals"]["zero_rate_task_assignment"] == 1
+
+
+def test_independent_audit_preserves_extremely_small_positive_task_rates():
+    data, result = _manual_preprocessed(instance(
+        demand=[4., 3.], kappa=np.ones((2, 2)), max_orders=2,
+        flow_policy="aggregate", delta=1e-20,
+    ))
+    assert 0 < result["task_table"][2]["rate"] < 1e-18
+    assert result["_solution"]["assignment"][2, 0] == 1
+    checks = build_operations(data, result)["summary"]["checks"]
+    assert checks["passed"], checks
+    assert checks["residuals"]["zero_rate_task_assignment"] == 0
+
+
+def test_independent_audit_rejects_omitted_double_paths_and_forged_task_rates():
+    data, result = _manual_preprocessed()
+    true_single_rate = result["preprocessed_demand"]["single_rates"][0]
+    assert true_single_rate < data.demand[0]
+    sol = result["_solution"]
+    sol["assignment"][2:] = 0
+    sol["flow"][:] = sol["head"][:] = 0
+    result["_missions"] = [row for row in result["_missions"] if row["path"]["second_od"] is None]
+    for row in result["_missions"]:
+        row["flow"] = 0.
+    row = min((row for row in result["_missions"] if row["path"]["first_od"] == 0),
+              key=lambda row: row["path"]["cost"])
+    path, flow = row["path"], float(data.demand[0] * sol["rho"][0])
+    row["flow"] = flow
+    sol["flow"][path["id"]] = sol["head"][path["segment_id"]] = flow
+    sol["courier"] = data.demand - np.array([flow, 0.])
+    sol["fleet"] = float(sol["idle"].sum() + flow * path["time"])
+    result["objective"] = float(data.base_cost.sum() + data.slot_cost.sum()
+        + data.link_cost[data.allowed_links].sum() + data.fleet_cost * sol["fleet"]
+        + flow * path["cost"] + data.ground_cost @ sol["courier"])
+    result["preprocessed_demand"].update(single_rates=data.demand.tolist(),
+        pair_rates=[[0., 0.], [0., 0.]], head_rates=data.demand.tolist(),
+        common_origin_support=[[1], [1]], candidate_order=[])
+    for task in result["task_table"]:
+        task["rate"] = float(data.demand[task["task"]]) if task["task"] < 2 else 0.
+    # Every retained path is physically valid and all reported fields agree
+    # with the forged, singleton-only domain. The original input still admits
+    # beneficial doubles and therefore requires a different single-task flow.
+    assert flow != pytest.approx(true_single_rate * sol["rho"][0])
+    with pytest.raises(ValueError, match="eligible pairs"):
+        build_operations(data, result)
+
+
+@pytest.mark.parametrize("kwargs", [dict(time_limit=0), dict(stop_requested=lambda: True)])
+def test_task_statistics_never_return_an_interrupted_domain(kwargs):
+    data = instance(demand=[4., 3.], kappa=np.ones((2, 2)), max_orders=2, flow_policy="aggregate")
+    with pytest.raises(EnumerationStopped):
+        physical_task_statistics(data, **kwargs)
 
 
 def _split_first_legs(data, original, splits):

@@ -170,11 +170,12 @@ class DirectContinuationFilter:
             yield s, i, j, (transfer, (pickup, delivery), (delivery, segment.b[1]))
 
 
-def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=None):
-    """Return complete candidate paths or raise EnumerationStopped.
+def iter_paths(data, column_limit=None, time_limit=None, stop_requested=None):
+    """Yield ``(family, path)`` from the complete finite physical domain.
 
-    First legs remain present even when a required continuation family is empty.
-    An absent physical branch must therefore still be imposed by the solver.
+    Families are segment, service and empty. IDs and traversal order match
+    enumerate_paths, but completed paths are not retained. Only normal iterator
+    exhaustion establishes completeness; a budget stop raises EnumerationStopped.
     """
     if not isinstance(data, PlanningData):
         raise TypeError("Expected PlanningData")
@@ -187,11 +188,11 @@ def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=Non
     if time_limit is not None and (not math.isfinite(time_limit) or time_limit < 0):
         raise ValueError("time_limit must be finite and nonnegative or None")
     started = time.perf_counter()
-    segments, service, empty = [], [], []
+    counts = dict(segment=0, service=0, empty=0)
 
     def stop(reason):
         raise EnumerationStopped(
-            reason, columns=len(service) + len(empty), initial_segments=len(segments)
+            reason, columns=counts["service"] + counts["empty"], initial_segments=counts["segment"]
         )
 
     def check():
@@ -200,11 +201,13 @@ def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=Non
         if time_limit is not None and time.perf_counter() - started >= time_limit:
             stop("time_limit")
 
-    def append(target, path):
+    def emit(family, path):
         check()
-        if column_limit is not None and len(service) + len(empty) >= column_limit:
+        if family != "segment" and column_limit is not None and counts["service"] + counts["empty"] >= column_limit:
             stop("column_limit")
-        target.append(replace(path, id=len(target)))
+        item = replace(path, id=counts[family])
+        counts[family] += 1
+        return family, item
 
     routes = RouteCatalogue(data, check)
     direct_filter = (
@@ -219,7 +222,7 @@ def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=Non
             for route in routes.routes(origin, destination):
                 check()
                 try:
-                    append(empty, build_empty_path(data, b, route))
+                    yield emit("empty", build_empty_path(data, b, route))
                 except PathInfeasible:
                     pass
         for r, i, j in product(range(data.n_od), range(data.n_h), range(data.n_h)):
@@ -233,16 +236,16 @@ def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=Non
                 check()
                 try:
                     segment = build_initial_segment(
-                        data, b, r, i, j, (first, loaded), id=len(segments)
+                        data, b, r, i, j, (first, loaded), id=counts["segment"]
                     )
                 except PathInfeasible:
                     continue
-                segments.append(segment)
+                yield emit("segment", segment)
                 for back in routes.routes(data.n_l + j, destination):
                     check()
                     try:
-                        append(
-                            service,
+                        yield emit(
+                            "service",
                             build_service_path(data, segment, (*segment.legs, back)),
                         )
                     except PathInfeasible:
@@ -252,8 +255,8 @@ def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=Non
                 if direct_filter is not None:
                     for s, i2, j2, continuation in direct_filter.candidates(segment):
                         try:
-                            append(
-                                service,
+                            yield emit(
+                                "service",
                                 build_service_path(
                                     data,
                                     segment,
@@ -288,8 +291,16 @@ def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=Non
                                 second_pickup=i2,
                                 second_delivery=j2,
                             )
-                            append(service, path)
+                            yield emit("service", path)
                         except PathInfeasible:
                             pass
+
+
+def enumerate_paths(data, column_limit=None, time_limit=None, stop_requested=None):
+    """Return the complete catalogue, retaining empty continuation branches."""
+    families = dict(segment=[], service=[], empty=[])
+    for family, path in iter_paths(data, column_limit, time_limit, stop_requested):
+        families[family].append(path)
     scope = "supplied_routes" if data.candidate_routes is not None else data.route_mode
-    return PathCollection(tuple(segments), tuple(service), tuple(empty), True, scope)
+    return PathCollection(tuple(families["segment"]), tuple(families["service"]),
+                          tuple(families["empty"]), True, scope)

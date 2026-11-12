@@ -18,6 +18,8 @@ K1 或非双基地实例使用相同入口时，加上以下参数，关闭当�
 --disable indexed_support_completion --disable cg_primal_feedback
 ```
 
+K2 的设计面割与双任务联合队列割现已支持任意正整数基地数：分别使用 L+1 状态证书和 (L+1)² 联合状态；L2 保留原联合割分离方式。三任务联合割未实现。构造、模型口径及 L2/L3 小例验证见[推广说明](general_l_cuts_20261109.md)。本次小例没有显示稳定的最终下界提升，不据此更换其他求解策略。
+
 输出 `assignment_scope="task"`，任务 ID 先排 R 个单任务，再按行排 R² 个有序双任务（K1 仅 R 个）。`task_table` 保存每个 ID 的订单组成和需求率，`task_assignments.csv` 保存独立指派；旧首单指派解不会被静默解释为当前设计。
 
 输入 `consecutive-csv/2` 显式保存 `home_receipt_mean`。历史 CSV/1 只读兼容，由冻结骑手终端参数恢复该系数；混合收件均值不足以识别骑手送到家时间时明确拒绝。柜内移除均值、成本系数和续单窗口规则不改变。

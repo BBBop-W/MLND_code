@@ -8,6 +8,8 @@ L2 K2 的整合入口为 `--preset performance-20261105`，包含现有加速改
 
 ## 构建与运行
 
+Windows 服务器从[安装、构建与验收说明](docs/server_runbook_20261112.md)开始；当前项目评估、修复和数值实验顺序见[2026-11-12 审查](docs/project_assessment_20261112.md)。服务器只需要 CPLEX；独立 Python 校验不要求 Gurobi，历史 Python 优化器按需安装 `.[gurobi]`。
+
 需要 C++17、CPLEX Concert 和 `nlohmann/json.hpp`；原生读取、求解、输出不依赖 Python。
 
 ```sh
@@ -36,28 +38,18 @@ python -m src.experiments.native validate outputs/NEW_BASELINE_RUN \
 
 正常构建只生成生产求解器。诊断按需构建，例如 `make -C cpp queue-fractional-probe`；BDD 研究代码只链接到显式诊断目标，不进入生产求解器。构建与参数细节见 [cpp/README.md](cpp/README.md)。
 
-## 批量比较与结果
+## 数值实验与历史结果
 
-本轮预声明的四例为 TSL L1 M07/M08、L2 M02/M03，每例比较新 baseline 与完整 CPLEX，共八次新运行。实例按编号与历史开发覆盖选择，不按求解成绩选择。L1 是 1 基地 / 10 柜 / 25 OD；L2 是 2 基地 / 20 柜 / 50 OD。
+当前服务器入口为 `scripts/run_server_experiment.py`：一次运行一个实例，固定二进制、输入和源码指纹，分别保存求解与独立物理校验状态。`scripts/check_server.py` 先执行小型正确性验收。实验使用新的输出目录，按相同实例、seed、线程、时间预算比较当前任务模型的完整 CPLEX 与 Benders；达到目标 gap 仍须保留实际终止原因。
 
-[本轮完整结果](docs/baseline_cplex_results_20261029.md)已整理：七次有效运行审计通过，M03 完整 CPLEX 因内存保护停止。L1 上完整 CPLEX 更快；L2 M02 上 baseline 的上下界更好；两个新 L2 的收敛仍需继续改进。
-
-```sh
-python -m src.experiments.baseline_benchmark_20261029 inspect
-python -m src.experiments.baseline_benchmark_20261029 prepare \
-  --binary cpp/build-baseline-release/mlnd_cpp
-python outputs/baseline_release_20261029/benchmark/run.py run
-python outputs/baseline_release_20261029/benchmark/run.py report
-```
-
-`inspect` 只读协议，`prepare` 冻结源码、二进制、输入和命令；只有 `run` / `launch` 开始求解。旧结果保留在原批次，不使用历史 CPLEX 结果代替本轮对照。报告分别记录可行 UB、认证 LB、gap、终止原因、求解与进程时间、资源限制和独立验证。达到 1% 不表示精确最优。
+[2026-10-29 比较](docs/baseline_cplex_results_20261029.md)及[结果索引](docs/algorithm_results.md)属于对应历史模型和冻结批次，不作为当前独立任务模型的性能结论。历史日期实验脚本保留用于复现，不作为 Windows 新批次的启动入口。
 
 ## 模型与输入
 
 需求在网络设计之前固定重构，保留剩余单单并逐 OD 守恒；每个任务独立选择出发基地和首段。K=1 配对流量为零。历史 `--first-leg-consistency` 会重新耦合任务，当前入口明确拒绝。模型假设、有效性范围和源码索引见：
 
-- [当前固定任务模型与算法](docs/unified_task_algorithm_20261027.md)
-- [当前算法与加速策略的学术说明](docs/algorithm_review_20261105.md)与[代码结构](docs/architecture.md)
+- [当前任务模型与配置](docs/current_baseline.md)及[迁移推导](docs/task_assignment_migration_20261105.md)
+- [代码结构与职责](docs/architecture.md)；[2026-11-05 算法说明](docs/algorithm_review_20261105.md)是迁移前快照
 - [2026-11-05 问题修复、验证与后续加速方案](docs/fixes_and_acceleration_plan_20261105.md)
 - [历史 lifted 模型说明](docs/model.md)（主要为早期 K2 基地对指派与指派相关需求重构，供对应版本复现）
 - [路径支持割](docs/path_support_validity_20261027.md)、[任务成本加强](docs/task_cost_strengthening_validity_20261027.md)
@@ -76,7 +68,8 @@ python outputs/baseline_release_20261029/benchmark/run.py report
 | Benders、定价、上界搜索 | `cpp/src/benders.cpp`、`pricing.cpp`、`heuristics.cpp` |
 | 队列割及分数分离 | `cpp/src/queue_polymatroid.cpp`、`queue_fractional.cpp` |
 | 保存与运行进度 | `cpp/src/output.cpp`、`progress.cpp` |
-| 本轮冻结运行、割审计 | `src/experiments/baseline_benchmark_20261029.py`、`baseline_cut_audit_20261029.py` |
+| 当前服务器运行、验收 | `scripts/run_server_experiment.py`、`scripts/check_server.py` |
+| 历史冻结运行、割审计 | `src/experiments/baseline_benchmark_20261029.py`、`baseline_cut_audit_20261029.py` |
 | 独立运营重算 | `src/experiments/native.py`、`src/operations/validation.py` |
 
 修改数学约束时复用公共模型与路径系数，保持完整模型、子问题、定价和输出一致。受限列目标、局部 MIP 界和候选解值不能替代原问题全局 LB。

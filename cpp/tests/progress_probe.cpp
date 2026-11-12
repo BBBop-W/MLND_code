@@ -2,6 +2,7 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <regex>
 
 // Pure observation/serialization test: no CPLEX objects or solver calls.
 int main(int argc,char** argv) {
@@ -16,6 +17,20 @@ int main(int argc,char** argv) {
         int checks=0;
         auto require=[&](bool condition,const char* message) { ++checks; if(!condition) throw std::runtime_error(message); };
         auto read=[&](const char* filename) { Json value;std::ifstream(root/filename)>>value;return value; };
+        require(std::regex_match(utc_timestamp(),std::regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z")),
+                "UTC timestamp is not an ISO-8601 millisecond string");
+        atomic_json_file(root/"replace.json",{{"generation",1},{"old_only",true}});
+        atomic_json_file(root/"replace.json",{{"generation",2}});
+        require(read("replace.json")==Json{{"generation",2}},"Repeated atomic output did not replace the complete document");
+        require(!std::filesystem::exists(root/"replace.json.tmp"),"Successful replacement left a temporary file");
+        const auto blocked=root/"existing_directory";
+        std::filesystem::create_directories(blocked);
+        { std::ofstream(blocked/"keep.txt")<<"keep"; }
+        bool replacement_rejected=false;
+        try { atomic_json_file(blocked,{{"generation",3}}); }
+        catch(const std::filesystem::filesystem_error&) { replacement_rejected=true; }
+        require(replacement_rejected && std::filesystem::is_regular_file(blocked/"keep.txt"),
+                "Failed replacement removed the existing destination");
         observer->record({{"event","global_bounds"},{"stage","mock"},{"bound_scope","global"},{"bound",2}});
         Json point={{"objective",10},{"bound",1},{"_solution",Json::object()},{"_segments",Json::array()},
             {"_missions",Json::array()},{"_relocations",Json::array()}};
@@ -35,6 +50,7 @@ int main(int argc,char** argv) {
         observer->record({{"event","solver_progress"},{"bound_scope","solver_model"},{"bound",100}});
         observer->checkpoint(point,"local_bound_ignored",true);
         require(read("checkpoint.json").at("bound")==4,"A local model bound became a global bound");
+        observer->status("running",{{"solved",false}});
         observer->status("finished",{{"solved",false}});
         require(read("run_status.json").at("state")=="finished","Missing terminal status");
         require(!std::filesystem::exists(root/"checkpoint.json.tmp"),"Atomic checkpoint left temporary file");

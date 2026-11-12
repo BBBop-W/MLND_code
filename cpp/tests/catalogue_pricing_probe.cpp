@@ -2,6 +2,7 @@
 // optimization or experimental output is used by this probe.
 #include "mlnd/pricing.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <random>
@@ -146,6 +147,88 @@ Json differential() {
     }
     return {{"passed",true},{"differential_rounds",checks},{"optimizer_calls",0}};
 }
+Json many_task_rounding() {
+    auto d=fixture();d.n_l=1;d.n_h=2;d.n_od=40;
+    const int r=d.n_od,n=d.n_nodes(),small_tasks=d.task_count()-4;
+    const double small_rate=std::ldexp(1.0,-54);
+    d.single_rates.assign(r,0);d.pair_rates=filled(r,r,0.0);
+    for(int q=0;q<d.task_count();++q) {
+        const double rate=q==0?1:q<=small_tasks?small_rate:0;
+        if(d.task_second(q)<0)d.single_rates[d.task_first(q)]=rate;
+        else d.pair_rates(d.task_first(q),d.task_second(q))=rate;
+    }
+    const auto update_demand=[](Input& input) {
+        input.head_rates=input.single_rates;input.demand=input.single_rates;
+        for(int first=0;first<input.n_od;++first)for(int second=0;second<input.n_od;++second) {
+            const double rate=input.pair_rates(first,second);
+            input.head_rates[first]+=rate;input.demand[first]+=rate;input.demand[second]+=rate;
+        }
+    };
+    update_demand(d);
+    d.common_origin_support=filled(r,1,1);d.ground_cost.assign(r,20);d.deadline.assign(r,1);
+    d.base_cost={.5};d.slot_epsilon={.05,.05};d.flight_times=filled(n,n,.05);
+    d.allowed_links=filled(n,n,1);d.link_cost=filled(n,n,.01);
+    for(int i=0;i<n;++i){d.flight_times(i,i)=0;d.allowed_links(i,i)=0;}
+    d.rider_mean=filled(r,2,.08);d.first_cost=filled(r,2,0.0);d.terminal_cost=filled(r,2,0.0);
+    d.receipt_mean=filled(r,2,.08);d.removal_mean=filled(r,2,.03);d.kappa=filled(r,r,1.0);
+    d.slot_counts=filled(2,1,20);d.slot_cost=filled(2,1,.1);d.occupancy_limit=filled(2,1,14.0);
+    d.flight_cost=d.waiting_cost=0;
+    auto price_both=[&](const Input& input,bool zero_other_savings,bool eliminate_zero) {
+        auto paths=enumerate_paths(input);const std::vector<int> none;
+        FormulationStrengthening strengthening;strengthening.eliminate_zero_task_columns=eliminate_zero;
+        auto f=build_formulation(input,paths,nullptr,&none,&none,false,false,false,strengthening);
+        std::vector<double> pi(f.matrix.rows.size(),0);
+        std::vector<bool> covered(input.task_count(),false);
+        for(const auto& p:paths.service_paths) {
+            const int q=input.task_index(p.first_od,p.second_od);
+            const int row=p.second_od<0?f.single_rows[p.segment_id]:f.double_rows[p.segment_id*r+p.second_od];
+            // Zero-rate tasks deliberately have much more negative columns;
+            // they must not contribute to the service-flow envelope.
+            pi[row]=input.task_rate(q)==0?-1e12:q==0||!zero_other_savings?-1:1;
+            require(p.cost==0,"Rounding witness requires exact zero path costs");covered[q]=true;
+        }
+        require(std::all_of(covered.begin(),covered.end(),[](bool x){return x;}),
+            "Rounding witness is missing a physical task branch");
+        LabelPricingOptions options;options.branch_correction=options.fast_pricing=true;options.max_columns=1;
+        LabelPricingOracle label(input,paths),catalogue(input,paths,INFINITY,nullptr,true);
+        std::array<LabelPricingResult,2> results;
+        results[0]=label.price(f,pi,{}, {},options);options.catalogue_pricing=true;
+        results[1]=catalogue.price(f,pi,{}, {},options);
+        for(const auto& result:results)
+            require(result.complete&&result.branch_correction_complete,"Many-task certificate did not complete");
+        require(results[0].branch_service_correction==results[1].branch_service_correction,
+            "Many-task correction differs between label and catalogue backends");
+        return results;
+    };
+    // The exact envelope is dyadic and representable in binary64: 1 plus
+    // 1,636 copies of 2^-54. This oracle needs no wider floating-point type.
+    require(small_tasks>64&&small_tasks%4==0,"Rounding witness size is unsuitable");
+    const double exact=1+std::ldexp(static_cast<double>(small_tasks/4),-52);
+    const auto many=price_both(d,false,false);
+    for(const auto& result:many)
+        require(result.branch_service_correction>=exact&&result.branch_service_correction<exact+1e-9,
+            "Many-task correction is below the exact independent-task envelope");
+    // Demonstrate that a fixed 64-epsilon final padding does not, by itself,
+    // protect binary64 accumulation in this fixture. The old pathwise guard
+    // is included, so the witness is relevant when long double is binary64.
+    const double epsilon=std::numeric_limits<double>::epsilon(),path_saving=1+128*epsilon;
+    double unprotected=path_saving;
+    for(int q=0;q<small_tasks;++q)unprotected+=small_rate*path_saving;
+    unprotected=std::nextafter(unprotected+64*epsilon*(1+unprotected),INFINITY);
+    require(unprotected<exact,"Many-task witness did not expose fixed-padding binary64 loss");
+    const auto zero_savings=price_both(d,true,false);
+    std::fill(d.single_rates.begin()+1,d.single_rates.end(),0);
+    std::fill(d.pair_rates.values.begin(),d.pair_rates.values.end(),0);update_demand(d);
+    const auto zero_rates=price_both(d,false,false),eliminated=price_both(d,false,true);
+    for(std::size_t backend=0;backend<2;++backend)
+        require(zero_savings[backend].branch_service_correction==zero_rates[backend].branch_service_correction&&
+                zero_rates[backend].branch_service_correction==eliminated[backend].branch_service_correction,
+            "Zero-rate or zero-saving terms added unnecessary correction");
+    return {{"passed",true},{"tasks",d.task_count()},{"small_positive_tasks",small_tasks},
+        {"exact_envelope",exact},{"binary64_fixed_padding",unprotected},
+        {"certified_envelope",many[0].branch_service_correction},{"backends",2},
+        {"zero_rate_and_zero_saving_invariant",true},{"optimizer_calls",0}};
+}
 Json boundaries() {
     auto d=fixture();auto paths=enumerate_paths(d);const std::vector<int> none;
     auto f=build_formulation(d,paths,nullptr,&none,&none);LabelPricingGraphCache cache;
@@ -194,6 +277,7 @@ Json boundaries() {
 }
 }
 int main() {
-    try {std::cout<<Json{{"passed",true},{"differential",differential()},{"boundaries",boundaries()}}.dump(2)<<'\n';return 0;}
+    try {std::cout<<Json{{"passed",true},{"differential",differential()},
+        {"many_task_rounding",many_task_rounding()},{"boundaries",boundaries()}}.dump(2)<<'\n';return 0;}
     catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

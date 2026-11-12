@@ -1,5 +1,12 @@
 # Unified fixed-task model and Benders implementation
 
+> Historical model snapshot (2026-10-27): the equations below bind tasks sharing
+> the same first OD to one departure assignment. Since 2026-11-05 the production
+> model assigns each task independently, using `alpha[q,l]`, and applies
+> courier-home deadlines. Use [current model and presets](current_baseline.md)
+> and [the task migration](task_assignment_migration_20261105.md) for current
+> experiments. The historical derivation is retained for its original runs.
+
 ## Model shared by the two operational modes
 
 Use `--demand-formulation preprocessed` in both modes. The CLI option `--k 1`

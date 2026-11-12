@@ -13,7 +13,6 @@ from src.data.instances import to_planning_data
 from src.data.standard import (
     BASE_HEADERS,
     INPUT_FILES,
-    SCHEMA,
     LEGACY_SCHEMA,
     TABLES,
     export_standard,
@@ -295,6 +294,62 @@ def test_case_override_cannot_change_a_physical_parameter(mutable_instance):
     )
     with pytest.raises(ValueError, match="Cases may change max_orders only"):
         load_standard(mutable_instance, verify_hashes=False)
+
+
+@pytest.mark.parametrize("field", ["n_l", "n_h", "n_od", "max_orders"])
+def test_model_dimensions_require_json_integers_before_case_override(mutable_instance, field):
+    _edit_json(
+        mutable_instance / "model.json",
+        lambda model: model["values"].update({field: float(model["values"][field])}),
+    )
+    with pytest.raises(ValueError, match="Integer model scalar required"):
+        load_standard(mutable_instance, case="K1", verify_hashes=False)
+
+
+def test_case_override_cannot_hide_invalid_default_order_count(mutable_instance):
+    _edit_json(mutable_instance / "model.json", lambda model: model["values"].update(max_orders=3))
+    with pytest.raises(ValueError, match="max_orders must be 1 or 2"):
+        load_standard(mutable_instance, case="K1", verify_hashes=False)
+
+
+@pytest.mark.parametrize("edge", ["before_midnight", "after_midnight"])
+def test_period_window_must_remain_within_one_day(mutable_instance, edge):
+    path = mutable_instance / "periods.csv"
+    headers, rows = _read_table(path)
+    width = float(rows[0]["end_hour"]) - float(rows[0]["start_hour"])
+    start = -1 if edge == "before_midnight" else 25 - width
+    rows[0].update(start_hour=str(start), end_hour=str(start + width))
+    _write_table(path, headers, rows)
+    with pytest.raises(ValueError, match="Invalid period hour window"):
+        load_standard(mutable_instance, verify_hashes=False)
+
+
+@pytest.mark.parametrize("damage", ["duplicate", "leading_empty", "interior_empty", "empty"])
+def test_period_dates_are_nonempty_and_unique(mutable_instance, damage):
+    path = mutable_instance / "periods.csv"
+    headers, rows = _read_table(path)
+    dates = rows[0]["dates"]
+    rows[0]["dates"] = {
+        "duplicate": dates + ";" + dates.split(";")[0],
+        "leading_empty": ";" + dates,
+        "interior_empty": dates + ";;",
+        "empty": "",
+    }[damage]
+    _write_table(path, headers, rows)
+    with pytest.raises(ValueError, match="Empty or duplicate period date"):
+        load_standard(mutable_instance, verify_hashes=False)
+
+
+@pytest.mark.parametrize("at_day_end", [False, True])
+def test_period_window_accepts_midnight_boundaries_and_native_terminal_separator(mutable_instance, at_day_end):
+    path = mutable_instance / "periods.csv"
+    headers, rows = _read_table(path)
+    width = float(rows[0]["end_hour"]) - float(rows[0]["start_hour"])
+    start = 24 - width if at_day_end else 0
+    rows[0].update(start_hour=str(start), end_hour=str(start + width), dates=rows[0]["dates"] + ";")
+    _write_table(path, headers, rows)
+    restored = load_standard(mutable_instance, verify_hashes=False)
+    np.testing.assert_array_equal(restored["demand"], load_inputs(SNAPSHOT)["demand"])
 
 
 def test_export_does_not_replace_an_existing_instance(

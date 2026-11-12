@@ -10,6 +10,35 @@ import math
 
 import numpy as np
 
+from .paths import iter_paths
+
+
+def physical_task_statistics(data, *, time_limit=None, stop_requested=None):
+    """Find task cost/support over the input's complete physical domain.
+
+    Output witnesses can prove that a path exists, but cannot prove a global
+    minimum or absence of other supported departures. Consume the same physical
+    iterator as enumeration without retaining its completed paths. An interrupted
+    scan raises; it never returns partial statistics as reconstruction evidence.
+    """
+    r, bases = data.n_od, data.n_l
+    single_cost, double_cost = np.full(r, np.inf), np.full((r, r), np.inf)
+    single_support = np.zeros((r, bases), dtype=bool)
+    double_support = np.zeros((r, r, bases), dtype=bool)
+    service_paths = 0
+    for family, path in iter_paths(data, time_limit=time_limit, stop_requested=stop_requested):
+        if family != "service":
+            continue
+        service_paths += 1
+        first, second, origin = path.first_od, path.second_od, path.b[0]
+        if second is None:
+            single_cost[first] = min(single_cost[first], path.cost)
+            single_support[first, origin] = True
+        else:
+            double_cost[first, second] = min(double_cost[first, second], path.cost)
+            double_support[first, second, origin] = True
+    return single_cost, double_cost, single_support, double_support, service_paths
+
 
 @dataclass(frozen=True)
 class GeneralizedDemand:

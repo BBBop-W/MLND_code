@@ -34,7 +34,8 @@ struct QueuePriceSearchResult {
 
 // Complete-domain, integer-valid queue cuts. Profile zero is the nonnegative
 // S+ EPI-0 bound. Other profiles retain signed savings, missing-branch gates,
-// and finite negative-cost empty flows. No auxiliary optimization is used.
+// and finite negative-cost empty flows. Ordinary per-base separation uses no
+// auxiliary optimization; general-L joint separation solves a coefficient LP.
 class QueuePolymatroidCuts {
 public:
     QueuePolymatroidCuts(const Input&, const PathCollection&, const SolverOptions&,
@@ -48,9 +49,10 @@ public:
     TaskSavingsCut separate_profile(std::size_t profile,
                                    const std::vector<double>& design,
                                    double theta_value, int theta) const;
-    // Joint two-task, three-state convexification for L2 fixed K2 tasks.
-    // Uses retained complete profiles only; never scans paths or optimizes.
-    // A time-limited call returns only a fully vertex-validated lifted row.
+    // Joint two-task, (L+1)-state convexification for fixed K2 tasks.
+    // L2 preserves facet enumeration; other L use a single-thread coefficient
+    // LP. Uses retained complete profiles, without rescanning physical paths.
+    // Only a fully state-validated, conservatively lifted row can be returned.
     TaskSavingsCut separate_joint(const std::vector<double>& design,
                                  double theta_value, int theta, double seconds);
     QueuePriceSearchResult search_prices(const QueueResourcePrices& candidate,
