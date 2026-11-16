@@ -1,6 +1,8 @@
 > **当前分支：MLND_sever。** 原生求解器和 `mlnd_runtime/` 已按 2026-11-16 的 `MLND_server` 实际工作区源码逐字节同步，包含该工作区尚未提交的修改。文件清单与 SHA-256 见 [SOURCE_VERSION.json](SOURCE_VERSION.json)。
 >
 > 构建入口为根目录 `CMakeLists.txt`（`cmake -S .`，目标 `mlnd`）。本次没有迁移服务器的 `run.py` 或实验启动脚本；下面保留的旧版说明和现有 `scripts/` 尚未适配本分支。迁移前完整版本已保存在 `codex/unified-task-algorithm` 的 `3ac3146` 提交。
+>
+> **GitHub 内容范围：**保留源码、测试、配置、技术说明及小型示例/基准输入；原始研究数据、论文材料、实验输出、构建产物和交付压缩包仅在本地保存。忽略规则见 `.gitignore`。已跟踪的上述本地材料已从当前分支的 Git 索引移除，本地文件保留；历史提交不作改写。
 
 # MLND consecutive delivery network
 
