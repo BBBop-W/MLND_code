@@ -1,0 +1,130 @@
+{
+  "purpose": "Read-only source baseline for conditional Benders implementation handout; no algorithm implementation or solver validation performed",
+  "captured_at": "2026-10-22T00:09:31.082675+08:00",
+  "repository": "/Users/songtaowang/Documents/MLND_code",
+  "branch": "MLND_Continuation",
+  "head": "0fe23717de2223b0f2a21634b2d9c9db8a97d464",
+  "working_tree_is_clean": false,
+  "files": {
+    "src/model/demand.py": {
+      "sha256": "61c0566c4ee6d138ec747ffbeb904b7f52f47619c9ad52710c5f6768d8618e06",
+      "bytes": 2889
+    },
+    "src/model/resources.py": {
+      "sha256": "da8391580d5b7845b5de84c96dd159803da9c18674791b31b8d45fa0c4b1ff7d",
+      "bytes": 10488
+    },
+    "src/model/paths.py": {
+      "sha256": "198fb74225eb0598b94c0be41d72f01b7487b9388702c321470549ec1431b0c8",
+      "bytes": 11733
+    },
+    "src/model/types.py": {
+      "sha256": "dbcdc1204f25a80d4dbce227c8cab5879d766703bd385001da90ae1438ecc166",
+      "bytes": 8503
+    },
+    "src/solvers/formulation.py": {
+      "sha256": "6890c2a85e0762703cf1035cc7a9a2f56c4603bb3ed1b9b48b4c659bdeb06510",
+      "bytes": 23527
+    },
+    "src/solvers/dual.py": {
+      "sha256": "55c45a22e1ecf9e8982a307a4ecfe0db2ed8cacf5a6822c635173003b84bfde7",
+      "bytes": 14951
+    },
+    "src/solvers/algorithm.py": {
+      "sha256": "4f4be46a01f9d0ef0050b6ad32ec9fcf1b9706d2c80c71dd8d05281cb2527781",
+      "bytes": 30374
+    },
+    "src/solvers/methods.py": {
+      "sha256": "fb99467223b3606adcd8d21ba81053d8fab9371265eac0b47becc1cb8ef6c3ab",
+      "bytes": 1781
+    },
+    "src/operations/validation.py": {
+      "sha256": "19a39a6fa7e049fc5a46d945d9b4d8e621732f236fca367f9f46a30fdf7634ea",
+      "bytes": 26891
+    },
+    "src/experiments/native.py": {
+      "sha256": "3a33528e51a7c4665984b6cb58fb9e78184d56f3617a84db793ac98df689fc8f",
+      "bytes": 40543
+    },
+    "cpp/src/formulation.cpp": {
+      "sha256": "91cda9a78640e3fef932cdddb4d055458e0c2c99be87a64d18b63c52b18036fb",
+      "bytes": 26280
+    },
+    "cpp/src/benders.cpp": {
+      "sha256": "14d98e62bc490ce65e631baf6b06e5c7a0c3858b1d3d7ed52210fd3fc5d14520",
+      "bytes": 139346
+    },
+    "cpp/src/pricing.cpp": {
+      "sha256": "44ef66ac7f1cd258c53e94afd9fcda3accb4178748a507cacdb5eaf23f1834f1",
+      "bytes": 19319
+    },
+    "cpp/src/paths.cpp": {
+      "sha256": "004dba74718a20ec3868776af4382f9484829ff23f10499967ee30ff320a00b4",
+      "bytes": 29397
+    },
+    "cpp/src/output.cpp": {
+      "sha256": "42b51c549cf4c7022384fd6b1d620ec382e2ef88868a41e2da324101f0320ab2",
+      "bytes": 22265
+    },
+    "cpp/src/heuristics.cpp": {
+      "sha256": "3bbd9828d0c4dffffa1d893ecda5b51fd3587f70cb5f9ab52babcca141904fb3",
+      "bytes": 27297
+    },
+    "cpp/src/main.cpp": {
+      "sha256": "925099dbc41ac4b7b5cb657d84fea88c199a7559ece230e89cac8f8fb79370c1",
+      "bytes": 29177
+    },
+    "cpp/include/mlnd/formulation.hpp": {
+      "sha256": "d316697c15e28132bf89f9d9fed3b41078ba1f8fb684254da4e74d32e584bb37",
+      "bytes": 2343
+    },
+    "cpp/include/mlnd/linear_model.hpp": {
+      "sha256": "2fbcf0f79e80206e2bc07964964d117302040bee986ba9bc9aa4ddd58b722701",
+      "bytes": 6015
+    },
+    "cpp/include/mlnd/pricing.hpp": {
+      "sha256": "4cb1ed065473d51566ce6663c2ef7cf8b36e201cd8e8ec9c46411b527082f461",
+      "bytes": 2192
+    },
+    "cpp/Makefile": {
+      "sha256": "7a259ff56c071de842c106fdd4c666efa4955032d454a6c730dcfdd2d1b85f58",
+      "bytes": 3115
+    },
+    "configs/default.json": {
+      "sha256": "fa72a4b055218f404a835fab7506cc42f8f89fd54c2838a9289ccffd98cded81",
+      "bytes": 2047
+    },
+    "docs/model.md": {
+      "sha256": "11adeda375c31e0a91f3f2b85acd33ea4d4082ed247b87b1d013d52fd1bb136f",
+      "bytes": 6640
+    },
+    "docs/implicit_cg.md": {
+      "sha256": "d897b528ca04e0c53218d65e11dbbc0c50c57a1d9947a026adfb771a8db36279",
+      "bytes": 9301
+    },
+    "tests/unit/test_pooling.py": {
+      "sha256": "1a9865d89ab10529d6becd0e07be78ee17a4a0956c618ff4d7535e4a62cb2a48",
+      "bytes": 4940
+    },
+    "tests/unit/test_solver.py": {
+      "sha256": "229aa797964b0bcd5001a3ef09361eb0b8f3a79e2497d70e6e81b0fed362913e",
+      "bytes": 10776
+    },
+    "tests/unit/test_task_relaxation.py": {
+      "sha256": "6e4183f325b1bfb6e2dab25997958280ebf5ed8ccfa1437b79845443e4beaa7e",
+      "bytes": 5804
+    },
+    "tests/unit/test_aggregate_validation.py": {
+      "sha256": "9236c51f8ef907e3c1de45fe72c7ed9e7b7c2733fc7e0fb50bbe1a149d9177b6",
+      "bytes": 6500
+    },
+    "tests/unit/test_master_bounds.py": {
+      "sha256": "274b3458a1ddb7b23d569d17cea8f6a1815342b4e066e0f03da6634d0baffbb4",
+      "bytes": 8142
+    },
+    "examples/tsl_2l20h50od/model.json": {
+      "sha256": "8803926852e85d8f899033c8f8e51feed6b0ab187f49c3c5da00a682d1150559",
+      "bytes": 8564
+    }
+  }
+}

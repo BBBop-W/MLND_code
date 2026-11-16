@@ -1,0 +1,17 @@
+{
+  "source_sha256": "489d2dd10722e5bbc6ac8c9f8337a176e110cc3638585b71dd71b46936f7cac4",
+  "functions": {
+    "rounding_loss": "b4aa66ccce99f4fa0927e4889d6bdefe7757fb8ae988d1cc56b22526e6a453d9",
+    "verified_demand_totals": "82444b006b01235ddbf539a996da4188c3873feb9a0af92f292f4b96c127f664",
+    "check_resource_affine": "931a4b3885f69ef97c9173d163e3ab86b9465a1fbaf6fd38ee93d192204b3184",
+    "require": "3b218d97634fd91fd6595535193a2eb525911ab34ffd45793deaba58332ca99e",
+    "close": "f6e468ac4fd0453bc6a0a585c86e0fda11a8eb31c1bae7addef5e7cd4ac2ef78",
+    "conjugate": "454439b0d20995fe2cbd00fec79756f5feac24d37a024ec168c7936bb8c11739",
+    "load_verified": "7e556d84de8b082438fbdf6ba7c59afc8d8c1a6529d6c63f805227aa62f2bf2f",
+    "input_constants": "d5b2955315edb8726d75fc3bf111e847fa979e7c83db20e8a4f9a7bc2d0b2ba0",
+    "validate_profile": "24c07a964e03a3263929475a96ce2dd073e2808574491908a437fb9a79543bc5",
+    "replay_queue_row": "6f41d167c17b35e84c69dbcc6c91061b4502542ce342301da929fea856dd3fab",
+    "audit_fractional_stages": "962ccf58fe849dafeb0c024cd85250f1a65d1dcdcb239a58076440c58389dcd8",
+    "audit_new_mechanisms": "e6365ea1fb8b12ef80fe9e9d3d4b1b948bd4d66e55ad26284112ea6219aab8cc"
+  }
+}

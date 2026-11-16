@@ -1,0 +1,17 @@
+{
+  "complete_paths": 3,
+  "incomplete_exports_rejected": 2,
+  "metadata": {
+    "complete": true,
+    "counts": {
+      "empty": 1,
+      "segments": 1,
+      "service": 2
+    },
+    "file": "full_catalogue.json",
+    "schema": "mlnd-complete-catalogue/1",
+    "sha256": "a2b36fb1b96686bdb4063e144d5fc62ee00be4b63c7e1f21162ec0900c096956"
+  },
+  "passed": true,
+  "solver_invoked": false
+}

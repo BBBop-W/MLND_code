@@ -1,0 +1,521 @@
+{
+  "schema": "consecutive-csv/1",
+  "values": {
+    "n_l": 2,
+    "n_h": 20,
+    "delta": 0.008333333333333333,
+    "operating_limit": 0.16666666666666666,
+    "fleet_cost": 2.2831050228310503,
+    "flight_cost": 14.4,
+    "waiting_cost": 14.4,
+    "max_orders": 2,
+    "name": "tsl_L2_H20_OD50",
+    "candidate_routes": null,
+    "route_mode": "direct",
+    "flow_policy": "aggregate",
+    "model_version": "consecutive",
+    "n_od": 50
+  },
+  "ids": {
+    "bases": [
+      "L0000",
+      "L0001"
+    ],
+    "hubs": [
+      "H0000",
+      "H0001",
+      "H0002",
+      "H0003",
+      "H0004",
+      "H0005",
+      "H0006",
+      "H0007",
+      "H0008",
+      "H0009",
+      "H0010",
+      "H0011",
+      "H0012",
+      "H0013",
+      "H0014",
+      "H0015",
+      "H0016",
+      "H0017",
+      "H0018",
+      "H0019"
+    ],
+    "origins": [
+      "O00000",
+      "O00001",
+      "O00002",
+      "O00003",
+      "O00004",
+      "O00005",
+      "O00006",
+      "O00007",
+      "O00008",
+      "O00009",
+      "O00010",
+      "O00011",
+      "O00012",
+      "O00013",
+      "O00014",
+      "O00015",
+      "O00016",
+      "O00017",
+      "O00018",
+      "O00019",
+      "O00020",
+      "O00021",
+      "O00022",
+      "O00023",
+      "O00024",
+      "O00025",
+      "O00026",
+      "O00027",
+      "O00028",
+      "O00029",
+      "O00030",
+      "O00031",
+      "O00032",
+      "O00033",
+      "O00034",
+      "O00035",
+      "O00036",
+      "O00037",
+      "O00038",
+      "O00039",
+      "O00040",
+      "O00041",
+      "O00042",
+      "O00043",
+      "O00044",
+      "O00045",
+      "O00046",
+      "O00047",
+      "O00048",
+      "O00049"
+    ],
+    "destinations": [
+      "D00000",
+      "D00001",
+      "D00002",
+      "D00003",
+      "D00004",
+      "D00005",
+      "D00006",
+      "D00007",
+      "D00008",
+      "D00009",
+      "D00010",
+      "D00011",
+      "D00012",
+      "D00013",
+      "D00014",
+      "D00015",
+      "D00016",
+      "D00017",
+      "D00018",
+      "D00019",
+      "D00020",
+      "D00021",
+      "D00022",
+      "D00023",
+      "D00024",
+      "D00025",
+      "D00026",
+      "D00027",
+      "D00028",
+      "D00029",
+      "D00030",
+      "D00031",
+      "D00032",
+      "D00033",
+      "D00034",
+      "D00035",
+      "D00036",
+      "D00037",
+      "D00038",
+      "D00039",
+      "D00040",
+      "D00041",
+      "D00042",
+      "D00043",
+      "D00044",
+      "D00045",
+      "D00046",
+      "D00047",
+      "D00048",
+      "D00049"
+    ],
+    "ods": [
+      "0",
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21",
+      "22",
+      "23",
+      "24",
+      "25",
+      "26",
+      "27",
+      "28",
+      "29",
+      "30",
+      "31",
+      "32",
+      "33",
+      "34",
+      "35",
+      "36",
+      "37",
+      "38",
+      "39",
+      "40",
+      "41",
+      "42",
+      "43",
+      "44",
+      "45",
+      "46",
+      "47",
+      "48",
+      "49"
+    ],
+    "levels": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5"
+    ],
+    "flight_nodes": [
+      "L0000",
+      "L0001",
+      "H0000",
+      "H0001",
+      "H0002",
+      "H0003",
+      "H0004",
+      "H0005",
+      "H0006",
+      "H0007",
+      "H0008",
+      "H0009",
+      "H0010",
+      "H0011",
+      "H0012",
+      "H0013",
+      "H0014",
+      "H0015",
+      "H0016",
+      "H0017",
+      "H0018",
+      "H0019"
+    ]
+  },
+  "arrays": {
+    "demand": {
+      "shape": [
+        50
+      ],
+      "dtype": "float64"
+    },
+    "flight_times": {
+      "shape": [
+        22,
+        22
+      ],
+      "dtype": "float64"
+    },
+    "rider_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "first_cost": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "terminal_cost": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "receipt_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "removal_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "ground_cost": {
+      "shape": [
+        50
+      ],
+      "dtype": "float64"
+    },
+    "deadline": {
+      "shape": [
+        50
+      ],
+      "dtype": "float64"
+    },
+    "base_cost": {
+      "shape": [
+        2
+      ],
+      "dtype": "float64"
+    },
+    "slot_counts": {
+      "shape": [
+        20,
+        5
+      ],
+      "dtype": "int64"
+    },
+    "slot_cost": {
+      "shape": [
+        20,
+        5
+      ],
+      "dtype": "float64"
+    },
+    "slot_epsilon": {
+      "shape": [
+        20
+      ],
+      "dtype": "float64"
+    },
+    "link_cost": {
+      "shape": [
+        22,
+        22
+      ],
+      "dtype": "float64"
+    },
+    "kappa": {
+      "shape": [
+        50,
+        50
+      ],
+      "dtype": "float64"
+    },
+    "allowed_links": {
+      "shape": [
+        22,
+        22
+      ],
+      "dtype": "bool"
+    },
+    "bases": {
+      "shape": [
+        2,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "hubs": {
+      "shape": [
+        20,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "origins": {
+      "shape": [
+        50,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "destinations": {
+      "shape": [
+        50,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "od_origin": {
+      "shape": [
+        50
+      ],
+      "dtype": "int64"
+    },
+    "od_destination": {
+      "shape": [
+        50
+      ],
+      "dtype": "int64"
+    },
+    "pickup_share": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "last_rider_cost": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "last_rider_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    }
+  },
+  "cases": {
+    "K1": {
+      "max_orders": 1
+    },
+    "K2": {
+      "max_orders": 2
+    }
+  },
+  "units": {
+    "coordinates": "km, local projected coordinates",
+    "demand": "orders/hour",
+    "time_coefficients": "hour",
+    "base_cost,slot_cost,link_cost": "CNY/hour per selected facility, level or link",
+    "fleet_cost": "CNY/hour per drone",
+    "first_cost,terminal_cost,ground_cost,last_rider_cost": "CNY/order",
+    "flight_cost,waiting_cost": "CNY/drone-hour of flight or waiting",
+    "slot_counts": "compartments",
+    "occupancy_limit": "mean parcels present; not orders/hour",
+    "slot_epsilon,pickup_share,kappa": "dimensionless"
+  },
+  "capacity_definition": {
+    "version": "poisson-strict-overflow/1",
+    "formula": "max mu >= 0 such that P(Poisson(mu) > slot_counts) <= slot_epsilon",
+    "threshold_column": "coefficients/locker_levels.csv:occupancy_limit",
+    "verification_atol": 1e-12,
+    "verification_rtol": 1e-12
+  },
+  "table_layouts": {
+    "base_costs": {
+      "id_columns": [
+        "base_id"
+      ],
+      "domains": [
+        "bases"
+      ],
+      "value_columns": [
+        "base_cost"
+      ]
+    },
+    "locker_levels": {
+      "id_columns": [
+        "hub_id",
+        "level_id"
+      ],
+      "domains": [
+        "hubs",
+        "levels"
+      ],
+      "value_columns": [
+        "slot_counts",
+        "slot_cost",
+        "slot_epsilon",
+        "occupancy_limit"
+      ]
+    },
+    "links": {
+      "id_columns": [
+        "from_site",
+        "to_site"
+      ],
+      "domains": [
+        "flight_nodes",
+        "flight_nodes"
+      ],
+      "value_columns": [
+        "allowed_links",
+        "flight_times",
+        "link_cost"
+      ]
+    },
+    "od_costs": {
+      "id_columns": [
+        "od_id"
+      ],
+      "domains": [
+        "ods"
+      ],
+      "value_columns": [
+        "ground_cost",
+        "deadline"
+      ]
+    },
+    "od_hub": {
+      "id_columns": [
+        "od_id",
+        "hub_id"
+      ],
+      "domains": [
+        "ods",
+        "hubs"
+      ],
+      "value_columns": [
+        "rider_mean",
+        "first_cost",
+        "terminal_cost",
+        "receipt_mean",
+        "removal_mean",
+        "pickup_share",
+        "last_rider_cost",
+        "last_rider_mean"
+      ]
+    },
+    "kappa": {
+      "id_columns": [
+        "first_od",
+        "second_od"
+      ],
+      "domains": [
+        "ods",
+        "ods"
+      ],
+      "value_columns": [
+        "kappa"
+      ]
+    }
+  },
+  "numeric_encoding": "UTF-8 RFC4180 CSV; decimal round-trip precision; bool=0/1; inf only for unavailable flight times"
+}

@@ -1,0 +1,112 @@
+{
+  "date": "2026-11-05",
+  "scope": "Confirmed review findings repaired; acceleration ideas are proposals only.",
+  "pre_repair_snapshot": "algorithm_review_20261105.sources.json",
+  "production_binaries_changed": false,
+  "experiment_outputs_read": false,
+  "performance_validation": false,
+  "build": {
+    "directory": "/tmp/mlnd-repair-20261105-build",
+    "parallel_jobs": 1,
+    "flags": "-O0 -g0 -std=c++17 -fPIC -fexceptions -ffp-contract=off -Wall -Wextra -Wpedantic",
+    "success": true,
+    "warnings_or_errors_in_final_log": false,
+    "log": "/tmp/mlnd-repair-20261105-build-final.log"
+  },
+  "tests": [
+    {
+      "probe": "search_schedule",
+      "exit_code": 0,
+      "wall_seconds": 0.722,
+      "output": "/tmp/mlnd-repair-20261105-search_schedule.json",
+      "passed": true,
+      "checks": 30,
+      "result_keys": [
+        "passed",
+        "checks"
+      ]
+    },
+    {
+      "probe": "solver_presets",
+      "exit_code": 0,
+      "wall_seconds": 0.667,
+      "output": "/tmp/mlnd-repair-20261105-solver_presets.json",
+      "passed": true,
+      "checks": 26,
+      "result_keys": [
+        "passed",
+        "checks"
+      ]
+    },
+    {
+      "probe": "primal_polish",
+      "exit_code": 0,
+      "wall_seconds": 0.889,
+      "output": "/tmp/mlnd-repair-20261105-primal_polish.json",
+      "passed": true,
+      "result_keys": [
+        "cases",
+        "passed"
+      ],
+      "cases_count": 4
+    },
+    {
+      "probe": "search_integration",
+      "exit_code": 0,
+      "wall_seconds": 1.485,
+      "output": "/tmp/mlnd-repair-20261105-search_integration.json",
+      "passed": true,
+      "result_keys": [
+        "cases",
+        "passed"
+      ],
+      "cases_count": 4
+    },
+    {
+      "probe": "alns_integration",
+      "exit_code": 0,
+      "wall_seconds": 1.543,
+      "output": "/tmp/mlnd-repair-20261105-alns_integration.json",
+      "passed": true,
+      "result_keys": [
+        "benders",
+        "fixed_seed",
+        "passed"
+      ]
+    }
+  ],
+  "limits": [
+    "Synthetic small-instance regressions only; not the whole suite.",
+    "20-second Benders integration fixtures cannot exercise the at-least-30-second scheduled local window; scheduler and local execution tested separately.",
+    "Exception accounting uses a controlled clock and simulated exception, not a production cleanup interruption.",
+    "Recorded probe wall times are reproducibility metadata, not acceleration measurements."
+  ],
+  "independent_review": "Two independent read-only reviews found a search-cycle interaction and a policy-summary issue; both repaired and re-reviewed without further confirmed findings.",
+  "task_source_changes": [
+    {
+      "path": "cpp/src/benders.cpp",
+      "sha256_before": "fea5a78dffe2c17e463b0c94bb0caf60b199d38429fd11a1f4a4b2dd3e47ef3e",
+      "sha256_after": "2c574f113a1c17cd051b4e82ae5027aa3162179b1c10f4bc4a3bf6cb785c5206"
+    },
+    {
+      "path": "cpp/include/mlnd/benders_control.hpp",
+      "sha256_before": "37e7b351f6135d5f40d7a55869ee165850cf434e58c4b6ad35ab7522473116cc",
+      "sha256_after": "e39a3fe7f4bc405fe74a5e2f16423f57e1394afaf0c1f94dc47d79039460a983"
+    },
+    {
+      "path": "cpp/tests/search_schedule_probe.cpp",
+      "sha256_before": "98046049b4e7c1717edb13b2cac372422d81028becd4acb675cfe55029a15c47",
+      "sha256_after": "74bacf390a2f4475a9365882d7627ce5192e52cf454e140d9dcd6c05786f6139"
+    },
+    {
+      "path": "cpp/tests/primal_polish_probe.cpp",
+      "sha256_before": "0907f66f984efe8461e9f69b3e46c4dc1488c5c500ad3c7ad25c0334a173a87f",
+      "sha256_after": "950d996a0fa341441b354615f0755ca8ac79b0e162944b70e120df86c920c893"
+    },
+    {
+      "path": "cpp/tests/search_integration_probe.cpp",
+      "sha256_before": "8a9787643525a7762ef5687055265521c0d41b112390cf69efadd9d329f21e39",
+      "sha256_after": "943228d6428b55189650d76f2b9c26f5e131f53bda7d5e39cb42be2443e85a82"
+    }
+  ]
+}

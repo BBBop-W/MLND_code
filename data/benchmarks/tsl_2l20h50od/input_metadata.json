@@ -1,0 +1,1617 @@
+{
+  "schema": 1,
+  "values": {
+    "n_l": 2,
+    "n_h": 20,
+    "delta": 0.008333333333333333,
+    "operating_limit": 0.16666666666666666,
+    "fleet_cost": 2.2831050228310503,
+    "flight_cost": 14.4,
+    "waiting_cost": 14.4,
+    "max_orders": 2,
+    "name": "tsl_L2_H20_OD50",
+    "candidate_routes": null,
+    "route_mode": "direct",
+    "flow_policy": "aggregate",
+    "model_version": "consecutive",
+    "metadata": {
+      "source": {
+        "kind": "temporary_nested_candidate_expansion",
+        "baseline_path": "/Users/songtaowang/Documents/MLND_code/outputs/tsl_parameter_comparison_20261015/runs/K1",
+        "hashes": {
+          "input_arrays.npz": "3e5df8b599772e2d18ba441de1863518315b544e1f6392f22ce9d63811fbdde3",
+          "input_metadata.json": "bdbf89337d985770e2bd74be72ccdf8a4775cb40d471792b02cd828b9fb0c311"
+        },
+        "raw_path": "/Users/songtaowang/Documents/MLND_code/Meituan-TSL/all_waybill_info_meituan_0322.csv",
+        "raw_file_sha256": "1d31aac21e17c11aec6ab0033d4040c03aea5bab1dfd60aa11e74d766bbd2c04",
+        "calibration_path": "/Users/songtaowang/Documents/MLND_code/outputs/consecutive_real_comparison_20261015/instances/tsl/calibration.json",
+        "calibration_sha256": "0b40022f0e4ad581d103acc7fb28aef306b8a56afd27d8521fa2ded62819230b",
+        "script": "/Users/songtaowang/Documents/MLND_code/outputs/tsl_h20_temporary_20261015/build_instance.py"
+      },
+      "resolved_config": {
+        "schema_version": 2,
+        "model": "consecutive",
+        "name": "tsl_2l20h50od_temporary_candidate_expansion",
+        "max_orders": 2,
+        "flow_policy": "aggregate",
+        "data": {
+          "input_path": "outputs/tsl_h20_temporary_20261015/instance",
+          "instance_root": "data/instances/nanshan_nested_h120",
+          "calibration": "data/model_inputs/calibration.json",
+          "demand_hubs": 120,
+          "demand_scale": 1.0
+        },
+        "depreciation": {
+          "years": 5,
+          "days_per_year": 365,
+          "hours_per_day": 12
+        },
+        "operations": {
+          "drone_speed_kmh": 72.0,
+          "rider_minutes_per_km": null,
+          "operating_limit_minutes": 10.0,
+          "window_minutes": 0.5,
+          "deadline_minutes": null,
+          "deadline_multiplier": 1.0,
+          "slot_counts": [
+            8,
+            16,
+            24,
+            32,
+            40
+          ],
+          "slot_epsilon": 0.05,
+          "road_distance_factor": 1.25,
+          "route_mode": "direct"
+        },
+        "terminal": {
+          "self_pickup_removal_minutes": 5.0,
+          "self_pickup_receipt_minutes": 5.0,
+          "courier_removal_minutes": 2.0,
+          "courier_receipt_minutes": null
+        },
+        "compatibility": {
+          "mode": "distance",
+          "require_feasible_path": true,
+          "max_distance_km": 2.0,
+          "matrix": null
+        },
+        "choice": {
+          "beta0": -1.0,
+          "beta_distance": 0.0,
+          "beta_time": 0.06,
+          "beta_price": 0.35,
+          "beta_walk": 2.4,
+          "distance_difference_km": 0.0,
+          "time_difference_minutes": -10.0,
+          "price_difference_cny": -1.0,
+          "walking_distance_factor": 1.0,
+          "max_walk_km": 0.8
+        },
+        "costs": {
+          "base_investment": 479900.0,
+          "locker_site_investment": 20000.0,
+          "compartment_investment": 5000.0,
+          "drone_investment": 50000.0,
+          "directed_route_investment_per_km": 11333.25,
+          "flight_per_hour": 14.4,
+          "waiting_per_hour": 14.4,
+          "rider_initial_charge": 5.76,
+          "rider_included_distance_km": 3.0,
+          "rider_additional_per_km": 1.62,
+          "feeder_rider_multiplier": 0.3
+        },
+        "solver": {
+          "time_limit": 600.0,
+          "threads": 1,
+          "mip_gap": 0.005,
+          "seed": 43,
+          "max_iterations": 100,
+          "column_limit": 500000
+        }
+      },
+      "scenario_name": "tsl_2l20h50od_temporary_candidate_expansion",
+      "coordinate_system": "local_km",
+      "source_metadata": {
+        "source": "tsl",
+        "raw_path": "/Users/songtaowang/Documents/MLND_code/Meituan-TSL/all_waybill_info_meituan_0322.csv",
+        "raw_file_sha256": "1d31aac21e17c11aec6ab0033d4040c03aea5bab1dfd60aa11e74d766bbd2c04",
+        "raw_rows": 654343,
+        "accepted_orders": 568546,
+        "excluded_unaccepted_rows": 85797,
+        "duplicate_day_order_keys": 0,
+        "coordinate_system": "local_km",
+        "source_coordinate_crs": "unspecified",
+        "coordinate_disclosure": "source latitude/longitude datum is not established by this adapter",
+        "projection_center_lon": 174.5675455,
+        "projection_center_lat": 45.879237,
+        "projection_rule": "median accepted pickup coordinates over all source days",
+        "selected_days": [
+          "20221017",
+          "20221018",
+          "20221019",
+          "20221020",
+          "20221021",
+          "20221022",
+          "20221023",
+          "20221024"
+        ],
+        "date_basis": "source_partition_dt",
+        "hour_basis": "Asia/Shanghai event timestamp",
+        "timestamp_date_mismatch_orders_all_days": 1758,
+        "timing_rule": "accepted non-prebook; positive platform <= grab <= fetch < arrive timestamps",
+        "valid_timing_rows": 546364,
+        "valid_dispatch_rows": 546364,
+        "pre_definition": "order creation/payment to fetch; includes waiting and preparation",
+        "post_definition": "fetch to arrival; includes travel and unobserved handoff/stops",
+        "dispatch_definition": "order creation to rider acceptance; unavailable in Nanshan",
+        "demand_rule": "all accepted source orders retained regardless of timing validity or prebooking",
+        "demand_exposure_hours": 8,
+        "candidate_hour_window": [
+          8,
+          24
+        ],
+        "demand_hour_window": [
+          12,
+          13
+        ],
+        "crop_center_local_km": [
+          -0.75,
+          3.25
+        ],
+        "crop_half_size_km": 2.8867513459481287,
+        "crop_bounds_local_km": {
+          "x_min": -3.6367513459481287,
+          "x_max": 2.1367513459481287,
+          "y_min": 0.36324865405187134,
+          "y_max": 6.136751345948129
+        },
+        "crop_rule": "both pickup and dropoff endpoints within inclusive square bounds",
+        "selected_date_orders": 568546,
+        "all_day_orders_in_area": 170681,
+        "candidate_orders_in_area": 162826,
+        "demand_orders_in_area": 17382,
+        "excluded_spatial_orders": 397865,
+        "valid_demand_timing_rows": 17207,
+        "raw_hourly_demand": 2172.75,
+        "aggregation": {
+          "method": "weighted_bisecting_kmeans_observed_joint_od_representatives",
+          "seed": 43,
+          "orders": 17382,
+          "unique_input_od": 17100,
+          "clusters": 50,
+          "assigned_orders": 17382,
+          "unassigned_orders": 0,
+          "smallest_cluster_orders": 153,
+          "largest_cluster_orders": 602,
+          "origin_distortion": {
+            "mean_km": 0.5068354725009118,
+            "rms_km": 0.6365619215218556,
+            "max_km": 3.375411606084563
+          },
+          "destination_distortion": {
+            "mean_km": 0.5772779472427708,
+            "rms_km": 0.6649147824577207,
+            "max_km": 2.5389313138869607
+          },
+          "joint_distortion": {
+            "mean_km": 0.8361045084093138,
+            "rms_km": 0.920501356795521,
+            "max_km": 3.375687933037674
+          }
+        },
+        "deadline_estimation": "OD post-fetch sample means shrunk with five observations of fitted distance prior",
+        "candidate_expansion": {
+          "old_hub_count": 10,
+          "new_hub_count": 20,
+          "old_hub_locations_preserved": true,
+          "pool_size": 40,
+          "pool_seed": 45,
+          "selection_steps": [
+            {
+              "site_id": "H10",
+              "pool_id": 28,
+              "selection_order": 1,
+              "x_km": 0.1391476176377189,
+              "y_km": 4.564565279999312,
+              "pool_cluster_observations": 4848,
+              "weighted_squared_distance_reduction_km2_observations": 11847.210698129196,
+              "weighted_nearest_rms_km": 0.5995826746515056
+            },
+            {
+              "site_id": "H11",
+              "pool_id": 11,
+              "selection_order": 2,
+              "x_km": -2.0039814372910656,
+              "y_km": 2.941185719999904,
+              "pool_cluster_observations": 6336,
+              "weighted_squared_distance_reduction_km2_observations": 10872.814780904471,
+              "weighted_nearest_rms_km": 0.5710617743839351
+            },
+            {
+              "site_id": "H12",
+              "pool_id": 32,
+              "selection_order": 3,
+              "x_km": 0.8253147056647419,
+              "y_km": 2.139681719999399,
+              "pool_cluster_observations": 7899,
+              "weighted_squared_distance_reduction_km2_observations": 8477.87067142205,
+              "weighted_nearest_rms_km": 0.5477937764470198
+            },
+            {
+              "site_id": "H13",
+              "pool_id": 34,
+              "selection_order": 4,
+              "x_km": 0.9869754856105669,
+              "y_km": 0.8114114800000112,
+              "pool_cluster_observations": 6919,
+              "weighted_squared_distance_reduction_km2_observations": 6311.634283289311,
+              "weighted_nearest_rms_km": 0.5298079752772588
+            },
+            {
+              "site_id": "H14",
+              "pool_id": 25,
+              "selection_order": 5,
+              "x_km": -0.13325777138800218,
+              "y_km": 2.131221399999403,
+              "pool_cluster_observations": 10468,
+              "weighted_squared_distance_reduction_km2_observations": 5126.10954642692,
+              "weighted_nearest_rms_km": 0.5147382100726212
+            },
+            {
+              "site_id": "H15",
+              "pool_id": 39,
+              "selection_order": 6,
+              "x_km": 1.9782521089405174,
+              "y_km": 0.9915272399992829,
+              "pool_cluster_observations": 8484,
+              "weighted_squared_distance_reduction_km2_observations": 4919.630587961363,
+              "weighted_nearest_rms_km": 0.4998483840373627
+            },
+            {
+              "site_id": "H16",
+              "pool_id": 24,
+              "selection_order": 7,
+              "x_km": -0.5746862481678396,
+              "y_km": 0.9595783999992664,
+              "pool_cluster_observations": 10218,
+              "weighted_squared_distance_reduction_km2_observations": 4826.992254384318,
+              "weighted_nearest_rms_km": 0.48479465702077784
+            },
+            {
+              "site_id": "H17",
+              "pool_id": 35,
+              "selection_order": 8,
+              "x_km": 1.4218166343475813,
+              "y_km": 4.860231199999509,
+              "pool_cluster_observations": 2373,
+              "weighted_squared_distance_reduction_km2_observations": 4158.177576592063,
+              "weighted_nearest_rms_km": 0.4714414948458037
+            },
+            {
+              "site_id": "H18",
+              "pool_id": 37,
+              "selection_order": 9,
+              "x_km": 1.5427134784103969,
+              "y_km": 2.6446292399995825,
+              "pool_cluster_observations": 9044,
+              "weighted_squared_distance_reduction_km2_observations": 3840.571468402072,
+              "weighted_nearest_rms_km": 0.4587631192945931
+            },
+            {
+              "site_id": "H19",
+              "pool_id": 2,
+              "selection_order": 10,
+              "x_km": -3.2196922019045653,
+              "y_km": 1.1757618399992293,
+              "pool_cluster_observations": 6863,
+              "weighted_squared_distance_reduction_km2_observations": 3126.6648983023874,
+              "weighted_nearest_rms_km": 0.4481766993293035
+            }
+          ],
+          "selection_method": "weighted BisectingKMeans observed representatives; lock original ten H; greedily add ten pool locations maximizing reduction in all observed endpoints' weighted squared nearest-H distance",
+          "selection_uses_solver_results": false,
+          "total_endpoint_observations": 325652,
+          "unique_endpoint_locations": 108960,
+          "before_weighted_nearest_rms_km": 0.6291894435822958,
+          "after_weighted_nearest_rms_km": 0.4481766993293035,
+          "market_reclustered": false,
+          "calibration_refit": false
+        }
+      },
+      "assumptions": {
+        "compatibility": "explicit distance scenario; not estimated from observed continuation; intersected with complete feasible two-order path support over the fixed candidate network",
+        "rider_mean": "saved/calibrated empirical distance slope",
+        "rider_distribution": "exponential working assumption; data identify mean only",
+        "receipt": "scenario: courier removal delay plus calibrated locker-to-customer travel",
+        "removal": "separate terminal self_pickup_removal_minutes/courier_removal_minutes scenario inputs",
+        "choice": "fixed exogenous pickup-minus-home distance/time/price differences; separate walking penalty",
+        "deadline": "saved/calibrated OD mean delivery deadline",
+        "infrastructure_costs": "explicit scenario investment divided by operating depreciation hours",
+        "market_costs": "saved OD courier baseline and feeder tariffs preserved when available",
+        "capacity": "configured integer physical compartments, never legacy workload-rate capacity",
+        "demand": "original OD identities and rates preserved, then explicit demand_scale applied",
+        "flight_network": "L/H only; E facilities and legacy paths excluded"
+      },
+      "compatibility_screen": {
+        "method": "complete_two_order_path_existence",
+        "complete": true,
+        "scope": "direct",
+        "network_scope": "all fixed candidate facilities and allowed routes, before optimization",
+        "screening_max_orders": 2,
+        "window_hours": 0.008333333333333333,
+        "proposed_pairs": 1066,
+        "retained_pairs": 851,
+        "removed_pairs": 215,
+        "removed_od_pairs": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            4
+          ],
+          [
+            0,
+            9
+          ],
+          [
+            0,
+            10
+          ],
+          [
+            0,
+            11
+          ],
+          [
+            0,
+            12
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            1,
+            10
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            15
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            3,
+            2
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            3,
+            6
+          ],
+          [
+            3,
+            7
+          ],
+          [
+            3,
+            8
+          ],
+          [
+            3,
+            9
+          ],
+          [
+            3,
+            10
+          ],
+          [
+            3,
+            11
+          ],
+          [
+            3,
+            12
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            4,
+            10
+          ],
+          [
+            4,
+            20
+          ],
+          [
+            4,
+            30
+          ],
+          [
+            5,
+            3
+          ],
+          [
+            5,
+            15
+          ],
+          [
+            5,
+            20
+          ],
+          [
+            6,
+            3
+          ],
+          [
+            6,
+            15
+          ],
+          [
+            7,
+            3
+          ],
+          [
+            7,
+            10
+          ],
+          [
+            7,
+            20
+          ],
+          [
+            8,
+            3
+          ],
+          [
+            8,
+            15
+          ],
+          [
+            8,
+            20
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            1
+          ],
+          [
+            9,
+            3
+          ],
+          [
+            9,
+            10
+          ],
+          [
+            9,
+            12
+          ],
+          [
+            10,
+            9
+          ],
+          [
+            10,
+            10
+          ],
+          [
+            10,
+            11
+          ],
+          [
+            10,
+            12
+          ],
+          [
+            10,
+            30
+          ],
+          [
+            11,
+            3
+          ],
+          [
+            11,
+            10
+          ],
+          [
+            11,
+            12
+          ],
+          [
+            11,
+            30
+          ],
+          [
+            12,
+            0
+          ],
+          [
+            12,
+            3
+          ],
+          [
+            12,
+            10
+          ],
+          [
+            13,
+            3
+          ],
+          [
+            13,
+            15
+          ],
+          [
+            13,
+            20
+          ],
+          [
+            14,
+            0
+          ],
+          [
+            14,
+            3
+          ],
+          [
+            14,
+            10
+          ],
+          [
+            14,
+            30
+          ],
+          [
+            15,
+            2
+          ],
+          [
+            15,
+            7
+          ],
+          [
+            15,
+            8
+          ],
+          [
+            15,
+            13
+          ],
+          [
+            15,
+            14
+          ],
+          [
+            15,
+            15
+          ],
+          [
+            15,
+            16
+          ],
+          [
+            15,
+            17
+          ],
+          [
+            15,
+            18
+          ],
+          [
+            15,
+            19
+          ],
+          [
+            15,
+            20
+          ],
+          [
+            15,
+            21
+          ],
+          [
+            15,
+            22
+          ],
+          [
+            15,
+            23
+          ],
+          [
+            15,
+            24
+          ],
+          [
+            15,
+            25
+          ],
+          [
+            15,
+            26
+          ],
+          [
+            15,
+            27
+          ],
+          [
+            15,
+            28
+          ],
+          [
+            15,
+            29
+          ],
+          [
+            15,
+            31
+          ],
+          [
+            15,
+            32
+          ],
+          [
+            15,
+            33
+          ],
+          [
+            15,
+            35
+          ],
+          [
+            16,
+            15
+          ],
+          [
+            17,
+            3
+          ],
+          [
+            17,
+            10
+          ],
+          [
+            17,
+            15
+          ],
+          [
+            17,
+            30
+          ],
+          [
+            17,
+            39
+          ],
+          [
+            18,
+            0
+          ],
+          [
+            18,
+            3
+          ],
+          [
+            18,
+            10
+          ],
+          [
+            19,
+            0
+          ],
+          [
+            19,
+            10
+          ],
+          [
+            19,
+            30
+          ],
+          [
+            20,
+            3
+          ],
+          [
+            20,
+            15
+          ],
+          [
+            20,
+            20
+          ],
+          [
+            20,
+            30
+          ],
+          [
+            20,
+            39
+          ],
+          [
+            21,
+            30
+          ],
+          [
+            21,
+            39
+          ],
+          [
+            22,
+            20
+          ],
+          [
+            22,
+            39
+          ],
+          [
+            22,
+            41
+          ],
+          [
+            23,
+            20
+          ],
+          [
+            23,
+            30
+          ],
+          [
+            23,
+            39
+          ],
+          [
+            24,
+            15
+          ],
+          [
+            24,
+            20
+          ],
+          [
+            25,
+            3
+          ],
+          [
+            25,
+            10
+          ],
+          [
+            25,
+            15
+          ],
+          [
+            25,
+            20
+          ],
+          [
+            25,
+            30
+          ],
+          [
+            26,
+            3
+          ],
+          [
+            26,
+            10
+          ],
+          [
+            26,
+            20
+          ],
+          [
+            27,
+            3
+          ],
+          [
+            27,
+            15
+          ],
+          [
+            27,
+            20
+          ],
+          [
+            28,
+            39
+          ],
+          [
+            29,
+            3
+          ],
+          [
+            29,
+            15
+          ],
+          [
+            30,
+            9
+          ],
+          [
+            30,
+            10
+          ],
+          [
+            30,
+            11
+          ],
+          [
+            30,
+            12
+          ],
+          [
+            30,
+            30
+          ],
+          [
+            30,
+            34
+          ],
+          [
+            30,
+            42
+          ],
+          [
+            31,
+            15
+          ],
+          [
+            31,
+            20
+          ],
+          [
+            32,
+            20
+          ],
+          [
+            32,
+            30
+          ],
+          [
+            32,
+            39
+          ],
+          [
+            33,
+            30
+          ],
+          [
+            33,
+            39
+          ],
+          [
+            33,
+            42
+          ],
+          [
+            34,
+            30
+          ],
+          [
+            34,
+            39
+          ],
+          [
+            34,
+            42
+          ],
+          [
+            36,
+            15
+          ],
+          [
+            36,
+            30
+          ],
+          [
+            36,
+            39
+          ],
+          [
+            37,
+            30
+          ],
+          [
+            37,
+            39
+          ],
+          [
+            37,
+            42
+          ],
+          [
+            38,
+            39
+          ],
+          [
+            39,
+            18
+          ],
+          [
+            39,
+            19
+          ],
+          [
+            39,
+            20
+          ],
+          [
+            39,
+            22
+          ],
+          [
+            39,
+            23
+          ],
+          [
+            39,
+            24
+          ],
+          [
+            39,
+            25
+          ],
+          [
+            39,
+            26
+          ],
+          [
+            39,
+            27
+          ],
+          [
+            39,
+            28
+          ],
+          [
+            39,
+            29
+          ],
+          [
+            39,
+            30
+          ],
+          [
+            39,
+            31
+          ],
+          [
+            39,
+            32
+          ],
+          [
+            39,
+            33
+          ],
+          [
+            39,
+            34
+          ],
+          [
+            39,
+            35
+          ],
+          [
+            39,
+            36
+          ],
+          [
+            39,
+            37
+          ],
+          [
+            39,
+            38
+          ],
+          [
+            39,
+            39
+          ],
+          [
+            39,
+            40
+          ],
+          [
+            39,
+            41
+          ],
+          [
+            39,
+            42
+          ],
+          [
+            39,
+            43
+          ],
+          [
+            39,
+            47
+          ],
+          [
+            39,
+            49
+          ],
+          [
+            40,
+            20
+          ],
+          [
+            40,
+            30
+          ],
+          [
+            40,
+            39
+          ],
+          [
+            40,
+            42
+          ],
+          [
+            41,
+            3
+          ],
+          [
+            41,
+            5
+          ],
+          [
+            41,
+            15
+          ],
+          [
+            41,
+            21
+          ],
+          [
+            41,
+            37
+          ],
+          [
+            42,
+            30
+          ],
+          [
+            42,
+            34
+          ],
+          [
+            42,
+            37
+          ],
+          [
+            42,
+            38
+          ],
+          [
+            42,
+            39
+          ],
+          [
+            42,
+            40
+          ],
+          [
+            42,
+            42
+          ],
+          [
+            42,
+            43
+          ],
+          [
+            42,
+            47
+          ],
+          [
+            42,
+            49
+          ],
+          [
+            43,
+            30
+          ],
+          [
+            43,
+            39
+          ],
+          [
+            43,
+            42
+          ],
+          [
+            44,
+            20
+          ],
+          [
+            44,
+            39
+          ],
+          [
+            45,
+            20
+          ],
+          [
+            45,
+            30
+          ],
+          [
+            45,
+            39
+          ],
+          [
+            46,
+            39
+          ],
+          [
+            46,
+            42
+          ],
+          [
+            47,
+            20
+          ],
+          [
+            47,
+            30
+          ],
+          [
+            47,
+            39
+          ],
+          [
+            48,
+            39
+          ],
+          [
+            49,
+            39
+          ]
+        ],
+        "retained_self_pairs": 33,
+        "complete_double_paths": 35167,
+        "base_pairs": [
+          {
+            "departure": 0,
+            "return": 0,
+            "supported_pairs": 792,
+            "globally_retained_but_unavailable": 59,
+            "complete_double_paths": 7891
+          },
+          {
+            "departure": 0,
+            "return": 1,
+            "supported_pairs": 789,
+            "globally_retained_but_unavailable": 62,
+            "complete_double_paths": 9292
+          },
+          {
+            "departure": 1,
+            "return": 0,
+            "supported_pairs": 783,
+            "globally_retained_but_unavailable": 68,
+            "complete_double_paths": 8309
+          },
+          {
+            "departure": 1,
+            "return": 1,
+            "supported_pairs": 741,
+            "globally_retained_but_unavailable": 110,
+            "complete_double_paths": 9675
+          }
+        ],
+        "interpretation": "positive kappa requires one complete physical double path somewhere in the declared network; selected base-pair feasibility remains a solver constraint"
+      }
+    },
+    "od_pairs": [
+      [
+        "O00000",
+        "D00000"
+      ],
+      [
+        "O00001",
+        "D00001"
+      ],
+      [
+        "O00002",
+        "D00002"
+      ],
+      [
+        "O00003",
+        "D00003"
+      ],
+      [
+        "O00004",
+        "D00004"
+      ],
+      [
+        "O00005",
+        "D00005"
+      ],
+      [
+        "O00006",
+        "D00006"
+      ],
+      [
+        "O00007",
+        "D00007"
+      ],
+      [
+        "O00008",
+        "D00008"
+      ],
+      [
+        "O00009",
+        "D00009"
+      ],
+      [
+        "O00010",
+        "D00010"
+      ],
+      [
+        "O00011",
+        "D00011"
+      ],
+      [
+        "O00012",
+        "D00012"
+      ],
+      [
+        "O00013",
+        "D00013"
+      ],
+      [
+        "O00014",
+        "D00014"
+      ],
+      [
+        "O00015",
+        "D00015"
+      ],
+      [
+        "O00016",
+        "D00016"
+      ],
+      [
+        "O00017",
+        "D00017"
+      ],
+      [
+        "O00018",
+        "D00018"
+      ],
+      [
+        "O00019",
+        "D00019"
+      ],
+      [
+        "O00020",
+        "D00020"
+      ],
+      [
+        "O00021",
+        "D00021"
+      ],
+      [
+        "O00022",
+        "D00022"
+      ],
+      [
+        "O00023",
+        "D00023"
+      ],
+      [
+        "O00024",
+        "D00024"
+      ],
+      [
+        "O00025",
+        "D00025"
+      ],
+      [
+        "O00026",
+        "D00026"
+      ],
+      [
+        "O00027",
+        "D00027"
+      ],
+      [
+        "O00028",
+        "D00028"
+      ],
+      [
+        "O00029",
+        "D00029"
+      ],
+      [
+        "O00030",
+        "D00030"
+      ],
+      [
+        "O00031",
+        "D00031"
+      ],
+      [
+        "O00032",
+        "D00032"
+      ],
+      [
+        "O00033",
+        "D00033"
+      ],
+      [
+        "O00034",
+        "D00034"
+      ],
+      [
+        "O00035",
+        "D00035"
+      ],
+      [
+        "O00036",
+        "D00036"
+      ],
+      [
+        "O00037",
+        "D00037"
+      ],
+      [
+        "O00038",
+        "D00038"
+      ],
+      [
+        "O00039",
+        "D00039"
+      ],
+      [
+        "O00040",
+        "D00040"
+      ],
+      [
+        "O00041",
+        "D00041"
+      ],
+      [
+        "O00042",
+        "D00042"
+      ],
+      [
+        "O00043",
+        "D00043"
+      ],
+      [
+        "O00044",
+        "D00044"
+      ],
+      [
+        "O00045",
+        "D00045"
+      ],
+      [
+        "O00046",
+        "D00046"
+      ],
+      [
+        "O00047",
+        "D00047"
+      ],
+      [
+        "O00048",
+        "D00048"
+      ],
+      [
+        "O00049",
+        "D00049"
+      ]
+    ],
+    "n_od": 50
+  },
+  "arrays": {
+    "demand": {
+      "shape": [
+        50
+      ],
+      "dtype": "float64"
+    },
+    "flight_times": {
+      "shape": [
+        22,
+        22
+      ],
+      "dtype": "float64"
+    },
+    "rider_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "first_cost": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "terminal_cost": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "receipt_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "removal_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "ground_cost": {
+      "shape": [
+        50
+      ],
+      "dtype": "float64"
+    },
+    "deadline": {
+      "shape": [
+        50
+      ],
+      "dtype": "float64"
+    },
+    "base_cost": {
+      "shape": [
+        2
+      ],
+      "dtype": "float64"
+    },
+    "slot_counts": {
+      "shape": [
+        20,
+        5
+      ],
+      "dtype": "int64"
+    },
+    "slot_cost": {
+      "shape": [
+        20,
+        5
+      ],
+      "dtype": "float64"
+    },
+    "slot_epsilon": {
+      "shape": [
+        20
+      ],
+      "dtype": "float64"
+    },
+    "link_cost": {
+      "shape": [
+        22,
+        22
+      ],
+      "dtype": "float64"
+    },
+    "kappa": {
+      "shape": [
+        50,
+        50
+      ],
+      "dtype": "float64"
+    },
+    "allowed_links": {
+      "shape": [
+        22,
+        22
+      ],
+      "dtype": "bool"
+    },
+    "bases": {
+      "shape": [
+        2,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "hubs": {
+      "shape": [
+        20,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "origins": {
+      "shape": [
+        50,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "destinations": {
+      "shape": [
+        50,
+        2
+      ],
+      "dtype": "float64"
+    },
+    "od_origin": {
+      "shape": [
+        50
+      ],
+      "dtype": "int64"
+    },
+    "od_destination": {
+      "shape": [
+        50
+      ],
+      "dtype": "int64"
+    },
+    "pickup_share": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "last_rider_cost": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    },
+    "last_rider_mean": {
+      "shape": [
+        50,
+        20
+      ],
+      "dtype": "float64"
+    }
+  }
+}
