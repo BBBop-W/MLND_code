@@ -1,0 +1,116 @@
+{
+  "document": "MLND abstract and Introduction revision",
+  "scope": "Editorial draft; no submission or external manuscript transfer",
+  "source_snapshot_sha256": "98b8560a9c9466728b76dfe035aff08a81d05dc33209c92b81af62a54d020c4b",
+  "sources": [
+    {
+      "evidence_id": "E001",
+      "citation_key": null,
+      "title": "Current MLND manuscript model and algorithm",
+      "year": null,
+      "url": null,
+      "locator": "Sections 3-5; Appendix C; source snapshot recorded below",
+      "confidentiality": "unpublished local manuscript",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E002",
+      "citation_key": "Meituan2026DroneOperations",
+      "title": "Meituan routine low-altitude delivery network announcement",
+      "year": 2026,
+      "url": "https://www.meituan.com/news/NN260522185005269",
+      "locator": "2026-05-21 article opening",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E003",
+      "citation_key": "dongRealtimeOrder2026TRB",
+      "title": "Real-time order dispatch for on-demand food-delivery platforms with a mixed fleet of drones and couriers",
+      "year": 2026,
+      "url": "https://doi.org/10.1016/j.trb.2026.103449",
+      "locator": "Publisher indexed introduction and abstract; not a retrieved complete PDF",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E004",
+      "citation_key": "heServiceRegion2017M&SOM",
+      "title": "Service Region Design for Urban Electric Vehicle Sharing Systems",
+      "year": 2017,
+      "url": "https://doi.org/10.1287/msom.2016.0611",
+      "locator": "Published PDF pp.309-311, especially p.311",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E005",
+      "citation_key": "wangVertiportPlanning2022M&SOM",
+      "title": "Vertiport Planning for Urban Aerial Mobility: An Adaptive Discretization Approach",
+      "year": 2022,
+      "url": "https://doi.org/10.1287/msom.2022.1148",
+      "locator": "Published PDF pp.3215-3217",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E006",
+      "citation_key": "wangLockerAlliance2026",
+      "title": "Does the Locker Alliance Network Improve Last Mile Delivery Efficiency?",
+      "year": 2026,
+      "url": "https://doi.org/10.1287/mnsc.2024.04567",
+      "locator": "Published PDF pp.4124-4127; verified publisher volume 72(5)",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E007",
+      "citation_key": "chenCoordinatedDroneCourier2025",
+      "title": "On Coordinated Drone-Courier Logistics for Intra-city Express Services",
+      "year": 2025,
+      "url": "https://arxiv.org/abs/2501.05200",
+      "locator": "Preprint v1 pp.1-9; no journal publication claimed",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E008",
+      "citation_key": "liuJointInfrastructure2025",
+      "title": "Joint Infrastructure Planning and Order Assignment for On-Demand Food-Delivery Services with Coordinated Drones and Human Couriers",
+      "year": 2025,
+      "url": "https://arxiv.org/abs/2501.14325",
+      "locator": "Preprint v1 pp.1-6; no journal publication claimed",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    },
+    {
+      "evidence_id": "E009",
+      "citation_key": "bayramHubNetwork2023TransportationScience",
+      "title": "Hub Network Design Problem with Capacity, Congestion, and Stochastic Demand Considerations",
+      "year": 2023,
+      "url": "https://doi.org/10.1287/trsc.2022.0112",
+      "locator": "Published PDF pp.1276-1278; accepted manuscript Sections 1-2",
+      "confidentiality": "public",
+      "source_opened": true,
+      "agent_check_date": "2026-11-12",
+      "verification_status": "agent_checked_author_review_pending"
+    }
+  ],
+  "retrieval_note": "A bounded Crossref curl lookup failed because the configured local proxy was unavailable. Publisher pages, author versions, and local original PDFs supplied evidence; failure was not interpreted as missing literature. Human verification is not asserted."
+}

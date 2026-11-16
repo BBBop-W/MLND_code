@@ -55,6 +55,9 @@ $(BUILD_DIR)/mlnd_pricing_state_probe: tests/pricing_state_probe.cpp src/benders
 $(BUILD_DIR)/mlnd_performance_state_probe: tests/performance_state_probe.cpp src/benders.cpp $(filter-out $(BUILD_DIR)/benders.o,$(CORE_OBJECTS))
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) $< $(filter %.o,$^) $(LDLIBS) -o $@
 
+$(BUILD_DIR)/mlnd_primal_recovery_probe: tests/primal_recovery_probe.cpp tests/performance_state_probe.cpp src/benders.cpp $(filter-out $(BUILD_DIR)/benders.o,$(CORE_OBJECTS))
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) $< $(filter %.o,$^) $(LDLIBS) -o $@
+
 $(BUILD_DIR)/mlnd_%_probe: tests/%_probe.cpp $(CORE_OBJECTS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 

@@ -67,6 +67,9 @@ struct Subproblem {
     Json continuous_operating_point = nullptr;
     bool full_bound_valid = false;
     bool recourse_optimal = false;
+    // No numerical profile was spent when the local slice could not provide
+    // a meaningful recovery solve. The caller may grant one bounded resume.
+    bool primal_recovery_deferred = false;
     bool conditional_demand = false;
     Json model_size = nullptr;
 };
@@ -1115,10 +1118,20 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
         while (primal_retries_for_columns < 3) {
             if (recovered_primal) break;
             if (solved.has_solution && solved.optimal && point_feasible(solved)) break;
-            if (remaining(deadline)<=0) break;
-            const int profile = ++primal_retries_for_columns;
+            // Preserve untried profiles across short scheduling slices. Model
+            // extraction also consumes this deadline, so check both sides of it.
+            constexpr double minimum_recovery_seconds=1.0;
+            if (std::min(20.0,.25*remaining(deadline))<minimum_recovery_seconds) {
+                result.primal_recovery_deferred=true;break;
+            }
+            const int profile = primal_retries_for_columns+1;
             auto recovery=tighter_primal(profile);
-            auto candidate=recovery->optimize(std::min(20.0,.25*remaining(deadline)));
+            const double recovery_seconds=std::min(20.0,.25*remaining(deadline));
+            if(recovery_seconds<minimum_recovery_seconds) {
+                result.primal_recovery_deferred=true;break;
+            }
+            ++primal_retries_for_columns;
+            auto candidate=recovery->optimize(recovery_seconds);
             // A rejected local candidate may reuse the same stack address on
             // the next recovery attempt, but it is a new optimizer point.
             invalidate_assessment();
@@ -1131,6 +1144,7 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
             }
         }
         iteration["same_column_primal_retries"] = primal_retries_for_columns;
+        iteration["primal_recovery_deferred"] = result.primal_recovery_deferred;
         iteration["rmp_seconds"] = wall_time() - phase;
         iteration["rmp_status"] = solved.status;
         iteration["rmp_optimal"] = solved.optimal;
@@ -2376,6 +2390,8 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     double last_restricted_search = started, integer_resource_seconds = 0;
     Json search_schedule_records = Json::array();
     std::vector<double> pending_design;
+    bool pending_primal_recovery=false;
+    int candidate_recovery_resumes=0,primal_recovery_resumes=0;
     Json pending_primal=nullptr;
     double pending_theta = 0;
     std::string active_candidate, pending_candidate;
@@ -3853,6 +3869,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         }
         if(pending_design.empty())latest_master_point=solved.values;
         const bool resumed_design = !pending_design.empty();
+        if(!resumed_design)candidate_recovery_resumes=0;
         active_candidate = resumed_design ? pending_candidate : (stabilized_candidate?"stabilized:":"integer:") + std::to_string(integer_master_solves);
         // Add both cut families before reoptimizing the integer master. If CG
         // needs another slice, retain this candidate and its already valid cut.
@@ -4096,6 +4113,8 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         std::string design_key;
         for (double bit : design) design_key.push_back(bit > .5 ? '1' : '0');
         if(options.primal_alns)run_primal_window(false);
+        const bool recovery_slice=resumed_design && pending_primal_recovery;
+        pending_primal_recovery=false;
         pending_design.clear();
         pending_candidate.clear();
         std::vector<int> selected_p(pool_p.begin(), pool_p.end()), selected_e(pool_e.begin(), pool_e.end());
@@ -4113,7 +4132,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         const double pareto_allowance = std::min(options.pareto_call_seconds,
             std::max(2.0, 3 * previous_dual_seconds) * std::pow(2.0, std::min(4, pareto_budget_failures)));
         sub_options.pareto_call_seconds = std::min({pareto_allowance, std::max(0.0,pareto_left), .2 * remaining(deadline)});
-        const double sub_deadline = options.primal_alns
+        const double sub_deadline = recovery_slice ? std::min(deadline,wall_time()+30.0) : options.primal_alns
             ? std::min(deadline,wall_time()+std::max(.01,primal_schedule.cg_slice(wall_time(),remaining(deadline))))
             : options.restricted_mip ? std::min(deadline,wall_time()+std::max(1.0,.45*options.seconds)) : deadline;
         const int cuts_before = cuts;
@@ -4203,7 +4222,20 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             restricted_search("generated_column_mip", -1);
         if (!options.search_scheduling && options.restricted_mip && options.local_branching && (cg_call + 1) % (2 * options.heuristic_frequency) == 0)
             restricted_search("local_branching", options.local_branching_radius);
-        if(options.primal_alns && !sub.recourse_optimal && remaining(deadline)>0 &&
+        if(sub.primal_recovery_deferred && !sub.ordinary.valid &&
+           candidate_recovery_resumes<1 && remaining(deadline)>=4.0 && sub_deadline<deadline) {
+            pending_design=design;pending_candidate=active_candidate;pending_theta=candidate_theta;
+            pending_primal=std::move(resume_primal);pending_primal_recovery=true;
+            ++candidate_recovery_resumes;++primal_recovery_resumes;
+            iterations.back()["termination_reason"]="yield_for_primal_recovery";
+            iterations.back()["cg_termination_reason"]=sub.reason;
+            if(options.progress)options.progress->record({{"event","yield_for_primal_recovery"},
+                {"candidate_id",active_candidate},{"resume_limit",1},{"slice_limit_seconds",30.0},
+                {"retained_primal",!pending_primal.is_null()}});
+            continue;
+        }
+        if(options.primal_alns && !sub.recourse_optimal && !sub.primal_recovery_deferred &&
+           sub.reason!="primal_validation_failed" && remaining(deadline)>0 &&
            wall_time()>=sub_deadline-.05 && sub_deadline<deadline) {
             pending_design=design;pending_candidate=active_candidate;pending_theta=candidate_theta;
             pending_primal=std::move(resume_primal);++primal_yields;
@@ -4327,6 +4359,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["stabilized_master_summary"]={{"enabled",options.stabilized_master},{"seconds",stabilized_master_seconds},
         {"calls",stabilized_master_records.size()},{"trial_bound_used_globally",false}};
     best["bound"] = lower;
+    best["primal_recovery_resumes"] = primal_recovery_resumes;
     best["gap"] = gap(upper, lower);
     best["termination_reason"] = reason;
     best["budget_interruption"] = budget_interruption;

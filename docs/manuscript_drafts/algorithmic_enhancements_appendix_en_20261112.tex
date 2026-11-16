@@ -1,0 +1,176 @@
+% Review draft; insert after the manuscript's existing \appendix command.
+% Requires the companion main-text snippet and existing amsmath/amsthm setup.
+% Each prose sentence occupies a separate source line.
+\section{Derivations and supplementary details for the algorithmic enhancements}
+\label{app:enhancements}
+
+\subsection{Extended polymatroid inequalities}
+\label{app:enh-queue}
+
+The following derivation assumes the fixed task rates used in the planning model and the complete physical path domain, including all admissible return bases.
+Write $f=f^{\mathrm{fleet}}>0$ within this subsection.
+Let $n_{rq}$ denote the number of occurrences of OD pair $r$ in task $q$.
+Demand conservation gives $h_r=\sum_q n_{rq}\hbar_q$, and $g_q=\sum_r n_{rq}c_r^{\mathrm{direct}}$.
+In particular, a task containing two orders from the same OD pair contributes twice to both expressions.
+
+\begin{proposition}
+\label{prop:enh-queue-bound}
+For every integer design $\boldsymbol d\in\mathcal X$, inequality~\eqref{eq:enh-queue-bound} holds.
+Moreover, each function $v_l$ in \eqref{eq:enh-queue-function} is normalized and submodular.
+\end{proposition}
+
+\begin{proof}
+Fix an integer design $\boldsymbol d$ and any feasible operating solution $u$, and denote its cost by $c_{\mathrm{op}}(\boldsymbol d,u)$.
+Eliminating direct-courier flows through demand conservation and using the fleet requirement gives
+\begin{equation}
+    \begin{aligned}
+    c_{\mathrm{op}}(\boldsymbol d,u)
+    \ge {}& C^{\mathrm R}+f\sum_{l\in\mathcal L}I_l\\
+    &+\sum_{q\in\hat{\mathcal R}}\sum_{l\in\mathcal L}
+      \sum_{p\in\mathcal P_{ql}}
+      \bigl(c_p+f\bar T_p-g_q\bigr)\psi_p\\
+    &+\sum_{k\in\mathcal K}(c_k+f\bar T_k)\varphi_k.
+    \end{aligned}
+    \label{eq:enh-app-cost}
+\end{equation}
+For a nonempty task path set, its contribution to the second line is at least $-S_{ql}\alpha_{ql}\rho_l$, by \eqref{eq:enh-task-savings} and the task-flow equality $\sum_{p\in\mathcal P_{ql}}\psi_p=\hbar_q\alpha_{ql}\rho_l$.
+If $\hbar_q=0$, all associated service flows vanish.
+If $\hbar_q>0$ and $\mathcal P_{ql}=\varnothing$, the same equality forces $\alpha_{ql}\rho_l=0$.
+Hence, the bound also holds under the stated zero-coefficient conventions.
+Using $I_l\ge\rho_l/(1-\rho_l)$ and dropping the nonnegative repositioning contribution yields
+\begin{equation}
+    c_{\mathrm{op}}(\boldsymbol d,u)
+    \ge C^{\mathrm R}+\sum_{l\in\mathcal L}
+    \left[f\frac{\rho_l}{1-\rho_l}
+    -\rho_l\sum_q S_{ql}\alpha_{ql}\right].
+    \label{eq:enh-app-rho-bound}
+\end{equation}
+For $s\ge0$, define
+\begin{equation}
+    \Phi(s)
+    :=\sup_{0\le\rho<1}\left\{s\rho-f\frac{\rho}{1-\rho}\right\}
+    =\begin{cases}
+      0,&0\le s\le f,\\
+      (\sqrt{s}-\sqrt f)^2,&s>f.
+    \end{cases}
+    \label{eq:enh-app-phi}
+\end{equation}
+The maximizer is $\rho=0$ for $s\le f$ and $\rho=1-\sqrt{f/s}$ otherwise.
+Minimizing the right-hand side of \eqref{eq:enh-app-rho-bound} independently over $0\le\rho_l<1$, and then taking the infimum over feasible operating solutions on the left, proves \eqref{eq:enh-queue-bound}.
+Any additional restriction on availability in the original model can only increase the minimum operating cost.
+
+The function $\Phi$ is convex because it is the pointwise supremum of affine functions of $s$.
+Therefore, for $w\ge0$, the increment $\Phi(s+w)-\Phi(s)$ is nondecreasing in $s$.
+Since $v_l(A)=-\Phi(\sum_{q\in A}S_{ql})$ and $S_{ql}\ge0$, for $A\subseteq B$ and $q\notin B$ we obtain
+\begin{equation}
+    v_l(A\cup\{q\})-v_l(A)
+    \ge v_l(B\cup\{q\})-v_l(B).
+    \label{eq:enh-app-submodular}
+\end{equation}
+This establishes submodularity, while $\Phi(0)=0$ gives $v_l(\varnothing)=0$.
+\end{proof}
+
+\begin{proposition}
+\label{prop:enh-epi}
+Inequality~\eqref{eq:enh-queue-epi} is valid for the integer operating-cost epigraph and its convex hull for every choice of the permutations $\pi_l$.
+For fixed coefficients $S_{ql}$, a most violated inequality in this family is obtained by sorting the current assignment values in nonincreasing order for each base.
+\end{proposition}
+
+\begin{proof}
+Fix a base and suppress its index.
+For a permutation $\pi$, let $A_j$ be its prefix sets and $m_{\pi(j)}=v(A_j)-v(A_{j-1})$.
+For any task subset $T$ and each $\pi(j)\in T$, submodularity implies
+\[
+    v(T\cap A_j)-v(T\cap A_{j-1})
+    \ge v(A_j)-v(A_{j-1})=m_{\pi(j)}.
+\]
+Summing these inequalities and using $v(\varnothing)=0$ gives $\sum_{q\in T}m_q\le v(T)$.
+Applying this result to $T=A_l(\boldsymbol d)$ at each base and using \eqref{eq:enh-queue-bound} proves validity at every integer epigraph point.
+Linearity extends validity to its convex hull.
+
+To prove exact separation, set $x_q=\bar\alpha_{ql}$ and choose $\pi$ such that $x_{\pi(1)}\ge\cdots\ge x_{\pi(n)}\ge0$, with $x_{\pi(n+1)}=0$.
+Let $a$ be the marginal coefficient vector associated with any other permutation, and write $a(A)=\sum_{q\in A}a_q$.
+The preceding argument gives $a(A_j)\le v(A_j)$, so summation by parts yields
+\begin{equation}
+    \begin{aligned}
+    a^\top x
+    &=\sum_{j=1}^{n}(x_{\pi(j)}-x_{\pi(j+1)})a(A_j)\\
+    &\le\sum_{j=1}^{n}(x_{\pi(j)}-x_{\pi(j+1)})v(A_j)
+    =m^\top x.
+    \end{aligned}
+    \label{eq:enh-app-separation}
+\end{equation}
+The last equality follows from $m(A_j)=v(A_j)$ for the sorted permutation.
+The permutations can be selected independently across bases, establishing the claim for \eqref{eq:enh-queue-epi}.
+Ties may be broken arbitrarily.
+Once the coefficients $S_{ql}$ are available, separation requires $O(|\mathcal L|n\log n)$ time.
+\end{proof}
+
+The exact-separation statement concerns the permutation inequalities for the fixed functions $v_l$.
+It does not assert submodularity of the full operating value function or a convex-hull description of the complete planning model.
+
+\subsection{Disjunctive cuts}
+\label{app:enh-state}
+
+For a fixed task $q$, the state sets used in the main text are
+\begin{equation}
+    \begin{aligned}
+    \mathcal X_{q0}
+      &=\{\boldsymbol d\in\mathcal X:\alpha_{ql}=0\ \forall l\in\mathcal L\},\\
+    \mathcal X_{ql}
+      &=\{\boldsymbol d\in\mathcal X:\alpha_{ql}=1,\
+         \alpha_{qm}=0\ \forall m\in\mathcal L\setminus\{l\}\},
+         \quad l\in\mathcal L.
+    \end{aligned}
+    \label{eq:enh-app-states}
+\end{equation}
+All other design variables remain subject to their original constraints and are unfixed.
+For each state, the required total-cost bound satisfies
+\begin{equation}
+    b_{qs}\le
+    \inf_{\boldsymbol d\in\mathcal X_{qs}}
+    \left\{F(\boldsymbol d)+Q(\boldsymbol d)\right\},
+    \qquad s\in\{0\}\cup\mathcal L.
+    \label{eq:enh-state-bound}
+\end{equation}
+
+\begin{proposition}
+\label{prop:enh-state}
+For any finite bounds satisfying \eqref{eq:enh-state-bound}, inequality~\eqref{eq:enh-state-cut} is valid for the integer total-cost epigraph and its convex hull.
+\end{proposition}
+
+\begin{proof}
+Let $u_{q0}=1-\sum_{l\in\mathcal L}\alpha_{ql}$ and $u_{ql}=\alpha_{ql}$ for $l\in\mathcal L$.
+At every integer design, these indicators are nonnegative and sum to one, with exactly one equal to one.
+If that indicator corresponds to state $s$, then
+\[
+    F(\boldsymbol d)+\zeta
+    \ge F(\boldsymbol d)+Q(\boldsymbol d)
+    \ge b_{qs}
+    =\sum_{t\in\{0\}\cup\mathcal L}b_{qt}u_{qt}.
+\]
+Substituting the state indicators gives \eqref{eq:enh-state-cut}, and linearity establishes validity for the convex hull.
+\end{proof}
+
+For fixed state constants $b_{qs}$, the inequality also describes the lower boundary of the convex hull of the state epigraphs $\{(u,T):u=e_s,\ T\ge b_{qs}\}$, where $T$ denotes total cost.
+Indeed, a convex combination with weights $u_s$ has minimum ordinate $\sum_s b_{qs}u_s$.
+This statement concerns the relaxation defined by the state constants, rather than the full planning model.
+
+To obtain $b_{qs}$, we fix the assignment state and relax the remaining discrete design variables while retaining the complete physical operating domain.
+A certified lower bound for this relaxation satisfies \eqref{eq:enh-state-bound}.
+When the relaxation is solved by column generation, certification requires pricing over all admissible paths or a valid correction for omitted columns.
+The objective of a restricted-column feasible solution is insufficient for this purpose.
+An existing certified global total-cost lower bound provides a valid fallback for any state whose stronger bound has not been certified.
+Each selected task generates a separate inequality on the same total-cost epigraph.
+
+\subsection{Column reuse and incumbent initialization}
+\label{app:enh-warm}
+
+Generated service and repositioning paths are retained in a shared column pool and supplied as initial columns for subsequent restricted subproblems on the same physical path domain.
+Each subproblem is reoptimized for its current design, and complete-domain pricing remains responsible for lower-bound certification.
+The best available feasible design and its operating cost are supplied to the master as a MIP start.
+
+For the two-base formulation with single- and two-order tasks, an auxiliary adaptive large neighborhood search constructs and improves these incumbents.
+Neighborhoods are repaired by solving restrictions of the original MISOCP to selected path columns, retaining the physical flow, fleet, queueing, and capacity constraints.
+Accepted candidates are checked for feasibility and evaluated under the original objective before updating the incumbent.
+These restricted repairs provide upper-bound candidates; their local bounds are not used as global lower bounds.

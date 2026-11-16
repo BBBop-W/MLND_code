@@ -1,0 +1,98 @@
+% Complete review document for the existing editor preview.
+% Copy the marked subsection into the manuscript; the appendix and bibliography
+% remain separate supporting files in this same project.
+% Each prose sentence occupies a separate source line.
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage[authoryear,round]{natbib}
+\usepackage[hidelinks]{hyperref}
+\newtheorem{proposition}{Proposition}
+\setcounter{secnumdepth}{3}
+
+\begin{document}
+\section{Solution Method}
+
+% BEGIN MANUSCRIPT SUBSECTION
+\subsection{Algorithmic Enhancements}
+\label{sec:strengthening}
+
+We supplement the Benders optimality cuts with inequalities derived from the queueing structure and the mutually exclusive task-assignment states.
+
+\subsubsection{Cut Strengthening}
+
+\noindent\textbf{Extended polymatroid inequalities.}
+Tasks assigned to the same base share its availability, which couples the savings from drone service with the idle-fleet requirement.
+Let $g_q$ denote the direct-courier cost of serving all orders in a task of type $q$, so that $g_{(r)}=c_r^{\mathrm{direct}}$ and $g_{(r,s)}=c_r^{\mathrm{direct}}+c_s^{\mathrm{direct}}$.
+For each positive-rate task with $\mathcal P_{ql}\ne\varnothing$, define
+\begin{equation}
+    S_{ql}
+    =\hbar_q\left[g_q-
+    \min_{p\in\mathcal P_{ql}}
+    \left\{c_p+f^{\mathrm{fleet}}\bar T_p\right\}\right]_+,
+    \label{eq:enh-task-savings}
+\end{equation}
+where $[a]_+=\max\{a,0\}$ and the minimum is taken over the complete feasible path set.
+Set $S_{ql}=0$ when $\hbar_q=0$ or $\mathcal P_{ql}=\varnothing$.
+Thus, $S_{ql}$ is an upper bound on the savings attributable to task type $q$ at base $l$, before accounting for idle-fleet costs.
+For $A\subseteq\hat{\mathcal R}$, define
+\begin{equation}
+    v_l(A)
+    =-\left[\sqrt{\sum_{q\in A}S_{ql}}
+    -\sqrt{f^{\mathrm{fleet}}}\right]_+^2.
+    \label{eq:enh-queue-function}
+\end{equation}
+For every integer design $\boldsymbol d\in\mathcal X$, a relaxation of the operating problem yields
+\begin{equation}
+    Q(\boldsymbol d)
+    \ge C^{\mathrm R}
+    +\sum_{l\in\mathcal L}v_l\bigl(A_l(\boldsymbol d)\bigr),
+    \qquad
+    A_l(\boldsymbol d)=\{q\in\hat{\mathcal R}:\alpha_{ql}=1\}.
+    \label{eq:enh-queue-bound}
+\end{equation}
+The function $v_l$ satisfies $v_l(\varnothing)=0$ and is submodular because it is a concave function of a nonnegative modular sum \citep{YuKucukyavuz2023Concave}.
+Consequently, its extended polymatroid inequalities provide linear lower bounds for the right-hand side of \eqref{eq:enh-queue-bound} \citep{AtamturkNarayanan2022Polarity}.
+For each base $l$, let $\pi_l$ be a permutation of the $n=|\hat{\mathcal R}|$ tasks, and set $A_{l,0}=\varnothing$ and $A_{l,j}=\{\pi_l(1),\ldots,\pi_l(j)\}$.
+The resulting master inequality is
+\begin{equation}
+    \zeta\ge C^{\mathrm R}
+    +\sum_{l\in\mathcal L}\sum_{j=1}^{n}
+    \bigl[v_l(A_{l,j})-v_l(A_{l,j-1})\bigr]
+    \alpha_{\pi_l(j),l}.
+    \label{eq:enh-queue-epi}
+\end{equation}
+For fixed coefficients $S_{ql}$, sorting the fractional assignment values $\bar\alpha_{ql}$ in nonincreasing order separately for each base maximizes the violation of \eqref{eq:enh-queue-epi} over all choices of the permutations.
+The derivation of \eqref{eq:enh-queue-bound} and the proofs of validity and exact separation are provided in Appendix~\ref{app:enh-queue}.
+
+\medskip
+\noindent\textbf{Disjunctive cuts.}
+Each task has $|\mathcal L|+1$ mutually exclusive assignment states: state $0$ leaves the task unassigned to a base, and state $l\in\mathcal L$ assigns it to base $l$.
+Let $\mathcal X_{qs}$ be the subset of $\mathcal X$ obtained by fixing only the assignment state of task $q$ to $s$.
+Let $b_{qs}$ be a finite certified lower bound on the minimum total cost $F(\boldsymbol d)+Q(\boldsymbol d)$ over $\mathcal X_{qs}$.
+To strengthen these bounds, we solve continuous relaxations of the respective states over the complete path domain, leaving the remaining design variables unfixed.
+Using the disjunctive cut constructions of \citet{ChenLuedtke2024Sparse} and \citet{KronqvistMisener2021Disjunctive}, we obtain
+\begin{equation}
+    F(\boldsymbol d)+\zeta
+    \ge b_{q0}
+    +\sum_{l\in\mathcal L}(b_{ql}-b_{q0})\alpha_{ql}.
+    \label{eq:enh-state-cut}
+\end{equation}
+One such inequality is generated for each selected task and added when violated by the current master solution.
+The validity proof and the certification of the state bounds are given in Appendix~\ref{app:enh-state}.
+
+\subsubsection{Warm Starts}
+
+We use a shared pool of generated service and repositioning columns to initialize successive restricted subproblems, and incumbent-based MIP starts to initialize the master.
+For the two-base formulation with single- and two-order tasks, adaptive large neighborhood search with restricted-column MISOCP repair constructs and improves incumbents (Appendix~\ref{app:enh-warm}).
+% END MANUSCRIPT SUBSECTION
+
+\clearpage
+\appendix
+\input{algorithmic_enhancements_appendix_en_20261112.tex}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{algorithmic_enhancements_20261112}
+\end{document}
