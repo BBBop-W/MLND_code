@@ -1,0 +1,17 @@
+{
+  "schema": "consecutive-csv/2",
+  "files": {
+    "sites.csv": "e3f78f3622b655719e60caf6bd7697531434468b4c761cc7e6be017354d17407",
+    "od_nodes.csv": "276e789a03eb1139cacb13c677818f5480d0227bfcc1e5f4d08d855e6714e94f",
+    "od_demand.csv": "a78a328dd2c534fa4f683d631c024269a3b5199ecf6eb8821db084348a7c1ce3",
+    "periods.csv": "1bfdf14d788b80d2aee9ede3a94f3abcd1d1833713cd4b66771e97387b81f5bc",
+    "metadata.json": "55288ea00c855127b03508c067affbe754a0f9b5a8ae64b7b472c26f809f7161",
+    "model.json": "62471be030d9c36ac6d6cee6ef5252dabadac8ee4d684b9c8c5498ba314ee6ae",
+    "coefficients/base_costs.csv": "0f311c835092d3dbd74e1b6891c7420afdfec7b630350958d03c72e4f9040a6e",
+    "coefficients/locker_levels.csv": "820321ae093ac63c2a98e2ab8665b642683bcd34ab69d233eed557e4f478f3fd",
+    "coefficients/links.csv": "086a3886ccb5f7ab0d7098cf978e038de11b167c03cd54945ddd5520b74bd747",
+    "coefficients/od_costs.csv": "8d0b2282049fcc5992a17970cf6ae01f663ec9f4e5287fe78943d35e3e3e7845",
+    "coefficients/od_hub.csv": "6cdcaf92580b3aee7fb2bfaf55b0f0c4ffc4d7d3c1a76a8ecc1f6c69cbcdafb5",
+    "coefficients/kappa.csv": "c6de3a685a02189f18f572e3d7aaab30fa92460732d54af946316c076010a89a"
+  }
+}

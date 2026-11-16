@@ -1,0 +1,6 @@
+site_id,type,x_km,y_km,activity_rate
+L0000,L,0,0,
+L0001,L,1,0,
+H0000,H,0,1,
+H0001,H,1,1,
+H0002,H,2,1,

@@ -64,6 +64,9 @@ compile_commands.json
 /.scratch/
 /work/
 /memory/
+/runs/
+/MLND_LINUX_ALL_*/
+/MLND_server_capacity_*/
 
 # Distribution bundles and local backups stay outside Git.
 *.zip

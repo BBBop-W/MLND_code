@@ -1,0 +1,6 @@
+# Server scripts import mlnd_runtime directly from the frozen source snapshot.
+# Do not install the historical src-based package/CLI for these experiments.
+-r requirements.txt
+psutil>=5.9
+matplotlib>=3.8
+Pillow>=10.0

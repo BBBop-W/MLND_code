@@ -1,0 +1,59 @@
+{
+  "coordinate_system": "local_km",
+  "selected_days": [
+    "2026-11-09"
+  ],
+  "demand_hour_window": [
+    0,
+    1
+  ],
+  "demand_orders_in_area": 21,
+  "demand_exposure_hours": 1.0,
+  "schema_version": "consecutive-csv/2",
+  "legacy_layout": "five-file-v2",
+  "exchange_schema": "consecutive-csv/2",
+  "frozen_input_metadata": {
+    "source_metadata": {
+      "coordinate_system": "local_km",
+      "selected_days": [
+        "2026-11-09"
+      ],
+      "demand_hour_window": [
+        0,
+        1
+      ],
+      "demand_orders_in_area": 21,
+      "demand_exposure_hours": 1.0
+    },
+    "resolved_config": {
+      "terminal": {
+        "courier_receipt_minutes": 15.0,
+        "courier_removal_minutes": 3.0
+      }
+    },
+    "purpose": "small arbitrary-L cut validity and matched bound comparison"
+  },
+  "daily_periods": [
+    {
+      "day": "2026-11-09",
+      "demand_exposure_hours": "1",
+      "demand_orders": "21"
+    }
+  ],
+  "optional_missing": {
+    "sites.activity_rate": "Per-site cluster activity counts are not retained in this exchange table; blank is unknown, not zero.",
+    "od_nodes.raw_endpoint_count": "Legacy grid-node statistic is not used by this joint-OD clustering; blank."
+  },
+  "direct_distance_semantics": "Mean direct distance of actual orders within each joint OD cluster, not distance between representative nodes.",
+  "source_files": {
+    "snapshot": {
+      "input_arrays.npz": "e3bc2281417a298ceab3e59db96b06e35608d831d852f0da7f5762688c1bfaac",
+      "input_metadata.json": "f8f9ded7c3468338fa981cf576abdc9361d23ceb9275b994ac4e57813959dc92"
+    },
+    "market": {
+      "od_nodes.csv": "be3017ee0a0ce2639d6169bba602c8268d132d6262bb6162257a8f17a2085752",
+      "od_demand.csv": "a78a328dd2c534fa4f683d631c024269a3b5199ecf6eb8821db084348a7c1ce3",
+      "periods.csv": "d6c4b17cb60d1bf347b23b8a8ef090e4458a3a917ee803d02dec03f9ae1c0659"
+    }
+  }
+}

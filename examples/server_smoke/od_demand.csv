@@ -1,0 +1,4 @@
+od_id,origin_node,destination_node,order_count,exposure_hours,lambda_per_hour,direct_distance_km
+R0,O0,D0,4,1,4.0,1.0
+R1,O1,D1,7,1,7.0,1.0
+R2,O2,D2,10,1,10.0,1.0

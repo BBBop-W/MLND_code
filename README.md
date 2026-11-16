@@ -1,8 +1,22 @@
 > **当前分支：MLND_sever。** 原生求解器和 `mlnd_runtime/` 已按 2026-11-16 的 `MLND_server` 实际工作区源码逐字节同步，包含该工作区尚未提交的修改。文件清单与 SHA-256 见 [SOURCE_VERSION.json](SOURCE_VERSION.json)。
 >
-> 构建入口为根目录 `CMakeLists.txt`（`cmake -S .`，目标 `mlnd`）。本次没有迁移服务器的 `run.py` 或实验启动脚本；下面保留的旧版说明和现有 `scripts/` 尚未适配本分支。迁移前完整版本已保存在 `codex/unified-task-algorithm` 的 `3ac3146` 提交。
+> 构建入口为根目录 `CMakeLists.txt`（`cmake -S .`，目标 `mlnd`）。当前 Linux 服务器入口为 `bash START_SERVER.sh`，完整说明见 [服务器运行说明](docs/server_branch_runbook.md)。它使用本分支新写的 `scripts/server_*.py`；旧 `scripts/run_server_experiment.py`、`check_server.py`、`package_server.py` 和下方历史命令不适用于本分支。迁移前完整版本已保存在 `codex/unified-task-algorithm` 的 `3ac3146` 提交。
 >
 > **GitHub 内容范围：**保留源码、测试、配置、技术说明及小型示例/基准输入；原始研究数据、论文材料、实验输出、构建产物和交付压缩包仅在本地保存。忽略规则见 `.gitignore`。已跟踪的上述本地材料已从当前分支的 Git 索引移除，本地文件保留；历史提交不作改写。
+
+## 当前 Linux 服务器入口
+
+```bash
+git switch MLND_sever
+git pull --ff-only origin MLND_sever
+bash START_SERVER.sh
+```
+
+启动器自动查找服务器已解压的 `MLND_LINUX_ALL_20261115/suite` 输入，创建环境、冻结当前 Git 源码和输入、编译 `mlnd`，通过资源自测和小型 K1/K2 验收后后台运行原 156 项任务。输入与离线底图不在 Git 中；自定义位置使用 `--suite-root /path/to/suite`。默认串行，目标 gap 1%，每任务 7200 秒、1 线程；确认内存表现后新批次可用 `--max-parallel 2` 等参数（上限 8）。
+
+查看状态用 `bash START_SERVER.sh --status`；恢复同批次用 `bash START_SERVER.sh --resume`。结果、日志、源码快照、构建指纹均在被忽略的 `outputs/server_runs/` 下。后续 `git pull` 不替换在跑批次的源码或程序。
+
+以下为迁移前历史说明；当前运行以顶部版本说明和服务器运行说明为准。
 
 # MLND consecutive delivery network
 
