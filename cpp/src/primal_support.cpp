@@ -63,6 +63,9 @@ bool uses_closed(const PrimalResources& a,const PrimalRepairRestrictions& r) {
     return false;
 }
 template<class T> void unique(std::vector<T>& x) {std::sort(x.begin(),x.end());x.erase(std::unique(x.begin(),x.end()),x.end());}
+std::vector<int> all_bases(const Input& d) {
+    std::vector<int> out(d.n_l);std::iota(out.begin(),out.end(),0);return out;
+}
 void state_owner(const PrimalSupportState& state,const void* owner) {
     if(!state.ready || state.owner!=owner)throw std::invalid_argument("Support state is incomplete or belongs to another bank");
 }
@@ -106,7 +109,7 @@ PrimalCgFeedback make_primal_cg_feedback(const Input& d,const PathCollection& pa
 
 PrimalSupportBank::PrimalSupportBank(const Input& d,const PathCollection& paths)
     :d_(d),paths_(paths),input_key_(input_key(d)),scope_(paths.scope),empty_count_(paths.empty_paths.size()) {
-    supported_=d.n_l==2 && d.max_orders==2 && d.preprocessed_demand && d.origin_assignment() &&
+    supported_=d.n_l>0 && (d.max_orders==1 || d.max_orders==2) && d.preprocessed_demand && d.origin_assignment() &&
         d.flow_policy=="aggregate" && !d.first_leg_consistency && paths.support_complete;
     for(const auto& p:paths.empty_paths)empty_keys_.push_back(empty_key(p));
 }
@@ -316,10 +319,13 @@ PrimalSupportState PrimalSupportBank::inspect(const Json& result,double deadline
 
 PrimalBlockRequest PrimalSupportBank::seed(int direction,const PrimalSupportState& state,std::mt19937& rng,double deadline) const {
     validate();state_owner(state,this);PrimalBlockRequest out;out.operator_index=0;
-    direction=((direction%3)+3)%3;out.allowed_bases=direction==0?std::vector<int>{0}:direction==1?std::vector<int>{1}:std::vector<int>{0,1};
+    // Keep the existing two-base seed directions as a special case of first
+    // base, last base, and unrestricted-base joint activation. For one base
+    // the singleton directions coincide and the caller deduplicates domains.
+    direction=((direction%3)+3)%3;out.allowed_bases=direction==0?std::vector<int>{0}:direction==1?std::vector<int>{d_.n_l-1}:all_bases(d_);
     for(int l=0;l<d_.n_l;++l)if(std::find(out.allowed_bases.begin(),out.allowed_bases.end(),l)==out.allowed_bases.end())out.restrictions.closed_bases.push_back(l);
-    struct Beam {std::vector<int> heads;PrimalResources assets;double gain=0,balance=0,rank=0;};
-    std::vector<Beam> beam(1);Beam best;double best_rank=-INFINITY;
+    struct Beam {std::vector<int> heads;PrimalResources assets;double gain=0,rank=0;std::vector<double> balance;};
+    std::vector<Beam> beam(1);beam.front().balance.assign(d_.n_l,0);Beam best;double best_rank=-INFINITY;
     std::vector<int> order(d_.assignment_entities());std::iota(order.begin(),order.end(),0);
     order.erase(std::remove_if(order.begin(),order.end(),[&](int q){return d_.task_rate(q)<=0;}),order.end());
     std::shuffle(order.begin(),order.end(),rng);
@@ -329,7 +335,7 @@ PrimalBlockRequest PrimalSupportBank::seed(int direction,const PrimalSupportStat
         for(const auto& item:beam)for(int r:order)if(std::find(item.heads.begin(),item.heads.end(),r)==item.heads.end())for(int l:out.allowed_bases) {
             if(expired(deadline))break;
             const auto candidates=shortlist(r,l,4,&state);if(candidates.empty())continue;
-            Beam trial=item;trial.heads.push_back(r);double ground=0,operating=0,balance=0;
+            Beam trial=item;trial.heads.push_back(r);double ground=0,operating=0;
             for(int s:required(r)) {
                 int chosen=-1;double value=INFINITY;
                 for(int id:candidates) {const auto& p=paths_.service_paths[id];if(p.second_od!=s || uses_closed(resources(d_,p),out.restrictions))continue;
@@ -339,11 +345,14 @@ PrimalBlockRequest PrimalSupportBank::seed(int direction,const PrimalSupportStat
                 if(chosen<0) {trial.heads.clear();break;}
                 const auto& p=paths_.service_paths[chosen];const double rate=d_.task_rate(r);
                 ground+=rate*(d_.ground_cost[d_.task_first(r)]+(s<0?0:d_.ground_cost[s]));operating+=rate*(p.cost+d_.fleet_cost*p.time);
-                balance+=rate*((p.b[0]==0?1:-1)-(p.b[1]==0?1:-1));add(trial.assets,resources(d_,p));
+                trial.balance.at(p.b[0])+=rate;trial.balance.at(p.b[1])-=rate;add(trial.assets,resources(d_,p));
             }
             if(trial.heads.empty())continue;
-            trial.gain+=ground-operating-fixed_cost(d_,trial.assets)+fixed_cost(d_,item.assets);trial.balance+=balance;
-            trial.rank=trial.gain-(direction==2?.1*std::abs(trial.balance):0);
+            trial.gain+=ground-operating-fixed_cost(d_,trial.assets)+fixed_cost(d_,item.assets);
+            // For two bases this L1 imbalance equals the old absolute signed
+            // balance; for more bases it distinguishes every return origin.
+            double imbalance=0;for(double value:trial.balance)imbalance+=std::abs(value);
+            trial.rank=trial.gain-(direction==2?.1*imbalance:0);
             next.push_back(std::move(trial));
         }
         std::stable_sort(next.begin(),next.end(),[](const auto& a,const auto& b){return a.rank>b.rank;});
@@ -366,15 +375,18 @@ PrimalBlockRequest PrimalSupportBank::seed(int direction,const PrimalSupportStat
 
 PrimalBlockRequest PrimalSupportBank::request(int op,const PrimalSupportState& state,std::size_t block_size,
     std::mt19937& rng,double deadline,const std::vector<double>* guide,const PrimalSupportState* elite) const {
-    validate();state_owner(state,this);PrimalBlockRequest out;out.operator_index=op;out.allowed_bases={0,1};
+    validate();state_owner(state,this);PrimalBlockRequest out;out.operator_index=op;out.allowed_bases=all_bases(d_);
     if(expired(deadline) || block_size==0 || op<0 || op>5) {out.diagnostics={{"selection_status","selection_budget"}};return out;}
     if(elite)state_owner(*elite,this);
     std::vector<double> score(d_.assignment_entities(),0);std::vector<int> order(d_.assignment_entities());std::iota(order.begin(),order.end(),0);
     order.erase(std::remove_if(order.begin(),order.end(),[&](int q){return d_.task_rate(q)<=0;}),order.end());
     std::shuffle(order.begin(),order.end(),rng);
     const int anchor=order.empty()?-1:order.front();const DesignLayout layout(d_);
-    PrimalResources anchor_assets;if(anchor>=0)anchor_assets=state.head_resources[anchor];
-    if(anchor>=0 && anchor_assets.lockers.empty())for(int id:shortlist(anchor,0,1,&state))add(anchor_assets,resources(d_,paths_.service_paths[id]));
+    auto fill_missing_assets=[&](int task,PrimalResources& assets) {
+        for(int l=0;l<d_.n_l && assets.lockers.empty();++l)
+            for(int id:shortlist(task,l,1,&state))add(assets,resources(d_,paths_.service_paths[id]));
+    };
+    PrimalResources anchor_assets;if(anchor>=0) {anchor_assets=state.head_resources[anchor];fill_missing_assets(anchor,anchor_assets);}
     int target=-1;
     if(op==2 || op==3) {
         double top=-INFINITY;for(int h=0;h<d_.n_h;++h)if(state.design[layout.facility+d_.n_l+h]>.5) {
@@ -388,7 +400,7 @@ PrimalBlockRequest PrimalSupportBank::request(int op,const PrimalSupportState& s
         std::all_of(guide->begin(),guide->begin()+layout.count,[](double x){return std::isfinite(x) && x>=-1e-7 && x<=1+1e-7;});
     for(int r=0;r<d_.assignment_entities();++r) {
         if(expired(deadline))break;
-        auto assets=state.head_resources[r];if(assets.lockers.empty())for(int id:shortlist(r,0,1,&state))add(assets,resources(d_,paths_.service_paths[id]));
+        auto assets=state.head_resources[r];fill_missing_assets(r,assets);
         if(op==0)score[r]=state.head_state[r]==0?100:0;
         else if(op==1)score[r]=overlap(anchor_assets,assets);
         else if(op==2 || op==3)score[r]=target>=0 && state.head_resources[r].lockers.count(target)?100:overlap(anchor_assets,assets);
@@ -428,7 +440,7 @@ PrimalSupportBlock PrimalSupportBank::close(const PrimalSupportState& state,cons
     const std::size_t mandatory=columns.size();PrimalResources release;Json coverage=Json::array();
     for(int r:heads)add(release,state.head_resources[r]);
     for(int id:request.extra_service) {if(id<0 || static_cast<std::size_t>(id)>=paths_.service_paths.size())throw std::invalid_argument("Elite column outside bank");add(release,resources(d_,paths_.service_paths[id]));}
-    auto allowed=request.allowed_bases;if(allowed.empty())allowed={0,1};
+    auto allowed=request.allowed_bases;if(allowed.empty())allowed=all_bases(d_);
     std::size_t optional=0,shortlist_expansions=0;
     std::map<Branch,std::vector<int>> witnesses_by_branch;
     std::set<Branch> missing;
@@ -530,7 +542,7 @@ PrimalSupportBlock PrimalSupportBank::close(const PrimalSupportState& state,cons
         }
         coverage.push_back({{"head",key[0]},{"departure",key[1]},{"branch",key[2]},{"witnesses",witnesses.size()}});
     }
-    // Every tiny L2 relocation column is allowed; service circuits can also
+    // Every registered relocation column is allowed; service circuits can also
     // balance one another without any individually paired relocation.
     for(std::size_t i=0;i<paths_.empty_paths.size();++i) {empty.insert(static_cast<int>(i));add_empty(paths_.empty_paths[i],release);}
     release.bases.insert(out.restrictions.closed_bases.begin(),out.restrictions.closed_bases.end());

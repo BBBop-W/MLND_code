@@ -124,7 +124,6 @@ def test_background_batch_keeps_global_flock_after_launcher_closes(tmp_path, mon
     write(run / "source/scripts/server_suite.py", "import time\ntime.sleep(30)\n")
     binary = write(run / "build/mlnd", "fake binary")
     write_json(run / "build/build_manifest.json", {"binary_sha256": build.sha256(binary)})
-    write_json(run / "acceptance.json", {"passed": True, "cases": []})
     monkeypatch.setattr(start, "verify_files", lambda *args: None)
     actual_popen = subprocess.Popen
     children = []
@@ -146,7 +145,7 @@ def test_background_batch_keeps_global_flock_after_launcher_closes(tmp_path, mon
     ), str(lock_path)]
     try:
         assert start.launch(run, lock, Namespace(retry_failed=False, foreground=False),
-                            {"stage": "all", "max_parallel": 1}) == 0
+                            {"stage": "all", "max_parallel": 8}) == 0
         lock.close()
         check = actual_popen(probe)
         assert check.wait(timeout=5) == 75
@@ -187,3 +186,47 @@ def test_resume_restores_original_cplex_runtime_path(tmp_path, monkeypatch):
     monkeypatch.setattr(start, "launch", launch)
     assert start.main() == 0
     assert launched == [True]
+
+
+def test_new_batch_builds_then_launches_eight_without_acceptance(clean_repository, tmp_path, monkeypatch):
+    root = clean_repository
+    suite = tmp_path / "suite"
+    model = write_json(suite / "instances/example/model.json", {"version": "input"})
+    write_json(suite / "instances/example/manifest.json", {"files": {"model.json": build.sha256(model)}})
+    write_json(suite / "suite.json", {"schema": "mlnd-server-capacity-suite/1", "jobs": [
+        {"id": "example_K1", "instance": "instances/example", "k": 1}]})
+    write_json(suite / "provenance/map_backgrounds.json", {"backgrounds": []})
+    monkeypatch.setattr(start, "ROOT", root)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["server_start.py", "--suite-root", str(suite),
+                                     "--runs-root", str(tmp_path / "runs")])
+    monkeypatch.setenv("MLND_LOCK_FILE", str(tmp_path / "global.lock"))
+    monkeypatch.delenv("MLND_LAUNCH_LOCK_FD", raising=False)
+    commands = []
+
+    def build_only(command, **kwargs):
+        assert Path(command[1]).name == "server_build.py", "Startup must not run test jobs"
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0)
+
+    def no_test_subprocess(*args, **kwargs):
+        pytest.fail("Startup invoked an acceptance process before the experiment batch")
+
+    def launch(run, lock, args, config):
+        assert config["max_parallel"] == 8
+        assert config["stage"] == "all"
+        assert len(commands) == 1
+        assert not (run / "acceptance.json").exists()
+        return 0
+
+    # The source fixture is already copied before the subprocess boundary is mocked.
+    original_snapshot = start.snapshot
+    def snapshot_then_mock(source, destination):
+        result = original_snapshot(source, destination)
+        monkeypatch.setattr(start.subprocess, "run", build_only)
+        monkeypatch.setattr(start.subprocess, "Popen", no_test_subprocess)
+        return result
+
+    monkeypatch.setattr(start, "snapshot", snapshot_then_mock)
+    monkeypatch.setattr(start, "launch", launch)
+    assert start.main() == 0

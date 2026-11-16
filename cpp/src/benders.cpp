@@ -2231,10 +2231,10 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     if (options.heuristic_frequency < 1 || options.pareto_frequency < 1 || options.root_cut_rounds < 0)
         throw std::invalid_argument("Invalid Benders strengthening frequency");
     if (!paths.support_complete) throw std::runtime_error("Benders requires complete initial-segment support");
-    if(options.primal_alns && (d.n_l!=2 || d.max_orders!=2 || !d.preprocessed_demand ||
+    if(options.primal_alns && (d.n_l<1 || (d.max_orders!=1 && d.max_orders!=2) || !d.preprocessed_demand ||
        !d.origin_assignment() || d.flow_policy!="aggregate" || d.first_leg_consistency ||
        !(paths.complete || paths.domain_complete) || !options.reuse_columns))
-        throw std::invalid_argument("Primal ALNS requires certified L2 K2 preprocessed origin aggregate support");
+        throw std::invalid_argument("Primal ALNS requires certified K1/K2 preprocessed origin aggregate support and column reuse");
     if(options.staged_continuous_root && (!options.cg_seed_reuse || !options.continuous_root))
         throw std::invalid_argument("Staged continuous root requires root CG and column seed reuse");
     if(options.fractional_path_support && !options.path_support_cuts)

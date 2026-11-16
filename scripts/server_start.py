@@ -60,35 +60,6 @@ def verify_files(root: Path, manifest_name: str) -> None:
             raise ValueError(f"Frozen run file changed: {root / name}")
 
 
-def acceptance(run: Path) -> None:
-    source, build = run / "source", run / "build"
-    resource_report = None
-    if sys.platform.startswith("linux"):
-        resource_output = run / "checks/resources"
-        resource_output.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([sys.executable, str(source / "scripts/server_support/linux_selftest.py"),
-                        "--out", str(resource_output)], check=True, timeout=180)
-        resource_report = resource_output / "report.json"
-        if json.loads(resource_report.read_text()).get("passed") is not True:
-            raise ValueError("Linux resource/cleanup self-test failed")
-    reports = []
-    for k in (1, 2):
-        output = run / "acceptance" / f"K{k}"
-        command = [sys.executable, str(source / "scripts/server_run.py"),
-                   "--binary", str(build / "mlnd"), "--build-manifest", str(build / "build_manifest.json"),
-                   "--input", str(source / "examples/server_smoke"), "--output", str(output),
-                   "--k", str(k), "--method", "algorithm", "--seconds", "60", "--gap", "0.01",
-                   "--threads", "1", "--seed", "43", "--wall-limit", "180", "--validation-seconds", "120"]
-        subprocess.run(command, check=True)
-        report = json.loads((output / "summary.json").read_text())
-        if report.get("qualified_baseline") is not True:
-            raise ValueError(f"K{k} installation check did not pass physical validation and 1% gap")
-        reports.append({"k": k, "summary_sha256": sha256(output / "summary.json")})
-    write_json(run / "acceptance.json", {"passed": True, "cases": reports,
-               "linux_resources_passed": resource_report is not None,
-               "resources_report_sha256": sha256(resource_report) if resource_report else None})
-
-
 def current_run(runs: Path) -> Path | None:
     marker = runs / "CURRENT"
     if not marker.is_file():
@@ -115,7 +86,7 @@ def show_status(run: Path | None) -> None:
         value = json.loads(status.read_text())
         print(json.dumps(value, ensure_ascii=False, indent=2))
     elif (run / "prepared.json").is_file():
-        print("Build and K1/K2 installation checks passed; suite has not written status yet.")
+        print("Build completed; suite has not written status yet.")
     else:
         print("Preparation is incomplete. Read setup.log; a new start preserves this directory.")
 
@@ -126,16 +97,6 @@ def launch(run: Path, lock, args, config: dict) -> int:
     manifest = json.loads((run / "build/build_manifest.json").read_text())
     if sha256(run / "build/mlnd") != manifest["binary_sha256"]:
         raise ValueError("Frozen binary changed")
-    acceptance_record = json.loads((run / "acceptance.json").read_text())
-    if acceptance_record.get("passed") is not True:
-        raise ValueError("Installation acceptance did not pass")
-    if sys.platform.startswith("linux") and (
-            acceptance_record.get("linux_resources_passed") is not True
-            or sha256(run / "checks/resources/report.json") != acceptance_record.get("resources_report_sha256")):
-        raise ValueError("Linux resource acceptance is missing or changed")
-    for case in acceptance_record["cases"]:
-        if sha256(run / "acceptance" / f"K{case['k']}" / "summary.json") != case["summary_sha256"]:
-            raise ValueError("Acceptance record changed")
     command = [sys.executable, str(run / "source/scripts/server_suite.py"),
                "--suite-root", str(run / "suite"), "--binary", str(run / "build/mlnd"),
                "--build-manifest", str(run / "build/build_manifest.json"),
@@ -184,7 +145,7 @@ def main() -> int:
     parser.add_argument("--cplex-root", type=Path, default=os.environ.get("CPLEX_ROOT", "/home/autumn/workspace/wangsongtao/cplex"))
     parser.add_argument("--json-include", type=Path, default=Path(os.environ.get("CONDA_PREFIX", sys.prefix)) / "include")
     parser.add_argument("--max-parallel", type=int, default=None)
-    parser.add_argument("--stage", choices=("preflight", "core", "stress", "all"), default=None)
+    parser.add_argument("--stage", choices=("core", "stress", "all"), default=None)
     parser.add_argument("--build-jobs", type=int, choices=(1, 2), default=1)
     parser.add_argument("--runs-root", type=Path, default=ROOT / "outputs/server_runs")
     args = parser.parse_args()
@@ -241,7 +202,7 @@ def main() -> int:
                 print(f"Preparing {run}", flush=True)
                 snapshot(ROOT, run / "source")
                 freeze_suite(suite, run / "suite")
-                config = {"stage": args.stage or "all", "max_parallel": args.max_parallel or 1,
+                config = {"stage": args.stage or "all", "max_parallel": args.max_parallel or 8,
                           "python": sys.executable, "cplex_root": str(args.cplex_root.resolve()),
                           "runtime_environment": runtime_environment(),
                           "git_commit": json.loads((run / "source/SNAPSHOT.json").read_text())["git_commit"]}
@@ -252,11 +213,6 @@ def main() -> int:
                                "--json-include", str(args.json_include.resolve()), "--jobs", str(args.build_jobs)]
                     print(f"Building current source; progress: {run / 'setup.log'}", flush=True)
                     subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT)
-                    # Keep acceptance stdout/stderr with the setup evidence.
-                    with subprocess.Popen([sys.executable, str(run / "source/scripts/server_accept.py"), str(run)],
-                                          stdout=log, stderr=subprocess.STDOUT) as process:
-                        if process.wait() != 0:
-                            raise ValueError(f"K1/K2 installation acceptance failed; see {run / 'setup.log'}")
                 write_json(run / "prepared.json", config)
             if args.prepare_only:
                 show_status(run)

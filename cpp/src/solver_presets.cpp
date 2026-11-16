@@ -139,14 +139,9 @@ void SolverConfiguration::apply_method(const std::string& name) {
     }
 }
 
-void SolverConfiguration::adapt_instance(const Input& data) {
-    if(data.n_l!=2 || data.max_orders!=2) {
-        for(const char* name:{"primal_alns","primal_support_completion","indexed_support_completion","cg_primal_feedback"})
-            for(const auto& flag:accelerations)if(name==std::string(flag.name) && options.*(flag.member)) {
-                options.*(flag.member)=false;
-                auto_disabled_accelerations.push_back(name);
-            }
-    }
+void SolverConfiguration::adapt_instance(const Input&) {
+    // Independent-task primal support covers every positive base count and
+    // both K=1 and K=2. Preserve explicit flags and the method configuration.
 }
 
 void SolverConfiguration::validate() const {
@@ -266,7 +261,7 @@ Json SolverConfiguration::metadata() const {
         {"auto_disabled_accelerations",auto_disabled_accelerations},
         {"path_storage",method=="full_path"?"complete_catalogue":"generated_service_pool"},
         {"implicit_memory_policy",method=="benders_cg"},
-        {"auto_disable_reason",method=="benders_cg"?Json("catalogue_dependent_auxiliaries_and_instance_restrictions"):Json(nullptr)},
+        {"auto_disable_reason",method=="benders_cg"?Json("catalogue_dependent_auxiliaries"):Json(nullptr)},
         {"demand_formulation","preprocessed"},
         {"first_leg_consistency",options.first_leg_consistency},
         {"seconds",options.seconds},{"gap",options.gap},{"threads",options.threads},{"seed",options.seed},

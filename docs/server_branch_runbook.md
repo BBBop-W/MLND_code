@@ -41,7 +41,7 @@ server path. It uses the 78 input directories, the 156-job matrix, and the offli
 map backgrounds. It never executes the old bundle's solver or scripts. Input data,
 maps, native binaries, environments and results stay outside Git.
 
-## What happens before the long run
+## Startup
 
 1. Acquire the same global batch lock used by the old launcher. A running old or
    new capacity batch prevents a second launch and prevents environment updates.
@@ -50,37 +50,40 @@ maps, native binaries, environments and results stay outside Git.
    plus map provenance into a new `outputs/server_runs/run-...` directory.
 3. Configure and fully link target `mlnd` with CMake, one compilation job by default.
    Record source, Git commit, build command, platform and actual binary SHA-256.
-4. On Linux, verify the resource controls with short synthetic process tests:
-   address-space limits, sampled process-group RSS, wall-time cleanup, and cleanup
-   after dispatcher failure. These tests neither solve MLND nor touch other jobs.
-5. Solve the included small L2/H3/OD3 input for K1 and K2, each with a 60-second
-   native budget. Both must complete normally, pass independent physical validation,
-   and meet 1% gap before the batch is marked prepared.
-6. Launch the suite in the background with its own session and log. Keep the
-   terminal connected through preparation; after the launcher reports success,
-   closing the terminal does not stop the batch. No tmux command is required.
+4. Launch the suite immediately in the background with its own session and log.
+   There are no startup resource self-tests, small acceptance solves or preflight
+   qualification gates. Keep the terminal connected through preparation; after
+   launch succeeds, closing the terminal does not stop the batch.
 
-`bash START_SERVER.sh --prepare-only` performs steps 1–5 without starting the
-156-job matrix. `bash START_SERVER.sh --resume` then launches that prepared run.
+`bash START_SERVER.sh --prepare-only` optionally builds and freezes the batch
+without launching it. `bash START_SERVER.sh --resume` then starts that prepared run.
+A normal `bash START_SERVER.sh` builds and starts the matrix directly.
 
 ## Matrix and resource policy
 
-The recovered matrix is unchanged: 2 serial preflight jobs, 98 core jobs and 56
-stress jobs, using 78 inputs across approximately 9, 33.33, 64 and 100 km² study
-windows. The two preflight jobs must complete normally, pass independent physical
-validation and reach 1% before later stages are admitted. The matrix describes
-capacity screening with one seed, not a replicated paper experiment.
+All 156 recovered tasks are retained: 100 core jobs and 56 stress jobs, using
+78 inputs across approximately 9, 33.33, 64 and 100 km² study windows. The two
+historical preflight rows are ordinary core jobs; their original labels are kept
+as `source_stage` for provenance. They do not run exclusively or gate other tasks.
+The matrix describes capacity screening with one seed, not a replicated paper
+experiment.
 
 Every matrix task uses the current algorithm (`--method benders_cg`), native budget
 7200 seconds, target gap 0.01, seed 43 and one solver thread. Historical preset
 labels in the input matrix are provenance only: new runner flags and the native
 `resolved_configuration` determine the actual current implementation.
 
-Default concurrency is **1**, pending measured Linux memory behavior of this
-implementation. A new batch may specify `--max-parallel 2` through 8. The 24 GiB
-reservation budget and 8 GiB available-memory floor still apply. Each job retains
-its existing 3/6/10/16/24 GiB class; 24 GiB jobs and preflight jobs run exclusively.
-These classes are starting limits, not measured guarantees for the new solver.
+ALNS (`primal_alns`), both primal support completions
+(`primal_support_completion`, `indexed_support_completion`) and CG primal feedback
+(`cg_primal_feedback`) are enabled for every base count and both K1 and K2.
+The underlying support and repair logic accepts all bases; the former L2/K2-only
+configuration restriction is removed. Other algorithm settings are unchanged.
+
+Default concurrency is **8**. The existing 24 GiB reservation budget and 8 GiB
+available-memory floor still apply. Each job retains its 3/6/10/16/24 GiB class;
+24 GiB jobs run exclusively. Memory admission can therefore reduce the number of
+simultaneously active jobs below eight. A new batch may explicitly choose
+`--max-parallel 1` through 8.
 
 The server previously reported cgroup v1 without sudo. Controls therefore use
 inherited per-process `RLIMIT_AS` and sampled process-group RSS. They are not an
@@ -106,7 +109,7 @@ new-code results. A later `git pull` does not change a running batch's frozen fi
 
 Each run contains:
 
-- `setup.log`, `batch.log`, `prepared.json`, `acceptance.json` and Linux resource checks.
+- `setup.log`, `batch.log` and `prepared.json`.
 - `source/SNAPSHOT.json`, `suite/SERVER_INPUT_SNAPSHOT.json`, `build/build_manifest.json`.
 - `results/suite_status.json` and `results/summary.csv` / `summary.json`.
 - `results/jobs/JOB/attempts/NNN/`: resource records and `native/` solver output,
@@ -123,15 +126,20 @@ Maps use the frozen real basemap and display L, H and connections, with no OD no
 Map failure is reported separately and does not change the native solve or primal
 feasibility result. All original files remain available for inspection.
 
-## Delivery checks
+## Development validation
 
-The implementation preserves the 69 synchronized source/build dependency files.
-On macOS arm64, a fresh root-CMake build linked successfully, and fresh K1/K2 small
-cases passed independent physical validation and the 1% criterion. Portable tests
-cover runner failures/timeouts, provenance rejection, resume acceptance, resource
-admission, historical status-merge and pidfd compatibility cases, and map evidence.
-The actual 156-job input matrix passes dry-run validation.
+The 2026-11-17 change passed 60 portable server tests and a fresh macOS arm64
+native build. Eight short synthetic cases (L=2/3/5/8, K=1/2, H=3, OD=3) all ran
+ALNS, retained all four requested flags, passed independent physical validation,
+and reached 1% gap. Direct native support/repair tests additionally cover L=1
+and witnesses available only at later bases. These are correctness checks, not
+large-instance performance evidence.
 
-Linux compilation, CPLEX licensing and kernel resource controls remain target-host
-checks and are required by the launcher before the long matrix begins. No new
-156-job experiment or Linux performance result is claimed by this delivery.
+These development tests are not part of server startup. The launcher builds and
+starts the requested matrix directly; it does not run the short cases or require
+a preflight result. Regression coverage includes this startup behavior, the
+eight-job default, and compatibility with all 156 historical matrix rows.
+
+Linux execution and the full 156-job matrix have not been run by this delivery.
+Each real task still records termination, gap and independent post-solve physical
+validation; these result checks do not gate admission of later tasks.

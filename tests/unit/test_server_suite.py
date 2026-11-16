@@ -78,10 +78,10 @@ def prepared(tmp_path):
 def test_real_protocol_defaults_and_new_map_budget(prepared):
     root, _, args = prepared
     _, jobs, resources = suite.load_suite(root, args)
-    assert resources["max_parallel"] == 1
+    assert resources["max_parallel"] == 8
     assert [j["seconds"] for j in jobs] == [7200] * 3
     assert [j["threads"] for j in jobs] == [1] * 3
-    assert [j["exclusive"] for j in jobs] == [True, True, False]
+    assert [j["exclusive"] for j in jobs] == [False, False, False]
     assert jobs[0]["job_wall_seconds"] == 9450
     command = suite.make_command(
         jobs[0],
@@ -109,7 +109,7 @@ def test_real_protocol_defaults_and_new_map_budget(prepared):
         lambda d: d["jobs"][0].update(instance="../escape"),
         lambda d: d["jobs"][0].update(id="../escape"),
         lambda d: d["jobs"][1].update(id="p1"),
-        lambda d: d["jobs"][1].update(enabled=False),
+        lambda d: d["jobs"][1].update(enabled="False"),
         lambda d: d["jobs"][0].update(memory_gib=7),
         lambda d: d["resources"].update(system_available_floor_gib=1),
     ],
@@ -211,7 +211,7 @@ def test_resume_requires_certificate_all_artifacts_and_exact_identity(prepared):
     assert not suite.completed_attempt(attempt, signature)
 
 
-def test_resume_cannot_promote_abnormal_validated_or_nonqualified_preflight(prepared):
+def test_resume_cannot_promote_abnormal_validated_or_nonqualified_result(prepared):
     root, _, args = prepared
     _, jobs, _ = suite.load_suite(root, args)
     identity = {"binary_sha256": "binary", "build_manifest_sha256": "manifest"}
@@ -219,8 +219,6 @@ def test_resume_cannot_promote_abnormal_validated_or_nonqualified_preflight(prep
     signature = suite.job_signature(jobs[0], identity)
     assert suite.completed_attempt(attempt, signature)
     assert not suite.completed_attempt(attempt, signature, qualified=True)
-    with pytest.raises(ValueError, match="1%"):
-        suite.require_preflight(root, jobs, identity)
     own = suite.read(attempt / "attempt.json")
     own.update(returncode=-9, status="failed")
     put(attempt / "attempt.json", own)
@@ -245,12 +243,13 @@ def test_memory_reservation_is_exclusive_and_accounts_unfilled_rss(prepared):
     _, jobs, policy = suite.load_suite(root, args)
     policy["max_parallel"] = 8
     active = [{"job": jobs[2], "sample": {"rss_bytes": 0}}]
-    assert not suite.reservation_fits(jobs[0], active, 100 * suite.GIB, policy)
+    exclusive_job = {**jobs[0], "exclusive": True}
+    assert not suite.reservation_fits(exclusive_job, active, 100 * suite.GIB, policy)
     assert not suite.reservation_fits(jobs[2], active, 13 * suite.GIB, policy)
     assert suite.reservation_fits(jobs[2], active, 14 * suite.GIB, policy)
 
 
-def fake_scheduler(monkeypatch, qualified=True, fail_core=False):
+def fake_scheduler(monkeypatch, qualified=True, fail_core=False, fail_jobs=()):
     identity = {"binary_sha256": "binary", "build_manifest_sha256": "manifest"}
     launches = []
     monkeypatch.setattr(suite, "require_linux", lambda: None)
@@ -271,7 +270,10 @@ def fake_scheduler(monkeypatch, qualified=True, fail_core=False):
             own = suite.read(self.attempt / "attempt.json")
             launches.append(own["job"]["id"])
             successful_native(self.attempt, qualified=qualified)
-            self.returncode = 1 if fail_core and own["job"]["stage"] == "core" else 0
+            self.returncode = int(
+                (fail_core and own["job"]["id"] == "c1")
+                or own["job"]["id"] in fail_jobs
+            )
             self.stop_reason = None
             self.last_sample = {"rss_bytes": 0}
 
@@ -299,16 +301,16 @@ def fake_scheduler(monkeypatch, qualified=True, fail_core=False):
     return launches
 
 
-def test_preflight_blocks_entire_matrix_when_not_qualified(prepared, monkeypatch):
+def test_failure_of_legacy_preflight_does_not_stop_other_jobs(prepared, monkeypatch):
     root, _, args = prepared
-    launches = fake_scheduler(monkeypatch, qualified=False)
+    launches = fake_scheduler(monkeypatch, fail_jobs={"p1"})
     path, jobs, resources = suite.load_suite(root, args)
     assert suite.execute(args, path, jobs, resources) == 1
-    assert launches == ["p1"]
-    assert (
-        suite.read(args.output / "suite_status.json")["dispatch_stop_reason"]
-        == "preflight_not_validated_at_one_percent"
-    )
+    assert launches == ["p1", "p2", "c1"]
+    status = suite.read(args.output / "suite_status.json")
+    assert status["dispatch_stop_reason"] is None
+    assert status["status"] == "completed_with_failures"
+    assert status["pending"] == []
 
 
 def test_complete_then_resume_has_no_duplicate_launch_or_status_collision(
@@ -424,3 +426,31 @@ def test_kernel_pidfd_denial_is_not_downgraded_to_pid_signaling(monkeypatch):
     monkeypatch.setattr(linux_process, "pidfd_open", denied)
     with pytest.raises(RuntimeError, match="errno=1"):
         linux_process.require_linux()
+
+
+def test_direct_run_defaults_eight_and_legacy_preflight_is_normal_core(prepared):
+    root, _, args = prepared
+    _, jobs, resources = suite.load_suite(root, args)
+    assert resources["max_parallel"] == 8
+    assert [job["stage"] for job in jobs] == ["core"] * 3
+    assert [job["exclusive"] for job in jobs] == [False] * 3
+    assert [job["source_stage"] for job in jobs] == ["preflight", "preflight", "core"]
+    assert suite.parser().parse_args(["--suite-root", str(root)]).stage == "all"
+
+
+def test_direct_run_no_one_percent_gate(prepared, monkeypatch):
+    root, _, args = prepared
+    launches = fake_scheduler(monkeypatch, qualified=False)
+    path, jobs, resources = suite.load_suite(root, args)
+    assert suite.execute(args, path, jobs, resources) == 0
+    assert launches == ["p1", "p2", "c1"]
+    assert suite.read(args.output / "suite_status.json")["dispatch_stop_reason"] is None
+
+
+def test_direct_run_accepts_matrix_without_preflight_labels(prepared):
+    root, document, args = prepared
+    for job in document["jobs"]:
+        job["stage"] = "core"
+    put(root / "suite.json", document)
+    _, jobs, _ = suite.load_suite(root, args)
+    assert len(jobs) == 3

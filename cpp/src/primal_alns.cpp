@@ -75,7 +75,7 @@ struct PrimalAlnsSearch::Impl {
          bank(input,catalogue),rng(static_cast<std::mt19937::result_type>(settings.seed)),budget(allowance) {
         const double begin=wall_time();
         if(!std::isfinite(budget)||budget<0)throw std::invalid_argument("Invalid primal ALNS budget");
-        supported=d.n_l==2 && d.max_orders==2 && d.preprocessed_demand && d.origin_assignment() &&
+        supported=d.n_l>0 && (d.max_orders==1 || d.max_orders==2) && d.preprocessed_demand && d.origin_assignment() &&
             d.flow_policy=="aggregate" && !d.first_leg_consistency && paths.support_complete;
         best=std::make_shared<Entry>();best->point=std::make_shared<Json>(all_courier_result(d,paths));
         best->point->erase("bound");best->point->erase("gap");

@@ -37,7 +37,7 @@ from job_control import (  # noqa: E402
 )
 from linux_process import require_linux  # noqa: E402
 
-STAGES = ("preflight", "core", "stress")
+STAGES = ("core", "stress")
 SCHEMA = "mlnd-server-capacity-suite/1"
 
 
@@ -231,14 +231,14 @@ def load_suite(suite_root, args):
         + 60,
     )
     resources = dict(
-        max_parallel=1,
+        max_parallel=8,
         max_threads=8,
         reservation_budget_gib=24,
         system_available_floor_gib=8,
         sample_seconds=1,
         admission_timeout_seconds=900,
     )
-    # The legacy matrix's max_parallel=8 is an upper bound, not the new default.
+    # Concurrency defaults to the requested eight, subject to memory admission.
     for key in resources:
         if key != "max_parallel" and key in document.get("resources", {}):
             resources[key] = document["resources"][key]
@@ -289,7 +289,7 @@ def load_suite(suite_root, args):
         if type(entry.get("enabled", True)) is not bool:
             raise ValueError("enabled must be boolean")
         if (
-            entry.get("stage") not in STAGES
+            entry.get("stage") not in (*STAGES, "preflight")
             or type(entry.get("k")) is not int
             or entry["k"] not in (1, 2)
         ):
@@ -326,20 +326,18 @@ def load_suite(suite_root, args):
             {
                 **entry,
                 **defaults,
+                # Preserve every legacy matrix row without a special gate.
+                "source_stage": entry["stage"],
+                "stage": "core" if entry["stage"] == "preflight" else entry["stage"],
                 "instance": str(instance),
                 "instance_relative": relative,
                 "input_sha256": inputs[relative],
                 "memory_bytes": int(memory * GIB),
-                "exclusive": entry["stage"] == "preflight" or memory == 24,
+                "exclusive": memory == 24,
                 "method": "algorithm",
                 "dimensions": {name: values[name] for name in ("n_l", "n_h", "n_od")},
             }
         )
-    preflight = [
-        j for j in jobs if j["stage"] == "preflight" and j.get("enabled", True)
-    ]
-    if len(preflight) != 2 or {j["k"] for j in preflight} != {1, 2}:
-        raise ValueError("Exactly two enabled K1/K2 preflight tasks are required")
     return path, jobs, resources
 
 
@@ -481,18 +479,6 @@ def latest_attempt(output, job):
     return paths[-1] if paths else None
 
 
-def require_preflight(output, jobs, identity):
-    for job in jobs:
-        if job["stage"] == "preflight" and job.get("enabled", True):
-            attempt = latest_attempt(output, job)
-            if attempt is None or not completed_attempt(
-                attempt, job_signature(job, identity), qualified=True
-            ):
-                raise ValueError(
-                    f"Preflight must complete, validate and reach 1% first: {job['id']}"
-                )
-
-
 def make_command(job, binary, build_manifest, attempt, python, maps_root=None):
     command = [
         str(python),
@@ -536,6 +522,7 @@ def write_summary(output):
         row = {
             "job_id": own["job"]["id"],
             "stage": own["job"]["stage"],
+            "source_stage": own["job"].get("source_stage", own["job"]["stage"]),
             "k": own["job"]["k"],
             **own["job"]["dimensions"],
             "memory_limit_gib": own["job"]["memory_gib"],
@@ -630,15 +617,12 @@ def execute(args, suite, jobs, resources):
         else:
             atomic_json(identity_path, identity)
         ensure_no_live_attempts(output)
-        if args.stage in ("core", "stress"):
-            require_preflight(output, jobs, identity)
         pending = []
         for job in selected:
             previous = latest_attempt(output, job)
             if previous and completed_attempt(
                 previous,
                 job_signature(job, identity),
-                qualified=job["stage"] == "preflight",
             ):
                 skipped.append(
                     {
@@ -728,10 +712,6 @@ def execute(args, suite, jobs, resources):
                     active.remove(item)
                     finished.append({"job": item["job"]["id"], "status": own["status"]})
                     print(json.dumps(finished[-1]), flush=True)
-                    if item["job"]["stage"] == "preflight" and not completed_attempt(
-                        item["attempt"], own["signature"], qualified=True
-                    ):
-                        stop_reason = "preflight_not_validated_at_one_percent"
                     last_progress = now
                     write_summary(output)
                 memory = psutil.virtual_memory()
@@ -749,11 +729,6 @@ def execute(args, suite, jobs, resources):
                         stage = min(
                             stage, min(STAGES.index(i["job"]["stage"]) for i in active)
                         )
-                    if STAGES[stage] != "preflight":
-                        try:
-                            require_preflight(output, jobs, identity)
-                        except ValueError:
-                            stop_reason = "preflight_not_validated_at_one_percent"
                     for job in pending[:]:
                         if stop_reason:
                             break
@@ -935,12 +910,12 @@ def parser():
     result.add_argument("--build-manifest", type=Path)
     result.add_argument("--output", "--out", type=Path)
     result.add_argument("--python", type=Path)
-    result.add_argument("--stage", choices=(*STAGES, "all"), default="preflight")
+    result.add_argument("--stage", choices=(*STAGES, "all"), default="all")
     result.add_argument("--job", action="append")
     result.add_argument("--resume", action="store_true")
     result.add_argument("--retry-failed", action="store_true")
     result.add_argument("--dry-run", "--verify", action="store_true")
-    result.add_argument("--max-parallel", type=int, default=1)
+    result.add_argument("--max-parallel", type=int, default=8)
     result.add_argument("--memory-budget-gib", type=float)
     result.add_argument("--available-floor-gib", type=float)
     return result

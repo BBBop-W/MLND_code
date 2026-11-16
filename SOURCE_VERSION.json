@@ -176,8 +176,8 @@
       "mode": 420
     },
     "cpp/src/benders.cpp": {
-      "sha256": "91d6a28b620278094e3e9b28a8cd274ec08b97389ff95361a7d8f160fe4ef8ba",
-      "bytes": 300092,
+      "sha256": "60f53d9ffc155f379d589e1a722cb61a675a8b1d3ab5f1d9109f4a0c8445aeed",
+      "bytes": 300129,
       "mode": 420
     },
     "cpp/src/design_face_cuts.cpp": {
@@ -241,8 +241,8 @@
       "mode": 420
     },
     "cpp/src/primal_alns.cpp": {
-      "sha256": "bb2f3101ab40cb73632ece0920e2345186ac61aa2d2b64168d3e1770c2d71c2f",
-      "bytes": 27510,
+      "sha256": "8cea86359051c2986bf32e4085b5649d75c7ad052177700ac561ae388490c015",
+      "bytes": 27530,
       "mode": 420
     },
     "cpp/src/primal_portfolio.cpp": {
@@ -251,8 +251,8 @@
       "mode": 420
     },
     "cpp/src/primal_support.cpp": {
-      "sha256": "1eabcf15f7036c6de5051f97d8b29207ae7bcf8e7bf92c2b0fdc5bb85feffe05",
-      "bytes": 40113,
+      "sha256": "c276abd1fbf74062095b513624eacddd663a4e5c78e38485fdebb3146a2eb575",
+      "bytes": 40827,
       "mode": 420
     },
     "cpp/src/progress.cpp": {
@@ -271,8 +271,8 @@
       "mode": 420
     },
     "cpp/src/solver_presets.cpp": {
-      "sha256": "f078cac49b4b0ec0cda868919224b77bbd93dcfb1105c9fdf22f4b1cf89f756c",
-      "bytes": 22554,
+      "sha256": "866ea2ebebe9f1d742d18c2d3cfc944d8b0efd96e2b0480aa938ba72180b65bd",
+      "bytes": 22275,
       "mode": 420
     },
     "cpp/src/stabilized_master.cpp": {
@@ -363,7 +363,7 @@
     "target": "mlnd"
   },
   "excluded_server_entry_script": "run.py",
-  "scripts_policy": "No server launcher or experiment script copied; existing baseline scripts are retained without adaptation.",
+  "scripts_policy": "Server experiment entrypoints are maintained in this branch under scripts/server_*.py and START_SERVER.sh; historical baseline launchers are not the current entrypoint.",
   "removed_legacy_native_files": [
     "cpp/include/mlnd/assignment_support_cuts.hpp",
     "cpp/include/mlnd/bdd.hpp",
@@ -377,5 +377,31 @@
   "removed_obsolete_build_entries": [
     "cpp/CMakeLists.txt",
     "cpp/Makefile"
+  ],
+  "manifest_role": "Current build dependency hashes; source_repository/source_branch/source_head/snapshot_date describe the imported upstream snapshot.",
+  "source_modifications": [
+    {
+      "date": "2026-11-17",
+      "base_commit": "4689d3c36b9594e0626c1bfeafe728016c7bb6c5",
+      "reason": "Enable ALNS, both primal support completions and CG primal feedback for all positive base counts and K1/K2, with generalized support construction.",
+      "files": {
+        "cpp/src/benders.cpp": {
+          "imported_sha256": "91d6a28b620278094e3e9b28a8cd274ec08b97389ff95361a7d8f160fe4ef8ba",
+          "current_sha256": "60f53d9ffc155f379d589e1a722cb61a675a8b1d3ab5f1d9109f4a0c8445aeed"
+        },
+        "cpp/src/primal_alns.cpp": {
+          "imported_sha256": "bb2f3101ab40cb73632ece0920e2345186ac61aa2d2b64168d3e1770c2d71c2f",
+          "current_sha256": "8cea86359051c2986bf32e4085b5649d75c7ad052177700ac561ae388490c015"
+        },
+        "cpp/src/primal_support.cpp": {
+          "imported_sha256": "1eabcf15f7036c6de5051f97d8b29207ae7bcf8e7bf92c2b0fdc5bb85feffe05",
+          "current_sha256": "c276abd1fbf74062095b513624eacddd663a4e5c78e38485fdebb3146a2eb575"
+        },
+        "cpp/src/solver_presets.cpp": {
+          "imported_sha256": "f078cac49b4b0ec0cda868919224b77bbd93dcfb1105c9fdf22f4b1cf89f756c",
+          "current_sha256": "866ea2ebebe9f1d742d18c2d3cfc944d8b0efd96e2b0480aa938ba72180b65bd"
+        }
+      }
+    }
   ]
 }
