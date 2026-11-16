@@ -2,6 +2,7 @@
 #include "mlnd/progress.hpp"
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -56,21 +57,36 @@ Json first_leg_support(const Input& d,const PathCollection& paths) {
         {"demand_rates_recomputed",false}};
 }
 
-void preprocess_generalized_demand(Input& d, const PathCollection& paths) {
-    model_construction_guard("demand_preprocessing",0,0,0,true);
+void preprocess_generalized_demand(Input& d, PathCollection& paths, double deadline) {
     if ((d.max_orders != 1 && d.max_orders != 2) || d.flow_policy != "aggregate")
         throw std::invalid_argument("Preprocessed demand requires K=1 or K=2 and aggregate flow policy");
-    if (!paths.complete || !paths.support_complete)
-        throw std::invalid_argument("Preprocessed demand requires the complete path catalogue");
-    if (d.max_orders == 2) for (double value : d.kappa.values)
+    if (!paths.support_complete)
+        throw std::invalid_argument("Preprocessed demand requires complete initial-segment support");
+    if(std::isnan(deadline))throw std::invalid_argument("Preprocessing deadline must not be NaN");
+    paths.domain_complete=false;
+    paths.physical_service_count=0;
+    d.preprocessed_demand_report=Json::object();
+    std::size_t physical_count=0,operations=0;
+    auto guard=[&](bool force=false) {
+        if(force || ++operations%256==0) {
+            const double now=std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if(now>=deadline)throw EnumerationStopped("time_limit",physical_count,paths.initial_segments.size());
+        }
+        model_construction_guard("demand_preprocessing",0,0,0,force);
+    };
+    guard(true);
+    if (d.max_orders == 2) for (double value : d.kappa.values) {
+        guard();
         if (value != 0 && value != 1)
             throw std::invalid_argument("Preprocessed demand prototype requires binary kappa");
+    }
     const int R=d.n_od, L=d.n_l;
     const double infinity=std::numeric_limits<double>::infinity();
     std::vector<double> single_cost(R,infinity), pair_cost(R*R,infinity);
     Matrix<int> single_support(R,L), pair_support(R*R,L);
-    for (const auto& p:paths.service_paths) {
-        model_construction_guard("demand_preprocessing",0,0,0);
+    physical_count=visit_service_paths(d,paths,[&](const ServicePath& p) {
+        guard();
         if (p.second_od<0) {
             single_cost[p.first_od]=std::min(single_cost[p.first_od],p.cost);
             single_support(p.first_od,p.b[0])=1;
@@ -79,17 +95,18 @@ void preprocess_generalized_demand(Input& d, const PathCollection& paths) {
             pair_cost[pair]=std::min(pair_cost[pair],p.cost);
             pair_support(pair,p.b[0])=1;
         }
-    }
+    },deadline);
     struct Candidate { int r,s; double score; };
     std::vector<Candidate> candidates;
     if(d.max_orders==2) for(int r=0;r<R;++r) for(int s=0;s<R;++s) {
-        model_construction_guard("demand_preprocessing",0,0,0);
+        guard();
         if(d.kappa(r,s)==0 || !std::isfinite(single_cost[r]) ||
            !std::isfinite(single_cost[s]) || !std::isfinite(pair_cost[r*R+s])) continue;
         const double saving=single_cost[r]+single_cost[s]-pair_cost[r*R+s];
         if(saving>0) candidates.push_back({r,s,saving});
     }
-    std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b) {
+    std::sort(candidates.begin(),candidates.end(),[&](const Candidate& a,const Candidate& b) {
+        guard();
         if(a.score!=b.score) return a.score>b.score;
         return std::tie(a.r,a.s)<std::tie(b.r,b.s);
     });
@@ -99,7 +116,7 @@ void preprocess_generalized_demand(Input& d, const PathCollection& paths) {
     Json order=Json::array(),trace=Json::array();
     std::size_t accepted=0, support_rejected=0;
     for(const auto& c:candidates) {
-        model_construction_guard("demand_preprocessing",0,0,0);
+        guard();
         order.push_back({c.r,c.s});
         const double ar=d.single_rates[c.r],as=d.single_rates[c.s];
         const double q=-std::expm1(-as*d.effective_delta());
@@ -126,10 +143,12 @@ void preprocess_generalized_demand(Input& d, const PathCollection& paths) {
     d.head_rates=d.single_rates;
     double max_residual=0,pair_total=0;
     for(int r=0;r<R;++r) {
+        guard();
         double reconstructed=d.single_rates[r];
         if(d.single_rates[r]<0 || !std::isfinite(d.single_rates[r]))
             throw std::runtime_error("Preprocessing produced an invalid residual demand");
         for(int s=0;s<R;++s) {
+            guard();
             reconstructed+=d.pair_rates(r,s)+d.pair_rates(s,r);
             d.head_rates[r]+=d.pair_rates(r,s);
             pair_total+=d.pair_rates(r,s);
@@ -141,14 +160,14 @@ void preprocess_generalized_demand(Input& d, const PathCollection& paths) {
         throw std::runtime_error("Preprocessed demand failed raw-order conservation");
     Json pairs=Json::array(),support=Json::array();
     for(int r=0;r<R;++r) {
+        guard();
         Json row=Json::array(), origins=Json::array();
-        for(int s=0;s<R;++s)row.push_back(d.pair_rates(r,s));
+        for(int s=0;s<R;++s) { guard();row.push_back(d.pair_rates(r,s)); }
         for(int l=0;l<L;++l)origins.push_back(d.common_origin_support(r,l));
         pairs.push_back(std::move(row));support.push_back(std::move(origins));
     }
     d.preprocessed_demand=true;
-    model_construction_guard("demand_preprocessing",0,0,0,true);
-    d.preprocessed_demand_report={
+    Json report={
         {"method","residual_pair_opportunity_v1"},
         {"ranking","descending_min_single_cost_sum_minus_min_double_cost_then_lexicographic"},
         {"positive_proxy_saving_only",true},{"proxy_scope","global_minima_over_all_candidate_facilities"},
@@ -164,5 +183,9 @@ void preprocess_generalized_demand(Input& d, const PathCollection& paths) {
         {"single_task_rate",std::accumulate(d.single_rates.begin(),d.single_rates.end(),0.0)},
         {"task_rate",total-pair_total},
         {"approximation","Poisson residual opportunities and effective min-rate matching; rates conserve mean OD demand"}};
+    guard(true);
+    d.preprocessed_demand_report=std::move(report);
+    paths.domain_complete=true;
+    paths.physical_service_count=physical_count;
 }
 } // namespace mlnd

@@ -74,7 +74,7 @@ std::string pricing_domain_identity(const Input& d,const PathCollection& paths) 
     std::string key="independent-tasks-courier-home/1";
     for(int value:{d.n_l,d.n_h,d.n_od,d.n_levels,d.max_orders})identity_scalar(key,value);
     for(double value:{d.delta,d.operating_limit,d.fleet_cost,d.flight_cost,d.waiting_cost})identity_scalar(key,value);
-    for(bool value:{d.has_candidate_routes,d.preprocessed_demand,d.first_leg_consistency,paths.support_complete})
+    for(bool value:{d.has_candidate_routes,d.preprocessed_demand,d.first_leg_consistency,paths.support_complete,paths.domain_complete})
         identity_scalar(key,value);
     for(const auto* value:{&d.route_mode,&d.flow_policy,&d.model_version,&paths.scope})identity_string(key,*value);
     for(const auto* value:{&d.demand,&d.ground_cost,&d.deadline,&d.base_cost,&d.slot_epsilon,&d.single_rates,&d.head_rates})
@@ -115,7 +115,12 @@ LabelPricingOracle::LabelPricingOracle(const Input& d,PathCollection& paths,doub
     if(cache || capture_identity)domain_identity_=pricing_domain_identity(d,paths);
     // No event graph, registry rebuild, or completed-path copy is needed by
     // the complete-catalogue backend. A later label call can still build it.
-    if(prefer_catalogue && paths.complete)return;
+    if((prefer_catalogue && paths.complete) ||
+       (d.preprocessed_demand && !paths.complete && paths.domain_complete)) {
+        if(paths.service_registry.size()!=paths.service_paths.size() ||
+           paths.empty_registry.size()!=paths.empty_paths.size())rebuild_path_registry(paths);
+        return;
+    }
     if(cache) {
         if(cache->graph_ && cache->identity_==domain_identity_) {
             ++cache->hits_;
@@ -411,11 +416,259 @@ LabelPricingResult price_catalogue(const Input& d,const PathCollection& paths,co
     }
     return result;
 }
+
+LabelPricingResult price_streaming(const Input& d,PathCollection& paths,const Formulation& f,
+        const std::vector<double>& prices,const std::vector<double>& missing_service,
+        const std::vector<double>& missing_empty,const LabelPricingOptions& options) {
+    if(paths.complete || !paths.support_complete || !paths.domain_complete)
+        throw std::logic_error("Implicit streaming pricing requires certified complete physical support");
+    const auto service_count=paths.service_paths.size(),empty_count=paths.empty_paths.size();
+    if(prices.size()!=f.matrix.rows.size() || missing_service.size()>service_count ||
+       missing_empty.size()>empty_count || f.flow.size()>service_count || f.empty_flow.size()>empty_count)
+        throw std::invalid_argument("Streaming pricing dual/catalogue dimensions disagree");
+    if(!std::isfinite(options.tolerance) || options.tolerance<0 || options.max_columns==0 ||
+       std::isnan(options.deadline) || (options.branch_correction && std::isnan(options.branch_deadline)))
+        throw std::invalid_argument("Invalid streaming pricing options");
+    for(double value:prices)if(!std::isfinite(value))throw std::invalid_argument("Nonfinite pricing dual");
+    for(const auto* values:{&missing_service,&missing_empty})for(double value:*values)
+        if(!std::isfinite(value)||value<0)throw std::invalid_argument("Invalid omitted upper-bound dual");
+    const std::set<int> extra_service(options.excluded_service.begin(),options.excluded_service.end());
+    const std::set<int> extra_empty(options.excluded_empty.begin(),options.excluded_empty.end());
+    for(int id:extra_service)if(id<0||static_cast<std::size_t>(id)>=service_count)
+        throw std::invalid_argument("Invalid extra service exclusion");
+    for(int id:extra_empty)if(id<0||static_cast<std::size_t>(id)>=empty_count)
+        throw std::invalid_argument("Invalid extra empty exclusion");
+    auto excluded=[&](bool empty,std::size_t id) {
+        const auto& membership=empty?f.empty_flow:f.flow;
+        return (id<membership.size()&&membership[id]>=0) ||
+            (empty?extra_empty:extra_service).count(static_cast<int>(id));
+    };
+    LabelPricingResult result;
+    result.implicit_streaming_pricing_used=true;
+    result.fast_pricing_used=true;
+    result.diverse_pricing_used=options.diverse_pricing;
+    result.dominance="implicit_streaming_exact_scan";
+    if(options.diverse_pricing)result.diversity_policy="task-return-base/resource-support-strata;q=4";
+    result.branch_correction_requested=options.branch_correction;
+    if(options.branch_correction)result.branch_correction_status="streaming_incomplete";
+    auto stopped=[&] {return wall_time()>=options.deadline;};
+    if(stopped())return result;
+    const double total=std::accumulate(d.demand.begin(),d.demand.end(),0.0);
+    if(!std::isfinite(total)||total<0)throw std::invalid_argument("Invalid catalogue total demand");
+
+    const double branch_started=wall_time();
+    const double branch_deadline=std::min(options.deadline,options.branch_deadline);
+    auto branch_stopped=[&] {return wall_time()>=branch_deadline;};
+    bool branch_active=options.branch_correction;
+    if(branch_active && (!d.preprocessed_demand || !d.origin_assignment() ||
+       d.flow_policy!="aggregate" || d.first_leg_consistency)) {
+        branch_active=false;result.branch_correction_status="unsupported_scope";
+    } else if(branch_active) {
+        result.branch_correction_scope="preprocessed_origin_aggregate";
+        if(branch_stopped()) {branch_active=false;result.branch_correction_status="budget_exhausted";}
+    }
+    if(branch_active) {
+        if(d.single_rates.size()!=static_cast<std::size_t>(d.n_od) ||
+           d.pair_rates.rows!=d.n_od || d.pair_rates.cols!=d.n_od)
+            throw std::invalid_argument("Branch pricing task-rate dimensions disagree");
+        for(double rate:d.single_rates)if(!std::isfinite(rate)||rate<0)
+            throw std::invalid_argument("Invalid branch pricing single rate");
+        for(double rate:d.pair_rates.values)if(!std::isfinite(rate)||rate<0)
+            throw std::invalid_argument("Invalid branch pricing pair rate");
+    }
+    const int branches=d.n_od+1;
+    std::vector<long double> branch_minima(branch_active?static_cast<std::size_t>(d.n_od)*d.n_l*branches:0,0);
+    auto branch_index=[&](int r,int l,int s) {return (static_cast<std::size_t>(r)*d.n_l+l)*branches+s+1;};
+    const auto candidate_limit=options.diverse_pricing && options.max_columns<=std::numeric_limits<std::size_t>::max()/4
+        ?4*options.max_columns:options.max_columns;
+    struct StreamingCandidate {
+        bool empty=false; int id=-1; double reduced=0;
+        ServiceSignature signature{};ServicePath service; EmptyPath relocation;
+    };
+    std::vector<StreamingCandidate> candidates;
+    auto less=[&](const StreamingCandidate& a,const StreamingCandidate& b) {
+        if(a.reduced!=b.reduced)return a.reduced<b.reduced;
+        if(a.empty!=b.empty)return a.empty<b.empty;
+        return a.signature<b.signature;
+    };
+    auto record=[&](const auto& path,int id,double rc) {
+        constexpr bool empty=std::is_same_v<std::decay_t<decltype(path)>,EmptyPath>;
+        if(!std::isfinite(rc))throw std::invalid_argument("Nonfinite streaming reduced cost");
+        ++result.omitted_paths;
+        auto& minimum=empty?result.min_empty:result.min_service;
+        minimum=std::min(minimum,rc);
+        if(rc>=-options.tolerance)return;
+        ++result.negative_paths;
+        StreamingCandidate c;c.empty=empty;c.id=id;c.reduced=rc;
+        if constexpr(empty)c.signature={path.b[0],path.b[1],-1,-1,-1,-1,-1,-1};
+        else c.signature=service_path_signature(path);
+        if(candidates.size()==candidate_limit && !less(c,candidates.front()))return;
+        // Copy a physical payload only after it enters the bounded heap.
+        if constexpr(empty)c.relocation=path;else c.service=path;
+        if(candidates.size()==candidate_limit) {
+            std::pop_heap(candidates.begin(),candidates.end(),less);candidates.pop_back();
+        }
+        candidates.push_back(std::move(c));std::push_heap(candidates.begin(),candidates.end(),less);
+    };
+    try {
+        visit_service_paths(d,paths,[&](const ServicePath& p) {
+            ++result.physical_path_builds;
+            if(branch_active&&branch_stopped()) {
+                branch_active=false;result.branch_correction_status="budget_exhausted";
+            }
+            if(branch_active)++result.branch_paths_scanned;
+            if(!service_path_enabled(f,p)) {++result.resource_pruned;return;}
+            ++result.terminal_paths;
+            const auto registered=paths.service_registry.find(service_path_signature(p));
+            const int id=registered==paths.service_registry.end()?-1:registered->second;
+            if(id>=0 && excluded(false,static_cast<std::size_t>(id))) {++result.excluded_paths;return;}
+            if(branch_active && (p.first_od<0||p.first_od>=d.n_od||p.b[0]<0||p.b[0]>=d.n_l||
+               p.second_od < -1||p.second_od>=d.n_od))
+                throw std::logic_error("Implicit physical path has an invalid branch identity");
+            const double upper=id>=0 && static_cast<std::size_t>(id)<missing_service.size()?missing_service[id]:0;
+            double rc=p.cost+upper;
+            long double safe_rc=static_cast<long double>(p.cost)+upper;
+            long double magnitude=1+std::abs(safe_rc);
+            for_each_path_coefficient(f,p,[&](int row,double coefficient) {
+                const double price=prices.at(row);rc-=coefficient*price;
+                if(branch_active) {
+                    const long double term=static_cast<long double>(coefficient)*price;
+                    safe_rc-=term;magnitude+=std::abs(term);
+                }
+            });
+            record(p,id,rc);
+            if(branch_active) {
+                if(!std::isfinite(safe_rc)||!std::isfinite(magnitude)) {
+                    branch_active=false;result.branch_correction_status="invalid_numerics";
+                } else {
+                    safe_rc-=64*std::numeric_limits<double>::epsilon()*magnitude;
+                    auto& minimum=branch_minima[branch_index(p.first_od,p.b[0],p.second_od)];
+                    minimum=std::min(minimum,safe_rc);
+                }
+            }
+        },options.deadline);
+    } catch(const EnumerationStopped&) {
+        // An interrupted traversal never defines a smaller certified domain.
+        // Do not register even the discovered negative batch on this path.
+        result.branch_correction_status=options.branch_correction?"budget_exhausted":"disabled";
+        if(options.branch_correction)result.branch_seconds=wall_time()-branch_started;
+        return result;
+    }
+    // A separate branch budget can expire without invalidating the ordinary
+    // scan. Finalize the service-only strengthening before scanning empties.
+    double branch_rounded=0;
+    bool branch_finished=false;
+    if(branch_active&&branch_stopped()) {
+        branch_active=false;result.branch_correction_status="budget_exhausted";
+    }
+    if(branch_active) {
+        long double correction=0;
+        for(int q=0;q<d.task_count();++q) {
+            const int r=d.task_first(q),s=d.task_second(q);
+            const double rate=d.task_rate(q);
+            if(rate<=0)continue;
+            long double largest=0;
+            for(int l=0;l<d.n_l;++l) {
+                ++result.branch_groups;
+                largest=std::max(largest,-branch_minima[branch_index(r,l,s)]);
+            }
+            correction=add_nonnegative_product_up(correction,rate,largest);
+        }
+        const long double safe=correction+64*std::numeric_limits<double>::epsilon()*(1+correction);
+        branch_rounded=std::nextafter(static_cast<double>(safe),std::numeric_limits<double>::infinity());
+        if(!std::isfinite(correction)||!std::isfinite(branch_rounded))result.branch_correction_status="invalid_numerics";
+        else if(branch_stopped())result.branch_correction_status="budget_exhausted";
+        else branch_finished=true;
+    }
+    if(options.branch_correction)result.branch_seconds=wall_time()-branch_started;
+    std::size_t omitted_empty=0;
+    for(int from=0;from<d.n_l;++from) for(int to=0;to<d.n_l;++to) {
+        if(stopped())return result;
+        if(from==to || !d.allowed_links(from,to))continue;
+        const double time=d.flight_times(from,to);
+        if(time>d.operating_limit+resource_tolerance)continue;
+        EmptyPath p;p.b={from,to};p.legs={leg(from,to)};p.arc_counts={{from,to,1}};
+        p.flight_time=p.time=time;p.cost=d.flight_cost*time;
+        ++result.terminal_paths;
+        const auto registered=paths.empty_registry.find(p.b);
+        const int id=registered==paths.empty_registry.end()?-1:registered->second;
+        if(id>=0 && excluded(true,static_cast<std::size_t>(id))) {++result.excluded_paths;continue;}
+        ++omitted_empty;
+        double rc=p.cost+(id>=0 && static_cast<std::size_t>(id)<missing_empty.size()?missing_empty[id]:0);
+        for_each_path_coefficient(f,p,[&](int row,double coefficient){rc-=coefficient*prices.at(row);});
+        record(p,id,rc);
+    }
+    result.minimum=std::min(result.min_service,result.min_empty);
+    result.old_service_correction=total*std::max(0.0,-result.min_service);
+    result.chosen_service_correction=result.old_service_correction;
+    result.empty_correction=total*omitted_empty*std::max(0.0,-result.min_empty);
+    result.correction=result.old_service_correction+result.empty_correction;
+    if(!std::isfinite(result.correction))throw std::invalid_argument("Nonfinite streaming missing-column correction");
+    std::sort(candidates.begin(),candidates.end(),less);
+    std::vector<std::size_t> chosen;
+    if(options.diverse_pricing && !candidates.empty()) {
+        // Deterministic strata on the bounded candidate pool. Preserve the
+        // global minimum first, then prefer underrepresented task/return-base
+        // groups and resource-support patterns; cost breaks all remaining ties.
+        using Group=std::array<int,4>;
+        std::vector<std::size_t> groups,resources;
+        std::map<Group,std::size_t> group_ids;
+        std::map<std::pair<Group,std::vector<int>>,std::size_t> resource_ids;
+        for(const auto& c:candidates) {
+            Group group;std::vector<int> support;
+            if(c.empty) {
+                const auto& p=c.relocation;group={1,-1,-1,p.b[1]};
+                for(auto [u,v,count]:p.arc_counts)if(count) support.push_back(d.n_h+u*d.n_nodes()+v);
+            } else {
+                const auto& p=c.service;group={0,p.first_od,p.second_od,p.b[1]};
+                for(auto [i,time]:p.slot_times)if(time!=0)support.push_back(i);
+                for(auto [u,v,count]:p.arc_counts)if(count)support.push_back(d.n_h+u*d.n_nodes()+v);
+            }
+            std::sort(support.begin(),support.end());support.erase(std::unique(support.begin(),support.end()),support.end());
+            const auto gid=group_ids.emplace(group,group_ids.size()).first->second;
+            const auto rid=resource_ids.emplace(std::make_pair(group,std::move(support)),resource_ids.size()).first->second;
+            groups.push_back(gid);resources.push_back(rid);
+        }
+        result.diversity_candidates=candidates.size();result.diversity_groups=group_ids.size();
+        std::vector<std::size_t> group_use(group_ids.size(),0),resource_use(resource_ids.size(),0);
+        std::vector<bool> selected(candidates.size(),false);
+        while(chosen.size()<options.max_columns && chosen.size()<candidates.size()) {
+            if(stopped())return result;
+            std::size_t best=candidates.size();
+            for(std::size_t i=0;i<candidates.size();++i)if(!selected[i]) {
+                if(best==candidates.size() ||
+                   std::make_pair(group_use[groups[i]],resource_use[resources[i]]) <
+                   std::make_pair(group_use[groups[best]],resource_use[resources[best]]))best=i;
+            }
+            selected[best]=true;chosen.push_back(best);
+            ++group_use[groups[best]];++resource_use[resources[best]];
+        }
+        std::sort(chosen.begin(),chosen.end());
+    } else for(std::size_t i=0;i<std::min(options.max_columns,candidates.size());++i)chosen.push_back(i);
+    for(auto i:chosen) {
+        auto& c=candidates[i];
+        // Registry IDs are immutable. Materialize only the returned batch,
+        // never all negative paths encountered during the complete scan.
+        if(c.empty)result.empty.push_back(register_empty_path(paths,std::move(c.relocation)));
+        else result.service.push_back(register_service_path(paths,std::move(c.service)));
+    }
+    result.complete=!stopped();
+    if(result.complete&&branch_finished) {
+        result.branch_correction_complete=true;result.branch_correction_status="complete";
+        result.branch_service_correction=branch_rounded;
+        result.chosen_service_correction=std::min(result.old_service_correction,branch_rounded);
+        result.branch_correction_used=branch_rounded<result.old_service_correction;
+        result.correction=result.chosen_service_correction+result.empty_correction;
+    }
+    return result;
+}
 }
 
 LabelPricingResult LabelPricingOracle::price(const Formulation& f,const std::vector<double>& prices,
         const std::vector<double>& missing_service,const std::vector<double>& missing_empty,
         const LabelPricingOptions& options) const {
+    if(data_->preprocessed_demand && !paths_->complete && paths_->domain_complete)
+        return price_streaming(*data_,*paths_,f,prices,missing_service,missing_empty,options);
     if(options.catalogue_pricing && paths_->complete)
         return price_catalogue(*data_,*paths_,f,prices,missing_service,missing_empty,options);
     if(!graph_) {
@@ -627,7 +880,7 @@ LabelPricingResult LabelPricingOracle::price(const Formulation& f,const std::vec
             Label l=source; l.next=&next; l.busy=busy;
             l.reduced+=flight_cost(d.n_l+source.segment.delivery,d.n_l+next.pickup,next.transfer)
                  +pickup_cost(next.od,next.pickup,next.q,next.wait)
-                 +prices[f.double_rows.at(source.segment.id*d.n_od+next.od)];
+                 +prices[service_branch_row(f,source.segment.id,source.first,next.od,source.b[0])];
             buckets[{l.b[0],l.b[1],next.od,next.pickup}].push_back(std::move(l));
             ++result.labels_created;
         }

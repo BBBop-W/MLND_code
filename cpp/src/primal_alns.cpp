@@ -446,6 +446,8 @@ Json PrimalAlnsSearch::summary() const {
         {"elite_refinements_requested",s.refinements},{"next_block_size",s.block_size},
         {"column_version",s.column_version},{"service_columns",s.service_columns.size()},{"empty_columns",s.empty_columns.size()},
         {"optional_column_limit",s.optional_limit},{"operators",operators},{"support",s.bank.metadata()},
+        {"search_domain",s.paths.complete?"complete_catalogue":"generated_pool"},
+        {"missing_generated_support_is_unknown",!s.paths.complete},
         {"global_lower_bound_available",false}};
 }
 } // namespace mlnd

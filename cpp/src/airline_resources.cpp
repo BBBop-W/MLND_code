@@ -27,10 +27,11 @@ struct Branch {
     double rate;
     std::vector<int> paths;
 };
-std::vector<Branch> branches(const Input& d,const PathCollection& paths) {
+std::vector<Branch> branches(const Input& d,const PathCollection& paths,bool materialize=true) {
     if (!d.preprocessed_demand || !d.origin_assignment() || d.flow_policy!="aggregate" ||
         d.first_leg_consistency || d.route_mode!="direct" || d.has_candidate_routes ||
-        d.max_orders<1 || d.max_orders>2 || !paths.complete || !paths.support_complete)
+        d.max_orders<1 || d.max_orders>2 || !paths.support_complete ||
+        (materialize?!paths.complete:(!paths.complete && !paths.domain_complete)))
         throw std::invalid_argument("Airline resources require complete direct fixed origin tasks and aggregate flow");
     if (d.n_l<1 || d.n_od<1 || d.n_h<0 ||
         d.single_rates.size()!=static_cast<std::size_t>(d.n_od) ||
@@ -48,7 +49,7 @@ std::vector<Branch> branches(const Input& d,const PathCollection& paths) {
             out.push_back({r,l,s,rate,{}});
         }
     }
-    for (std::size_t j=0;j<paths.service_paths.size();++j) {
+    if(materialize)for (std::size_t j=0;j<paths.service_paths.size();++j) {
         const auto& p=paths.service_paths[j];
         if (p.first_od<0 || p.first_od>=d.n_od || p.second_od<-1 || p.second_od>=d.n_od ||
             p.b[0]<0 || p.b[0]>=d.n_l || p.b[1]<0 || p.b[1]>=d.n_l)
@@ -77,7 +78,7 @@ void nonnegative_costs(const Input& d) {
 
 AirlineConnectivityCuts build_airline_connectivity(const Input& d,const PathCollection& paths) {
     const double started=wall_time();
-    const auto groups=branches(d,paths);
+    const auto groups=branches(d,paths,false);
     nonnegative_costs(d);
     const DesignLayout layout(d);
     const int N=d.n_nodes(),L=d.n_l;
@@ -99,34 +100,48 @@ AirlineConnectivityCuts build_airline_connectivity(const Input& d,const PathColl
         add("airline_locker_out",std::move(outgoing));
     }
     std::vector<std::set<int>> supporting_assignments(N*N);
+    std::vector<std::vector<std::set<int>>> roles(groups.size());
+    std::vector<bool> supported(groups.size(),false);
+    std::vector<int> branch_index(d.task_count()*L,-1);
+    for(std::size_t k=0;k<groups.size();++k) {
+        const auto& b=groups[k];
+        branch_index[d.task_index(b.head,b.second)*L+b.origin]=static_cast<int>(k);
+        roles[k].resize(b.second<0?3:4);
+    }
     std::size_t scanned=0;
-    for (const auto& b:groups) {
+    const std::size_t domain_scanned=visit_service_paths(d,paths,[&](const ServicePath& p) {
+        if(p.first_od<0 || p.first_od>=d.n_od || p.second_od<-1 || p.second_od>=d.n_od ||
+           p.b[0]<0 || p.b[0]>=L || p.b[1]<0 || p.b[1]>=L)
+            throw std::invalid_argument("Malformed complete service path");
+        const int k=branch_index[d.task_index(p.first_od,p.second_od)*L+p.b[0]];
+        if(k<0)return;
+        const auto& b=groups[k];
         const int alpha=layout.assignment_index(d.task_index(b.head,b.second),b.origin);
-        if (b.paths.empty()) {add("airline_missing_task",{{alpha,1}});continue;}
-        // Each role set intersects every complete path in this task branch.
-        // The return role ranges over ALL physical return bases.
-        std::vector<std::set<int>> roles(b.second<0?3:4);
-        for (int j:b.paths) {
-            const auto& p=paths.service_paths[j];++scanned;
-            if (p.pickups.size()!=(b.second<0?1u:2u) || p.deliveries.size()!=p.pickups.size())
-                throw std::invalid_argument("Malformed direct task roles");
-            roles[0].insert(b.origin*N+L+p.pickups.front());
-            roles[1].insert((L+p.pickups[0])*N+L+p.deliveries[0]);
-            roles[2].insert((L+p.deliveries.back())*N+p.b[1]);
-            if (b.second>=0) roles[3].insert((L+p.pickups[1])*N+L+p.deliveries[1]);
-            const auto arcs=arc_counts(d,p);
-            for (auto [e,n]:arcs) { (void)n; supporting_assignments[e].insert(alpha); }
-            // Validate role arcs against this path, not only input allowance.
-            for (int e:{b.origin*N+L+p.pickups.front(),
-                        (L+p.pickups[0])*N+L+p.deliveries[0],
-                        (L+p.deliveries.back())*N+p.b[1]})
-                if (!arcs.count(e)) throw std::invalid_argument("A role arc is absent from its physical path");
-            if (b.second>=0 && !arcs.count((L+p.pickups[1])*N+L+p.deliveries[1]))
-                throw std::invalid_argument("Second loaded role absent from path");
-        }
-        for (std::size_t role=0;role<roles.size();++role) {
+        ++scanned;supported[k]=true;
+        if(p.pickups.size()!=(b.second<0?1u:2u) || p.deliveries.size()!=p.pickups.size())
+            throw std::invalid_argument("Malformed direct task roles");
+        // Store only the union of role arcs, not physical path indices.
+        // Each union intersects every task route, including all return bases.
+        roles[k][0].insert(b.origin*N+L+p.pickups.front());
+        roles[k][1].insert((L+p.pickups[0])*N+L+p.deliveries[0]);
+        roles[k][2].insert((L+p.deliveries.back())*N+p.b[1]);
+        if(b.second>=0)roles[k][3].insert((L+p.pickups[1])*N+L+p.deliveries[1]);
+        const auto arcs=arc_counts(d,p);
+        for(auto [e,n]:arcs){(void)n;supporting_assignments[e].insert(alpha);}
+        for(int e:{b.origin*N+L+p.pickups.front(),
+                   (L+p.pickups[0])*N+L+p.deliveries[0],
+                   (L+p.deliveries.back())*N+p.b[1]})
+            if(!arcs.count(e))throw std::invalid_argument("A role arc is absent from its physical path");
+        if(b.second>=0 && !arcs.count((L+p.pickups[1])*N+L+p.deliveries[1]))
+            throw std::invalid_argument("Second loaded role absent from path");
+    });
+    for(std::size_t k=0;k<groups.size();++k) {
+        const auto& b=groups[k];
+        const int alpha=layout.assignment_index(d.task_index(b.head,b.second),b.origin);
+        if(!supported[k]){add("airline_missing_task",{{alpha,1}});continue;}
+        for(std::size_t role=0;role<roles[k].size();++role) {
             Coefficients row{{alpha,1}};
-            for (int e:roles[role]) row.emplace_back(layout.airline+e,-1);
+            for(int e:roles[k][role])row.emplace_back(layout.airline+e,-1);
             const char* names[]{"airline_task_departure","airline_task_loaded_first","airline_task_return","airline_task_loaded_second"};
             add(names[role],std::move(row));
         }
@@ -143,7 +158,9 @@ AirlineConnectivityCuts build_airline_connectivity(const Input& d,const PathColl
         {"assignment_scope","task"},{"tasks",d.task_count()},
         {"preserves_all_original_design_encodings",false},{"master_added_variables",0},
         {"rows",result.rows.size()},{"row_count",result.rows.size()},{"row_types",counts},{"positive_branches",groups.size()},
-        {"paths_scanned",scanned},{"all_return_bases",true},{"seconds",wall_time()-started}};
+        {"paths_scanned",scanned},{"physical_paths_scanned",domain_scanned},
+        {"complete_domain",true},{"catalogue_complete",paths.complete},
+        {"all_return_bases",true},{"seconds",wall_time()-started}};
     return result;
 }
 

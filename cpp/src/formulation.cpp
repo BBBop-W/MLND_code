@@ -39,7 +39,7 @@ DesignLayout::DesignLayout(const Input& d) {
 TaskAirlineBounds build_task_airline_bounds(const Input& d, const PathCollection& paths) {
     if (!d.preprocessed_demand || !d.origin_assignment() || d.flow_policy != "aggregate" ||
         d.route_mode != "direct" || d.has_candidate_routes || d.max_orders < 1 || d.max_orders > 2 ||
-        !paths.complete || !paths.support_complete)
+        !(paths.complete || paths.domain_complete) || !paths.support_complete)
         throw std::invalid_argument("Task airline bounds require fixed independent tasks and a complete direct path catalogue");
     const int R=d.n_od, L=d.n_l, N=d.n_nodes();
     if (d.single_rates.size()!=static_cast<std::size_t>(R) || d.pair_rates.rows!=R || d.pair_rates.cols!=R)
@@ -54,13 +54,13 @@ TaskAirlineBounds build_task_airline_bounds(const Input& d, const PathCollection
     // Sparse maps avoid a R*L*(R+1)*N*N tensor. Return bases are deliberately
     // absent from the grouping key, so every feasible return remains allowed.
     std::map<std::tuple<int,int,int>,std::map<int,int>> branch_max;
-    for (const auto& p:paths.service_paths) {
+    const auto paths_scanned=visit_service_paths(d,paths,[&](const ServicePath& p) {
         if (p.first_od<0 || p.first_od>=R || p.second_od<-1 || p.second_od>=R ||
             (d.max_orders==1 && p.second_od>=0) ||
             p.b[0]<0 || p.b[0]>=L || p.b[1]<0 || p.b[1]>=L)
             throw std::invalid_argument("Malformed path in task airline catalogue");
         const double rate=p.second_od<0?d.single_rates[p.first_od]:d.pair_rates(p.first_od,p.second_od);
-        if (rate==0) continue;
+        if (rate==0) return;
         auto& maxima=branch_max[{p.first_od,p.b[0],p.second_od}];
         std::map<int,int> counts;
         for (auto [u,v,count]:p.arc_counts) {
@@ -69,7 +69,7 @@ TaskAirlineBounds build_task_airline_bounds(const Input& d, const PathCollection
             counts[u*N+v]+=count;
         }
         for (auto [e,count]:counts) maxima[e]=std::max(maxima[e],count);
-    }
+    });
     std::vector<std::map<int,long double>> task_origin_load(d.task_count()*L);
     for (const auto& [key,maxima]:branch_max) {
         const auto [r,l,s]=key;
@@ -113,8 +113,8 @@ TaskAirlineBounds build_task_airline_bounds(const Input& d, const PathCollection
     }
     std::sort(ratios.begin(),ratios.end());
     out.metadata={{"enabled",true},{"source","complete_fixed_task_arc_multiplicity"},
-        {"catalogue_complete",paths.complete},{"support_complete",paths.support_complete},
-        {"service_paths_scanned",paths.service_paths.size()},{"positive_branch_origin_groups",branch_max.size()},
+        {"catalogue_complete",paths.complete},{"domain_complete",paths.complete || paths.domain_complete},{"support_complete",paths.support_complete},
+        {"service_paths_scanned",paths_scanned},{"positive_branch_origin_groups",branch_max.size()},
         {"assignment_scope",d.assignment_scope()},{"return_scope","all_physical_returns"},
         {"validity_scope","all_original_integer_designs"},{"integer_feasible_set_preserved",true},
         {"master_added_variables",0},{"additional_recourse_rows",0},
@@ -209,7 +209,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     if (tight_airline_bounds && (d.route_mode != "direct" || d.has_candidate_routes || d.max_orders < 1 || d.max_orders > 2))
         throw std::invalid_argument("Tight airline bounds require the direct K<=2 path domain");
     if (!strengthening.task_airline_upper.empty() &&
-        (!d.preprocessed_demand || !d.origin_assignment() || !paths.complete || !paths.support_complete ||
+        (!d.preprocessed_demand || !d.origin_assignment() || !(paths.complete || paths.domain_complete) || !paths.support_complete ||
          d.route_mode!="direct" || d.has_candidate_routes || d.max_orders<1 || d.max_orders>2 ||
          strengthening.task_airline_upper.size()!=static_cast<std::size_t>(d.n_nodes()*d.n_nodes())))
         throw std::invalid_argument("Prepared task airline bounds do not match this formulation domain");
@@ -218,7 +218,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     if(d.first_leg_consistency)
         throw std::invalid_argument("First-leg consistency is incompatible with independent task assignment");
     if (d.preprocessed_demand && (conditional_demand || (d.max_orders != 1 && d.max_orders != 2) ||
-        d.flow_policy != "aggregate" || !paths.complete ||
+        d.flow_policy != "aggregate" || !(paths.complete || paths.domain_complete) ||
         d.single_rates.size() != static_cast<std::size_t>(d.n_od) ||
         d.head_rates.size() != static_cast<std::size_t>(d.n_od) ||
         d.pair_rates.rows != d.n_od || d.pair_rates.cols != d.n_od))
@@ -371,7 +371,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
     }
     f.executed_head_rows.assign(S,-1);
     f.single_rows.assign(S,-1);
-    f.double_rows.assign(S*R,-1);
+    if(!d.preprocessed_demand)f.double_rows.assign(static_cast<std::size_t>(S)*R,-1);
     for (int l = 0; l < L; ++l) {
         m.row(label("rho_open",l),'L',0,{{f.rho[l],1},{l,-1}});
         int up=m.variable(label("cone_up",l),0,fleet_bound+1);
@@ -429,8 +429,7 @@ Formulation build_formulation(const Input& d, const PathCollection& paths,
             const auto& segment=paths.initial_segments[j];
             const int first=segment.first_od,l=segment.b[0];
             f.single_rows[j]=f.task_rows[d.task_index(first)*L+l];
-            if (d.max_orders==2) for (int second=0;second<R;++second)
-                f.double_rows[j*R+second]=f.task_rows[d.task_index(first,second)*L+l];
+
         }
     }
     std::vector<std::vector<int>> by_pair(L*L);

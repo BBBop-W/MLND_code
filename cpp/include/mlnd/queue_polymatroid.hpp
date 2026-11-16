@@ -75,6 +75,7 @@ private:
         QueueResourcePrices prices;
         Json certificate;
     };
+    bool complete_domain_unchanged() const;
     bool prepare_profile(const QueueResourcePrices&, double seconds, Profile&,
                          std::string& status, bool reject_duplicates) const;
     TaskSavingsCut separate_prepared(const Profile&, std::size_t index,
@@ -85,9 +86,11 @@ private:
     int heads_ = 0, bases_ = 0, nodes_ = 0;
     double fleet_cost_ = 0, courier_cost_ = 0, margin_ = 0, total_demand_ = 0;
     std::size_t service_count_ = 0, empty_count_ = 0, max_profiles_ = 8, next_id_ = 1;
+    // Exact input/support identity; independent of the generated-column pool.
+    std::string domain_identity_;
     std::vector<double> airline_upper_;
     std::vector<Branch> branches_;
-    std::vector<int> branch_lookup_, path_branch_;
+    std::vector<int> branch_lookup_;
     std::vector<bool> unsupported_;
     std::vector<Profile> profiles_;
     Json metadata_;

@@ -49,6 +49,8 @@ struct PrimalBlockRequest {
     PrimalRepairRestrictions restrictions;
     std::vector<int> extra_service, extra_empty;
     std::size_t paths_per_branch=4, optional_column_limit=5000;
+    // Search only generated/registered paths for missing ranked witnesses.
+    // Neither option enumerates or certifies missing physical-domain paths.
     bool complete_missing_support=false;
     bool indexed_support_completion=false;
     Json diagnostics;
@@ -91,9 +93,10 @@ private:
     std::size_t scanned_=0,empty_count_=0;
     bool supported_=false;
     std::map<Branch,std::vector<RankedPath>> branches_;
-    // Full registered-ID index, distinct from the small ranked bank. Each
-    // vector is in append/ID order; zero-rate branches are indexed as well.
-    mutable std::map<Branch,std::vector<int>> complete_branches_;
+    // Index of the generated registered pool, distinct from the ranked bank.
+    // This is not an implicit physical-domain index, even when preprocessing
+    // has completed a full physical scan. IDs remain in append order.
+    mutable std::map<Branch,std::vector<int>> registered_branches_;
     mutable std::size_t indexed_=0;
     std::vector<PrimalCgFeedback> feedback_;
     std::string feedback_domain_identity_;

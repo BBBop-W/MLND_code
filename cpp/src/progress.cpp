@@ -49,7 +49,7 @@ void atomic_json_file(const std::filesystem::path& path, const Json& value) {
     {
         std::ofstream stream(temporary, std::ios::trunc);
         if (!stream) throw std::runtime_error("Cannot open atomic JSON output " + temporary.string());
-        stream << value.dump(2) << '\n';
+        stream << std::setw(2) << value << '\n';
         stream.flush();
         if (!stream) throw std::runtime_error("Cannot finish atomic JSON output " + temporary.string());
     }

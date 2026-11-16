@@ -4,7 +4,8 @@
 
 namespace mlnd {
 
-// Fixed generalized-task allocations over a COMPLETE physical path catalogue.
+// Fixed generalized-task allocations over the COMPLETE physical path domain.
+// Only group minima/counts are retained; the path catalogue may be implicit.
 // Each (task, departure) coefficient includes only that independent task,
 // minimizing over all possible return bases before its own positive part.
 // No current design or restricted column pool determines these constants.
@@ -15,6 +16,7 @@ struct TaskSavingsData {
     std::vector<double> saving, signed_saving, chord_coefficient, total_load;
     std::vector<std::vector<double>> locker_load;
     std::vector<bool> supported;
+    std::vector<std::size_t> path_counts;
     Json metadata;
 };
 

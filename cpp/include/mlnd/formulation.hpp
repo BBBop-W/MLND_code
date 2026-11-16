@@ -103,14 +103,23 @@ Formulation build_formulation(const Input&, const PathCollection&,
                              bool conditional_demand = false,
                              bool tight_airline_bounds = false,
                              const FormulationStrengthening& = {});
+// Fixed tasks have one row per task/departure. Do not materialize the same
+// row index once for every first segment and every possible second OD.
+inline int service_branch_row(const Formulation& f,int segment,int first,int second,int origin) {
+    const int R=static_cast<int>(f.order_rows.size());
+    if(!f.task_rows.empty()) {
+        const int task=second<0?first:R+first*R+second;
+        return f.task_rows.at(static_cast<std::size_t>(task)*f.layout.n_l+origin);
+    }
+    return second<0?f.single_rows.at(segment):f.double_rows.at(segment*R+second);
+}
 // Canonical emission order is shared by sparse model construction and exact
 // reduced-cost evaluation. The visitor avoids one temporary vector per path.
 template<class Emit>
 void for_each_path_coefficient(const Formulation& f,const ServicePath& p,Emit&& emit) {
-    const int R=static_cast<int>(f.order_rows.size());
     const int N=static_cast<int>(std::sqrt(f.link_rows.size()));
     const int j=p.segment_id;
-    const int branch=p.second_od<0?f.single_rows.at(j):f.double_rows.at(j*R+p.second_od);
+    const int branch=service_branch_row(f,j,p.first_od,p.second_od,p.b[0]);
     if(branch<0)throw std::invalid_argument("Missing service branch row");
     emit(branch,-1);
     if(f.executed_head_rows.at(j)>=0)emit(f.executed_head_rows[j],-1);

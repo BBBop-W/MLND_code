@@ -1,3 +1,7 @@
+> **当前分支：MLND_sever。** 原生求解器和 `mlnd_runtime/` 已按 2026-11-16 的 `MLND_server` 实际工作区源码逐字节同步，包含该工作区尚未提交的修改。文件清单与 SHA-256 见 [SOURCE_VERSION.json](SOURCE_VERSION.json)。
+>
+> 构建入口为根目录 `CMakeLists.txt`（`cmake -S .`，目标 `mlnd`）。本次没有迁移服务器的 `run.py` 或实验启动脚本；下面保留的旧版说明和现有 `scripts/` 尚未适配本分支。迁移前完整版本已保存在 `codex/unified-task-algorithm` 的 `3ac3146` 提交。
+
 # MLND consecutive delivery network
 
 当前代码采用**任务级独立指派**：每个单订单或有序双订单任务独立选择出发基地，返回基地由路径选择。时限按骑手送到家时间判断，需求重构规则保持原样。完整 CPLEX、Benders、定价认证和上界搜索共享这一模型；没有旧首单捆绑模型的并行开关。

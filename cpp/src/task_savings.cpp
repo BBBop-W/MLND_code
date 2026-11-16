@@ -23,8 +23,8 @@ double lower_nonnegative(long double x) {
 void require_domain(const Input& d, const PathCollection& paths) {
     if (!d.preprocessed_demand || !d.origin_assignment() || d.flow_policy != "aggregate" ||
         d.first_leg_consistency || d.route_mode != "direct" || d.has_candidate_routes ||
-        d.max_orders < 1 || d.max_orders > 2 || !paths.complete || !paths.support_complete)
-        throw std::invalid_argument("Task savings require complete preprocessed task-assignment aggregate paths");
+        d.max_orders < 1 || d.max_orders > 2 || (!paths.complete && !paths.domain_complete) || !paths.support_complete)
+        throw std::invalid_argument("Task savings require a complete preprocessed physical task domain");
     if (!(d.fleet_cost > 0) || !std::isfinite(d.fleet_cost) ||
         d.single_rates.size()!=static_cast<std::size_t>(d.n_od) ||
         d.pair_rates.rows!=d.n_od || d.pair_rates.cols!=d.n_od)
@@ -46,8 +46,8 @@ TaskSavingsData task_savings_data(const Input& d,const PathCollection& paths) {
     out.supported.assign(G,true);
     std::vector<double> mincost(G,infinity),mintotal(G,infinity);
     std::vector<std::vector<double>> minload(G,std::vector<double>(H,infinity));
-    std::vector<int> pathcount(G,0);
-    for (const auto& p:paths.service_paths) {
+    out.path_counts.assign(G,0);
+    const std::size_t scanned=visit_service_paths(d,paths,[&](const ServicePath& p) {
         if (p.first_od<0 || p.first_od>=R || p.second_od<-1 || p.second_od>=R ||
             (d.max_orders==1 && p.second_od>=0) ||
             p.b[0]<0 || p.b[0]>=L || p.b[1]<0 || p.b[1]>=L ||
@@ -64,8 +64,8 @@ TaskSavingsData task_savings_data(const Input& d,const PathCollection& paths) {
             static_cast<long double>(p.cost)+static_cast<long double>(d.fleet_cost)*p.time));
         mintotal[k]=std::min(mintotal[k],lower_nonnegative(std::accumulate(load.begin(),load.end(),0.0L)));
         for (int i=0;i<H;++i) minload[k][i]=std::min(minload[k][i],lower_nonnegative(load[i]));
-        ++pathcount[k];
-    }
+        ++out.path_counts[k];
+    });
     int missing_groups=0,positive_branches=0;
     for (int q=0;q<Q;++q) for (int l=0;l<L;++l) {
         const int g=q*L+l,r=d.task_first(q),second=d.task_second(q);
@@ -75,7 +75,7 @@ TaskSavingsData task_savings_data(const Input& d,const PathCollection& paths) {
         ++positive_branches;
         // Each task owns its assignment and service fraction. An absent path
         // fixes only this task/base service to zero; siblings remain usable.
-        if (!pathcount[g]) {out.supported[g]=false;++missing_groups;continue;}
+        if (!out.path_counts[g]) {out.supported[g]=false;++missing_groups;continue;}
         const double reward=d.ground_cost[r]+(second<0?0:d.ground_cost[second]);
         const long double saving=static_cast<long double>(rate)*(reward-mincost[g]);
         out.signed_saving[g]=static_cast<double>(saving);
@@ -96,8 +96,9 @@ TaskSavingsData task_savings_data(const Input& d,const PathCollection& paths) {
         for (int r=0;r<Q;++r) out.chord_coefficient[r*L+l]=
             upper_nonnegative(static_cast<long double>(eta[l])*out.saving[r*L+l]);
     }
-    out.metadata={{"enabled",true},{"source","complete_physical_task_catalogue"},
-        {"catalogue_complete",true},{"service_paths",paths.service_paths.size()},
+    out.metadata={{"enabled",true},{"source","complete_physical_task_domain"},
+        {"complete_domain",true},{"catalogue_complete",paths.complete},
+        {"service_paths",paths.service_paths.size()},{"service_paths_scanned",scanned},
         {"heads",Q},{"tasks",Q},{"raw_ods",R},{"bases",L},{"groups",G},{"positive_branches",positive_branches},
         {"unsupported_groups",missing_groups},{"return_scope","all_return_bases"},
         {"assignment_scope","task"},{"saving",out.saving},{"signed_saving",out.signed_saving},

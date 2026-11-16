@@ -135,7 +135,7 @@ void PrimalSupportBank::extend_index(double deadline) const {
     for(;indexed_<paths_.service_paths.size();++indexed_) {
         if(indexed_%64==0 && expired(deadline))break;
         const auto& p=paths_.service_paths[indexed_];
-        complete_branches_[{d_.task_index(p.first_od,p.second_od),p.b[0],p.second_od}].push_back(static_cast<int>(indexed_));
+        registered_branches_[{d_.task_index(p.first_od,p.second_od),p.b[0],p.second_od}].push_back(static_cast<int>(indexed_));
     }
 }
 void PrimalSupportBank::extend(double deadline,bool index_paths) {
@@ -215,9 +215,13 @@ Json PrimalSupportBank::metadata() const {
         {"registered_service_paths",paths_.service_paths.size()},
         {"catalogue_scan_complete",scanned_==paths_.service_paths.size()},
         {"catalogue_complete",paths_.complete},{"partial",scanned_<paths_.service_paths.size() || !paths_.complete},
+        {"support_scope",paths_.complete?"complete_catalogue":"generated_pool"},
+        {"physical_domain_scan_complete",paths_.domain_complete},
+        {"physical_service_count",paths_.physical_service_count},
         {"branch_groups",branches_.size()},{"retained_paths",retained_keys_.size()},
-        {"complete_branch_index",{{"indexed_paths",indexed_},{"groups",complete_branches_.size()},
-            {"registered_pool_complete",indexed_==paths_.service_paths.size()},{"physical_domain_complete",paths_.complete}}},
+        {"complete_branch_index",{{"indexed_paths",indexed_},{"groups",registered_branches_.size()},
+            {"registered_pool_complete",indexed_==paths_.service_paths.size()},
+            {"index_scope","registered_path_pool"},{"physical_domain_complete",paths_.complete}}},
         {"cg_feedback",{{"observations",feedback_observations_},{"accepted_columns",feedback_columns_received_},
             {"retained_batches",feedback_.size()},{"retained_columns",feedback_columns},{"batch_limit",64},
             {"per_branch_optional_limit",2},{"certificate_eligible",false}}},
@@ -441,7 +445,16 @@ PrimalSupportBlock PrimalSupportBank::close(const PrimalSupportState& state,cons
                     !uses_closed(resources(d_,paths_.service_paths[id]),out.restrictions))witnesses.push_back(id);
             }
             if(witnesses.empty()) {
-                if(!request.complete_missing_support) {out.status="missing_branch";out.diagnostics["missing_branch"]={r,l,branch};out.diagnostics["all_positive_branches_preserved"]=false;return out;}
+                if(!request.complete_missing_support) {
+                    out.status="missing_branch";out.diagnostics["missing_branch"]={r,l,branch};
+                    out.diagnostics["all_positive_branches_preserved"]=false;
+                    // A missing shortlist witness rejects this candidate only.
+                    // Even a complete registered index says nothing about an
+                    // unmaterialized physical branch in implicit CG.
+                    out.diagnostics["unknown_support"]=true;
+                    out.diagnostics["support_search_scope"]="registered_path_shortlist";
+                    out.diagnostics["global_inference"]=false;return out;
+                }
                 missing.insert({r,l,branch});
             }
             witnesses_by_branch[{r,l,branch}]=std::move(witnesses);
@@ -462,8 +475,8 @@ PrimalSupportBlock PrimalSupportBank::close(const PrimalSupportState& state,cons
         using Cursor=std::tuple<int,Branch,std::size_t>;
         std::priority_queue<Cursor,std::vector<Cursor>,std::greater<Cursor>> next;
         for(const auto& key:missing) {
-            const auto found=complete_branches_.find(key);
-            if(found!=complete_branches_.end() && !found->second.empty())next.emplace(found->second.front(),key,0);
+            const auto found=registered_branches_.find(key);
+            if(found!=registered_branches_.end() && !found->second.empty())next.emplace(found->second.front(),key,0);
         }
         bool interrupted=false;
         while(!next.empty()) {
@@ -475,7 +488,7 @@ PrimalSupportBlock PrimalSupportBank::close(const PrimalSupportState& state,cons
             if(!uses_closed(resources(d_,path),out.restrictions)) {
                 witnesses_by_branch[key].push_back(id);missing.erase(key);
             } else {
-                const auto& ids=complete_branches_.at(key);
+                const auto& ids=registered_branches_.at(key);
                 if(offset+1<ids.size())next.emplace(ids[offset+1],key,offset+1);
             }
         }
@@ -502,6 +515,8 @@ PrimalSupportBlock PrimalSupportBank::close(const PrimalSupportState& state,cons
         // assignment without any path witness. Preserve it in intensification;
         // the unchanged original task rows still forbid positive throughput.
         if(!forced_closure && state.head_state[r]==l+1)retained_incomplete.emplace(r,l);
+        // Missing generated columns may restrict this local repair only;
+        // this is never a physical-domain infeasibility statement or cut.
         else forbidden.emplace(r,l);
     }
     out.restrictions.forbidden_origins.assign(forbidden.begin(),forbidden.end());
@@ -534,7 +549,9 @@ PrimalSupportBlock PrimalSupportBank::close(const PrimalSupportState& state,cons
         {"indexed_paths",indexed_},{"index_complete",indexed_==paths_.service_paths.size()},
         {"missing_branch_search_complete",missing_branch_search_complete},
         {"unknown_support",!missing.empty() && (!paths_.complete || !missing_branch_search_complete)},
-        {"scan_domain","registered_physical_paths"},{"forbidden_origins",forbidden},
+        {"scan_domain","registered_physical_paths"},{"index_scope","registered_path_pool"},
+        {"physical_domain_scan_complete",paths_.domain_complete},
+        {"origin_restriction_scope","this_repair_only"},{"forbidden_origins",forbidden},
         {"retained_incumbent_origins_without_full_support",retained_incomplete},
         {"original_task_rows_preserved",true},{"global_inference",false},
         {"coverage_scope","locally_enabled_origin_states"}};

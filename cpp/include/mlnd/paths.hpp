@@ -65,6 +65,10 @@ struct PathCollection {
     std::vector<ServicePath> service_paths;
     std::vector<EmptyPath> empty_paths;
     bool complete = true;
+    // Complete physical-domain scan certificate, independent of materialized
+    // catalogue completeness and of any particular dual pricing pass.
+    bool domain_complete = false;
+    std::size_t physical_service_count = 0;
     // Complete finite first-segment/task support is independent of whether
     // every physical task path has been materialized.
     bool support_complete = true;
@@ -90,6 +94,28 @@ PathCollection prepare_path_support(const Input&,
     std::optional<double> time_limit_seconds = std::nullopt,
     std::function<bool()> stop_requested = {},
     std::function<void(std::size_t,std::size_t,std::size_t)> progress = {});
+
+// Materialize the complete O(L^2) direct empty-path support, preserving existing
+// registered IDs. On a fresh support pool the order agrees with enumerate_paths.
+// Returns newly registered paths; interruption never sets a completeness flag.
+std::size_t register_empty_support_paths(const Input&, PathCollection&,
+    double deadline = std::numeric_limits<double>::infinity());
+
+// Visit every direct empty relocation, independent of the registered pool.
+// Implicit records have id=-1; complete catalogues retain their registered IDs.
+// This O(L^2) scan has the same deadline/exception contract as service visits.
+std::size_t visit_empty_paths(const Input&, const PathCollection& support,
+    const std::function<void(const EmptyPath&)>& visitor,
+    double deadline = std::numeric_limits<double>::infinity());
+
+// Visit the complete direct service-path domain without retaining or registering
+// its paths. Requires complete initial-segment support. A transient path has
+// id=-1; callers must not retain its reference or treat it as a registered ID.
+// A complete catalogue is visited directly. Normal return certifies completion
+// of this scan only; interruption throws and never changes completeness flags.
+std::size_t visit_service_paths(const Input&, const PathCollection& support,
+    const std::function<void(const ServicePath&)>& visitor,
+    double deadline = std::numeric_limits<double>::infinity());
 
 // Cheap primal seed, not a certificate or feasibility requirement. Retain a
 // few low cost single prefixes per (base pair, OD), then greedily extend those

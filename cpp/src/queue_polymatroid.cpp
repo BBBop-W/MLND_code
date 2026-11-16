@@ -1,4 +1,5 @@
 #include "mlnd/queue_polymatroid.hpp"
+#include "mlnd/pricing.hpp"
 
 #include <algorithm>
 #include <array>
@@ -227,9 +228,9 @@ QueuePolymatroidCuts::QueuePolymatroidCuts(const Input& d,const PathCollection& 
     const double started=wall_time();
     if(!d.preprocessed_demand || !d.origin_assignment() || d.flow_policy!="aggregate" ||
        d.first_leg_consistency || d.route_mode!="direct" || d.has_candidate_routes ||
-       d.max_orders<1 || d.max_orders>2 || !paths.complete || !paths.support_complete ||
+       d.max_orders<1 || d.max_orders>2 || (!paths.complete && !paths.domain_complete) || !paths.support_complete ||
        heads_<=0 || bases_<=0 || !(fleet_cost_>0) || !std::isfinite(fleet_cost_) || max_profiles_==0)
-        throw std::invalid_argument("Queue cuts require complete direct independently assigned tasks and aggregate flow");
+        throw std::invalid_argument("Queue cuts require a complete direct physical task domain and aggregate flow");
     TaskSavingsData owned;
     if(!supplied) {owned=task_savings_data(d,paths);supplied=&owned;}
     if(supplied->heads!=heads_ || supplied->bases!=bases_ || supplied->fleet_cost!=fleet_cost_ ||
@@ -258,14 +259,20 @@ QueuePolymatroidCuts::QueuePolymatroidCuts(const Input& d,const PathCollection& 
             branches_.push_back({r,l,s,rate,0});
         }
     }
-    path_branch_.assign(service_count_,-1);
-    for(std::size_t j=0;j<service_count_;++j) {
-        const auto& p=paths.service_paths[j];
-        if(p.first_od<0 || p.first_od>=d.n_od || p.second_od<-1 || p.second_od>=d.n_od ||
-           p.b[0]<0 || p.b[0]>=bases_ || p.b[1]<0 || p.b[1]>=bases_)
-            throw std::invalid_argument("Queue physical path has invalid task or base indices");
-        const int branch=branch_lookup_[(p.first_od*bases_+p.b[0])*branches_per_group+p.second_od+1];
-        path_branch_[j]=branch;if(branch>=0)++branches_[branch].paths;
+    // Reuse full-domain counts already computed for the savings profile.
+    // Their size is task/base, independent of the number of physical paths.
+    if(supplied->path_counts.size()==static_cast<std::size_t>(heads_*bases_)) {
+        service_count_=std::accumulate(supplied->path_counts.begin(),supplied->path_counts.end(),std::size_t{0});
+        for(auto& branch:branches_)
+            branch.paths=supplied->path_counts[d.task_index(branch.head,branch.second)*bases_+branch.origin];
+    } else {
+        service_count_=visit_service_paths(d,paths,[&](const ServicePath& p) {
+            if(p.first_od<0 || p.first_od>=d.n_od || p.second_od<-1 || p.second_od>=d.n_od ||
+               p.b[0]<0 || p.b[0]>=bases_ || p.b[1]<0 || p.b[1]>=bases_)
+                throw std::invalid_argument("Queue physical path has invalid task or base indices");
+            const int branch=branch_lookup_[(p.first_od*bases_+p.b[0])*branches_per_group+p.second_od+1];
+            if(branch>=0)++branches_[branch].paths;
+        });
     }
     for(const auto& branch:branches_)if(branch.paths==0)
         unsupported_[d.task_index(branch.head,branch.second)*bases_+branch.origin]=true;
@@ -282,6 +289,10 @@ QueuePolymatroidCuts::QueuePolymatroidCuts(const Input& d,const PathCollection& 
         }
         airline_upper_[u*nodes_+v]=bound;
     }
+    empty_count_=visit_empty_paths(d,paths,[](const EmptyPath&){});
+    domain_identity_=pricing_domain_identity(d,paths);
+    if(!complete_domain_unchanged())
+        throw std::invalid_argument("Queue complete physical domain counts disagree");
     Profile zero;zero.kind="nonnegative_savings_epi";zero.source="complete_task_savings_S_plus";
     zero.savings=supplied->saving;zero.unsupported.assign(heads_*bases_,false);
     zero.lower_coefficients.assign(layout_.count,0);zero.constant=courier_cost_;
@@ -289,7 +300,7 @@ QueuePolymatroidCuts::QueuePolymatroidCuts(const Input& d,const PathCollection& 
         {"heads",heads_},{"tasks",heads_},{"assignment_scope","task"},{"bases",bases_},{"fleet_cost",fleet_cost_},{"constant",zero.constant},
         {"signed_savings",zero.savings},{"unsupported",zero.unsupported},
         {"lower_coefficients",zero.lower_coefficients},{"negative_empty_paths",Json::array()},
-        {"prices",nullptr},{"complete_domain",true},{"catalogue_complete",true},{"support_complete",true},
+        {"prices",nullptr},{"complete_domain",true},{"catalogue_complete",paths_.complete},{"support_complete",true},
         {"service_paths_scanned",service_count_},{"empty_paths_scanned",0},
         {"coefficient_source","task_savings_data_nonnegative_outward_bounds"}};
     profiles_.push_back(std::move(zero));
@@ -305,6 +316,16 @@ QueuePolymatroidCuts::QueuePolymatroidCuts(const Input& d,const PathCollection& 
         {"build_seconds",wall_time()-started}};
 }
 
+bool QueuePolymatroidCuts::complete_domain_unchanged() const {
+    // The retained profiles certify the physical domain, not the current RMP.
+    // Growing an implicit registry changes neither this identity nor its counts.
+    if(!paths_.support_complete || (!paths_.complete && !paths_.domain_complete) ||
+       (paths_.domain_complete && paths_.physical_service_count!=service_count_) ||
+       (paths_.complete && (paths_.service_paths.size()!=service_count_ ||
+                           paths_.empty_paths.size()!=empty_count_)))return false;
+    return pricing_domain_identity(data_,paths_)==domain_identity_;
+}
+
 bool QueuePolymatroidCuts::prepare_profile(const QueueResourcePrices& prices,double seconds,
         Profile& prepared,std::string& status,bool reject_duplicates) const {
     const double started=wall_time();
@@ -312,8 +333,8 @@ bool QueuePolymatroidCuts::prepare_profile(const QueueResourcePrices& prices,dou
     if(!std::isfinite(seconds) || seconds<=0)
         return reject("profile_budget_rejections","budget_exhausted");
     if(max_profiles_<=1)return reject("profile_budget_rejections","price_pool_disabled");
-    if(!paths_.complete || !paths_.support_complete || paths_.service_paths.size()!=service_count_ || paths_.empty_paths.size()!=empty_count_)
-        throw std::invalid_argument("Queue complete physical catalogue changed after construction");
+    if(!complete_domain_unchanged())
+        throw std::invalid_argument("Queue complete physical domain changed after construction");
     require_prices(prices.locker,data_.n_h,false);require_prices(prices.airline,nodes_*nodes_,false);
     require_prices(prices.balance,bases_,true);
     const double deadline=started+seconds;
@@ -351,10 +372,15 @@ bool QueuePolymatroidCuts::prepare_profile(const QueueResourcePrices& prices,dou
         lower_coefficients[layout_.airline+e]-=static_cast<long double>(prices.airline[e])*airline_upper_[e];
     std::vector<double> minimum(branches_.size(),infinity);
     std::size_t scanned=0,positive_scanned=0;
-    for(std::size_t j=0;j<service_count_;++j) {
-        if((j&127u)==0 && wall_time()>=deadline)return reject("profile_budget_rejections","incomplete_path_scan");
-        ++scanned;const int branch_id=path_branch_[j];if(branch_id<0)continue;
-        ++positive_scanned;const auto& branch=branches_[branch_id];const auto& path=paths_.service_paths[j];
+    bool finite_minima=true;
+    try {
+      scanned=visit_service_paths(data_,paths_,[&](const ServicePath& path) {
+        if(path.first_od<0 || path.first_od>=data_.n_od || path.second_od<-1 || path.second_od>=data_.n_od ||
+           path.b[0]<0 || path.b[0]>=bases_ || path.b[1]<0 || path.b[1]>=bases_)
+            throw std::invalid_argument("Queue physical path has invalid task or base indices");
+        const int branch_id=branch_lookup_[(path.first_od*bases_+path.b[0])*(data_.n_od+1)+path.second_od+1];
+        if(branch_id<0)return;
+        ++positive_scanned;const auto& branch=branches_[branch_id];
         if(!std::isfinite(path.cost) || path.cost<0 || !std::isfinite(path.time) || path.time<0)
             throw std::invalid_argument("Queue path cost or time is invalid");
         const long double reward=data_.ground_cost[branch.head]+(branch.second<0?0.0L:data_.ground_cost[branch.second]);
@@ -380,9 +406,14 @@ bool QueuePolymatroidCuts::prepare_profile(const QueueResourcePrices& prices,dou
             if(found!=gate_lookup.end()){cost+=found->second;absolute+=std::abs(found->second);}
         }
         const double safe=rounded_lower(cost,absolute);
-        if(!std::isfinite(safe))return reject("profile_numerical_rejections","nonfinite_path_minimum");
+        if(!std::isfinite(safe)){finite_minima=false;return;}
         minimum[branch_id]=std::min(minimum[branch_id],safe);
+      },deadline);
+    } catch(const EnumerationStopped&) {
+        return reject("profile_budget_rejections","incomplete_path_scan");
     }
+    if(!finite_minima)return reject("profile_numerical_rejections","nonfinite_path_minimum");
+    if(scanned!=service_count_)throw std::invalid_argument("Queue physical path count changed after construction");
     std::vector<long double> savings(heads_*bases_,0),saving_magnitude(heads_*bases_,0);
     Json missing=Json::array();
     for(std::size_t k=0;k<branches_.size();++k) {
@@ -391,9 +422,9 @@ bool QueuePolymatroidCuts::prepare_profile(const QueueResourcePrices& prices,dou
         savings[group]-=minimum[k];saving_magnitude[group]+=std::abs(static_cast<long double>(minimum[k]));
     }
     Json negative_empty=Json::array();
-    for(std::size_t j=0;j<empty_count_;++j) {
-        if(wall_time()>=deadline)return reject("profile_budget_rejections","incomplete_empty_scan");
-        const auto& path=paths_.empty_paths[j];
+    bool finite_empty=true;std::size_t empty_scanned=0;
+    try {
+      empty_scanned=visit_empty_paths(data_,paths_,[&](const EmptyPath& path) {
         if(path.b[0]<0 || path.b[0]>=bases_ || path.b[1]<0 || path.b[1]>=bases_ || path.b[0]==path.b[1] ||
            !std::isfinite(path.cost) || path.cost<0 || !std::isfinite(path.time) || path.time<0)
             throw std::invalid_argument("Queue empty path is invalid");
@@ -407,14 +438,19 @@ bool QueuePolymatroidCuts::prepare_profile(const QueueResourcePrices& prices,dou
         const long double absolute=path.cost+std::abs(busy)+prices.airline[arc]+
             std::abs(static_cast<long double>(prices.balance[path.b[0]]))+std::abs(static_cast<long double>(prices.balance[path.b[1]]));
         const double safe=rounded_lower(cost,absolute);
-        if(!std::isfinite(safe))return reject("profile_numerical_rejections","nonfinite_empty_cost");
+        if(!std::isfinite(safe)){finite_empty=false;return;}
         if(safe<0) {
             const long double coefficient=static_cast<long double>(total_demand_)*safe;
             lower_coefficients[layout_.airline+arc]+=coefficient;
-            negative_empty.push_back({{"path_id",path.id},{"arc",arc},{"adjusted_cost",safe},
+            negative_empty.push_back({{"path_id",path.id},{"base_pair",path.b},{"arc",arc},{"adjusted_cost",safe},
                 {"affine_coefficient",static_cast<double>(coefficient)}});
         }
+      },deadline);
+    } catch(const EnumerationStopped&) {
+        return reject("profile_budget_rejections","incomplete_empty_scan");
     }
+    if(!finite_empty)return reject("profile_numerical_rejections","nonfinite_empty_cost");
+    if(empty_scanned!=empty_count_)throw std::invalid_argument("Queue physical empty-path count changed after construction");
     Profile profile;profile.id=next_id_;profile.kind="resource_price_epi";profile.source=prices.source;profile.key=key;
     profile.prices=prices;
     profile.constant=courier_cost_;profile.unsupported=unsupported_;
@@ -432,7 +468,7 @@ bool QueuePolymatroidCuts::prepare_profile(const QueueResourcePrices& prices,dou
         {"signed_savings",profile.savings},{"unsupported",profile.unsupported},
         {"lower_coefficients",profile.lower_coefficients},{"negative_empty_paths",negative_empty},
         {"prices",price_record},{"airline_upper",airline_upper_},{"total_demand",total_demand_},
-        {"missing_branches",missing},{"complete_domain",true},{"catalogue_complete",true},{"support_complete",true},
+        {"missing_branches",missing},{"complete_domain",true},{"catalogue_complete",paths_.complete},{"support_complete",true},
         {"service_paths_scanned",scanned},{"positive_service_paths_scanned",positive_scanned},{"empty_paths_scanned",empty_count_},
         {"normalized_adjusted_cost","rate*(cost+F*time-reward+mu*slots+eta*arc_counts+balance_difference)+tau_presence"},
         {"rounding_relative_guard",1e-12},{"scan_seconds",wall_time()-started}};
@@ -599,8 +635,7 @@ TaskSavingsCut QueuePolymatroidCuts::separate_joint(const std::vector<double>& d
     if(!std::isfinite(seconds)||seconds<=0) {
         best.status="joint_budget_exhausted";budget_exhausted=true;return finish();
     }
-    if(bases_<1||heads_<2||data_.max_orders!=2||!paths_.complete||!paths_.support_complete||
-       paths_.service_paths.size()!=service_count_||paths_.empty_paths.size()!=empty_count_) {
+    if(bases_<1||heads_<2||data_.max_orders!=2||!complete_domain_unchanged()) {
         best.status="joint_scope_unavailable";return finish();
     }
     if(design.size()<static_cast<std::size_t>(layout_.count)||theta<layout_.count||!std::isfinite(theta_value))
@@ -626,6 +661,9 @@ TaskSavingsCut QueuePolymatroidCuts::separate_joint(const std::vector<double>& d
     for(std::size_t index=1;index<profiles_.size();++index) {
         const auto& profile=profiles_[index];
         if(!profile.certificate.value("complete_domain",false)||
+           !profile.certificate.value("support_complete",false)||
+           profile.certificate.value("service_paths_scanned",std::size_t{0})!=service_count_||
+           profile.certificate.value("empty_paths_scanned",std::size_t{0})!=empty_count_||
            profile.savings.size()!=static_cast<std::size_t>(heads_*bases_)||
            profile.unsupported.size()!=profile.savings.size()||
            profile.lower_coefficients.size()!=static_cast<std::size_t>(layout_.count))continue;

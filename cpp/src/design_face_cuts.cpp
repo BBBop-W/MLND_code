@@ -20,7 +20,8 @@ bool certified_face(const Json& face,int head,int state,int bases,double& lower)
            face.value("scope",std::string())!="complete_domain_head_design_face" ||
            face.value("head",-1)!=head || face.value("state",-1)!=state ||
            !face.value("objective_includes_fixed_costs",false) || !face.value("other_designs_free",false) ||
-           !face.value("support_complete",false) || !face.value("catalogue_complete",false) ||
+           !face.value("support_complete",false) ||
+           (!face.value("catalogue_complete",false) && !face.value("domain_complete",false)) ||
            face.value("is_integer_solution",true) || face.value("direct_global_bound_update",true) ||
            face.value("bases",0)!=bases || face.value("state_count",0)!=bases+1 ||
            face.value("face_fix_rows",0)!=bases)return false;
@@ -117,7 +118,7 @@ DesignFaceResult separate_design_face(const Input& d,PathCollection& paths,const
         result.diagnostics["seconds"]=result.seconds;return result;
     };
     if(!std::isfinite(seconds) || seconds<=0)return finish("budget_exhausted");
-    if(!supported(d) || !paths.complete || !paths.support_complete || head<0 || head>=d.task_count())
+    if(!supported(d) || (!paths.complete && !paths.domain_complete) || !paths.support_complete || head<0 || head>=d.task_count())
         return finish("unsupported_design_face_scope");
     if(!std::isfinite(global_lower))return finish("global_lower_unavailable");
     const double deadline=started+seconds;

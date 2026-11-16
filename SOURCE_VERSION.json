@@ -1,0 +1,381 @@
+{
+  "source_repository": "https://github.com/BBBop-W/MLND_server.git",
+  "source_branch": "codex/initial",
+  "source_head": "c259c51f0f46f4e87277477ea79355716dc882fd",
+  "includes_uncommitted_working_tree": true,
+  "snapshot_date": "2026-11-16",
+  "files": {
+    "CMakeLists.txt": {
+      "sha256": "ce920531ae268bb8628a80cc65d95c24b89e8a86fa993cab67787e726ea7e70b",
+      "bytes": 5058,
+      "mode": 420
+    },
+    "cpp/include/mlnd/adaptive_pricing.hpp": {
+      "sha256": "b8a2aed88ab306d4536af1d8200038a7f7b57d3b91a6e0721efcaa063065063b",
+      "bytes": 2470,
+      "mode": 420
+    },
+    "cpp/include/mlnd/airline_resources.hpp": {
+      "sha256": "371896dc9d41168abf252c9094f2c5f55ccbf36715bf30fe468ab0b3d38bccb0",
+      "bytes": 2044,
+      "mode": 420
+    },
+    "cpp/include/mlnd/benders.hpp": {
+      "sha256": "bfc2dd1476638c7926249fa6e4fa292d859df60962ef2946aa8f9ced786ab79c",
+      "bytes": 3026,
+      "mode": 420
+    },
+    "cpp/include/mlnd/benders_control.hpp": {
+      "sha256": "e39a3fe7f4bc405fe74a5e2f16423f57e1394afaf0c1f94dc47d79039460a983",
+      "bytes": 8490,
+      "mode": 420
+    },
+    "cpp/include/mlnd/certified_cut_pool.hpp": {
+      "sha256": "cff3209ceee153dd6019014b2ccfece59fa3bc49b6be3696a41ade5c5f5e788a",
+      "bytes": 5721,
+      "mode": 420
+    },
+    "cpp/include/mlnd/conditional_cut.hpp": {
+      "sha256": "9035129d9aa5793391551138132531a7476e1214d061849e8962dc7ed6c58e99",
+      "bytes": 5509,
+      "mode": 420
+    },
+    "cpp/include/mlnd/continuous_root_control.hpp": {
+      "sha256": "353f03445fab1b19a289346436e538a749e697a5096f7e3c9af48983cd83959d",
+      "bytes": 1411,
+      "mode": 420
+    },
+    "cpp/include/mlnd/design_face_cuts.hpp": {
+      "sha256": "7bd7a59b8722914e6d74407344f35a1e8f6bf2d8a420662d19a2a204a1b11da3",
+      "bytes": 1656,
+      "mode": 420
+    },
+    "cpp/include/mlnd/dual_workspace.hpp": {
+      "sha256": "1deb3d8d42865e6f79744b18344efd95a247d79527549f777634f8d8f07b782b",
+      "bytes": 1419,
+      "mode": 420
+    },
+    "cpp/include/mlnd/formulation.hpp": {
+      "sha256": "838ddaccc8c4b9cdefaab742e0d7f9cdc2ea3250c8e86fe55b916f8291cfb922",
+      "bytes": 8358,
+      "mode": 420
+    },
+    "cpp/include/mlnd/heuristics.hpp": {
+      "sha256": "8077f1a0b4dbe779b485433c0962123a5ed9c8adec14c1c83bad7ccb562477b1",
+      "bytes": 5401,
+      "mode": 420
+    },
+    "cpp/include/mlnd/input.hpp": {
+      "sha256": "311a099efc14926647efcaadb92835cd1bc494625766c841e681b1dcdba90af8",
+      "bytes": 4566,
+      "mode": 420
+    },
+    "cpp/include/mlnd/linear_model.hpp": {
+      "sha256": "5843d1b598db57466bd0de047ab4f596e88461fde47899f1e33945307037d47f",
+      "bytes": 13345,
+      "mode": 420
+    },
+    "cpp/include/mlnd/output.hpp": {
+      "sha256": "d3a612e0fd011fda6be4722a656f8adaa95a09ee5b00cc0fa276089c855644d9",
+      "bytes": 1220,
+      "mode": 420
+    },
+    "cpp/include/mlnd/path_identity.hpp": {
+      "sha256": "876420f43f24105f7fbb3556d7c1dfb2fa8af78bbc40b353f9ae3ce6019df34e",
+      "bytes": 2048,
+      "mode": 420
+    },
+    "cpp/include/mlnd/path_support_cuts.hpp": {
+      "sha256": "5b389a75fa288dc13b891a52b2c417b227a7fee2c666710a4f52722fe2c1265b",
+      "bytes": 3983,
+      "mode": 420
+    },
+    "cpp/include/mlnd/paths.hpp": {
+      "sha256": "27e97063fe54ff9bfa95ee30eb93cf9eb5b1d8bd0f55a83e3246c5aef9e76082",
+      "bytes": 7887,
+      "mode": 420
+    },
+    "cpp/include/mlnd/preprocessed_demand.hpp": {
+      "sha256": "2f21ef6bac763a1b542d981ea77456feab9934507f53cc481997caa7a58a3b2d",
+      "bytes": 767,
+      "mode": 420
+    },
+    "cpp/include/mlnd/pricing.hpp": {
+      "sha256": "214fc6754f68ee3c884739ac01e36112ff2cb6133431e0fcaf78e7e9259f2e0e",
+      "bytes": 6433,
+      "mode": 420
+    },
+    "cpp/include/mlnd/primal_alns.hpp": {
+      "sha256": "74a5753fca834b5a8d917d3daa77d56df67c9f076bd84017857f3e10e2d2c193",
+      "bytes": 2815,
+      "mode": 420
+    },
+    "cpp/include/mlnd/primal_portfolio.hpp": {
+      "sha256": "67714eb018fc05c3f954c2ca453a89d920c775e51f5a4cb13f6a9f6eed7200ff",
+      "bytes": 1321,
+      "mode": 420
+    },
+    "cpp/include/mlnd/primal_schedule.hpp": {
+      "sha256": "ec9f2d9773a0c47eb7ee39ae3161be3b11e6094aedec1b619907ed8261734e7f",
+      "bytes": 2220,
+      "mode": 420
+    },
+    "cpp/include/mlnd/primal_support.hpp": {
+      "sha256": "1408c8fe49699fdcc21b234f651a61a9642b5173e3f243623ee71ccf6b667172",
+      "bytes": 5261,
+      "mode": 420
+    },
+    "cpp/include/mlnd/progress.hpp": {
+      "sha256": "28563de86d3c25b94dd69ed547ef32ca003353cff1028c4a9f994d7e970464f5",
+      "bytes": 2786,
+      "mode": 420
+    },
+    "cpp/include/mlnd/queue_fractional.hpp": {
+      "sha256": "5045d970d94f8cbab2461d58cc42f1295dc25d67ce9012726c8d6b65af10538d",
+      "bytes": 1070,
+      "mode": 420
+    },
+    "cpp/include/mlnd/queue_fractional_control.hpp": {
+      "sha256": "53fa6b9540c06e2248f207b38e11fb9c3524fbbf7a6672b2881939b0a7198f1c",
+      "bytes": 1821,
+      "mode": 420
+    },
+    "cpp/include/mlnd/queue_polymatroid.hpp": {
+      "sha256": "a8c77ed37934f7b43bde1571781a8c20819742e7caef35e69ecde9e20aa49029",
+      "bytes": 4290,
+      "mode": 420
+    },
+    "cpp/include/mlnd/solver_presets.hpp": {
+      "sha256": "dccbb4473646127b35d11a1c923b41eb23edbd8ac1f0ab1d8fe2d4a349491fe7",
+      "bytes": 641,
+      "mode": 420
+    },
+    "cpp/include/mlnd/stabilized_master.hpp": {
+      "sha256": "523c27c06a3cebd07fca768118ef9b77653880271b0c04fd5e6399a3ab367cde",
+      "bytes": 980,
+      "mode": 420
+    },
+    "cpp/include/mlnd/strengthening.hpp": {
+      "sha256": "976c9d2c146342ec09f535c6308114e6e24201f8cbf53ffd8eb86127071e6766",
+      "bytes": 5142,
+      "mode": 420
+    },
+    "cpp/include/mlnd/task_savings.hpp": {
+      "sha256": "8f6d4cecaecc04f3bd524a8a8e67f9179b95a47c1f5fc93e9dd26cfef2da8045",
+      "bytes": 2467,
+      "mode": 420
+    },
+    "cpp/include/mlnd/topology_cuts.hpp": {
+      "sha256": "553cd9bcf91752759f86a1717d227ea63e1d0634b6aa4fcd956addbcbd471662",
+      "bytes": 1668,
+      "mode": 420
+    },
+    "cpp/src/airline_resources.cpp": {
+      "sha256": "bf259303f8c0b0b843e22d233a577bc0260c1b65ec53df32820425a1e5cdc684",
+      "bytes": 26777,
+      "mode": 420
+    },
+    "cpp/src/benders.cpp": {
+      "sha256": "91d6a28b620278094e3e9b28a8cd274ec08b97389ff95361a7d8f160fe4ef8ba",
+      "bytes": 300092,
+      "mode": 420
+    },
+    "cpp/src/design_face_cuts.cpp": {
+      "sha256": "62b7c2b9f9eb7acd477f1e2dd46b9d29ba81d129021fc539ab449bdcea95f94d",
+      "bytes": 8565,
+      "mode": 420
+    },
+    "cpp/src/dual_workspace.cpp": {
+      "sha256": "ca0db78043f97ed24b7f10ab563177b7b4868b9edad798455d445bbc304bf1c4",
+      "bytes": 13641,
+      "mode": 420
+    },
+    "cpp/src/formulation.cpp": {
+      "sha256": "3e968bf15f09a0179b7adbb1057a65ed610206a6db8a7ec88db40b9a90390935",
+      "bytes": 52502,
+      "mode": 420
+    },
+    "cpp/src/heuristics.cpp": {
+      "sha256": "015ed832a4b8582c090fb76eb7799fdefce7613639665bd495b9c793c9979d15",
+      "bytes": 44644,
+      "mode": 420
+    },
+    "cpp/src/input.cpp": {
+      "sha256": "4d623b5e53bf1495ac2c12db7fc346438b65ac8ee4dcb1e24f3b5ba7680c51d1",
+      "bytes": 27519,
+      "mode": 420
+    },
+    "cpp/src/linear_model.cpp": {
+      "sha256": "f354213887a88d1aed726848960f100057b063519a831952cd75ed55f7eb056e",
+      "bytes": 40894,
+      "mode": 420
+    },
+    "cpp/src/main.cpp": {
+      "sha256": "beda7bc271eb4586b3efda236306ce68282f4fbd6f42b2281f7b0fa11e4948ca",
+      "bytes": 33491,
+      "mode": 420
+    },
+    "cpp/src/output.cpp": {
+      "sha256": "e8f0ef206463edc2bcad36ffda95a833837d7f11d02b94b2d232f718926b5f72",
+      "bytes": 37097,
+      "mode": 420
+    },
+    "cpp/src/path_support_cuts.cpp": {
+      "sha256": "68f0c27317ea39c0e6c51073b26b251585d9ba5d9246872ab8bacd67bb56f5ff",
+      "bytes": 25095,
+      "mode": 420
+    },
+    "cpp/src/paths.cpp": {
+      "sha256": "ed7509fa05ff5699e8cfdf83968fd19995bd98f6ba6a29116040a488b1626cc1",
+      "bytes": 35814,
+      "mode": 420
+    },
+    "cpp/src/preprocessed_demand.cpp": {
+      "sha256": "6dd81a16b74f532e23c52bfb8853ab85c8287daf33ca76646af66219e5dfbc50",
+      "bytes": 9655,
+      "mode": 420
+    },
+    "cpp/src/pricing.cpp": {
+      "sha256": "f4f565562bd8b04829a7dc54b5781baa312186023cd80441dc617b1534503884",
+      "bytes": 62779,
+      "mode": 420
+    },
+    "cpp/src/primal_alns.cpp": {
+      "sha256": "bb2f3101ab40cb73632ece0920e2345186ac61aa2d2b64168d3e1770c2d71c2f",
+      "bytes": 27510,
+      "mode": 420
+    },
+    "cpp/src/primal_portfolio.cpp": {
+      "sha256": "3e2c5464c04c0d5a557771e00a9f7f069918324fbe719bd3eb1c392301708f28",
+      "bytes": 18174,
+      "mode": 420
+    },
+    "cpp/src/primal_support.cpp": {
+      "sha256": "1eabcf15f7036c6de5051f97d8b29207ae7bcf8e7bf92c2b0fdc5bb85feffe05",
+      "bytes": 40113,
+      "mode": 420
+    },
+    "cpp/src/progress.cpp": {
+      "sha256": "c6e367112be055880577816f230759ec4e1004665c4b272b11cf881896778433",
+      "bytes": 9254,
+      "mode": 420
+    },
+    "cpp/src/queue_fractional.cpp": {
+      "sha256": "713c01534a5f13ba30adc9a5ffaf462dddf068609c16a1cd6e33b1aaa11cc6ea",
+      "bytes": 11452,
+      "mode": 420
+    },
+    "cpp/src/queue_polymatroid.cpp": {
+      "sha256": "15208bf29da26e9476de3ec8d722ba2afe7258e3f22588657a66003313b7fa3e",
+      "bytes": 60594,
+      "mode": 420
+    },
+    "cpp/src/solver_presets.cpp": {
+      "sha256": "f078cac49b4b0ec0cda868919224b77bbd93dcfb1105c9fdf22f4b1cf89f756c",
+      "bytes": 22554,
+      "mode": 420
+    },
+    "cpp/src/stabilized_master.cpp": {
+      "sha256": "e33dff367294a2481c6dc50d504ba57f3a603981cc797e46e688de591929f546",
+      "bytes": 11953,
+      "mode": 420
+    },
+    "cpp/src/strengthening.cpp": {
+      "sha256": "d4671a666ce22999af215ca22c71a6c9bc974c244e814180ab6a748c521a952b",
+      "bytes": 33078,
+      "mode": 420
+    },
+    "cpp/src/task_savings.cpp": {
+      "sha256": "71ef1e82c342818420899621834c955fd25f2be4f3910ce3868b010bf8c06fd4",
+      "bytes": 15738,
+      "mode": 420
+    },
+    "cpp/src/topology_cuts.cpp": {
+      "sha256": "1cafb4aa348274ea233abb334e416c17f5b7a36beeb2bf269069ad2355aba9d7",
+      "bytes": 10355,
+      "mode": 420
+    },
+    "mlnd_runtime/__init__.py": {
+      "sha256": "4bcadd9466388ebabc2172c40bf7e8c8ae12a65976951f1fc7cedd0e9fe9a53e",
+      "bytes": 76,
+      "mode": 420
+    },
+    "mlnd_runtime/capacity.py": {
+      "sha256": "2391a422cfb88b5c6d63d463b726e5816bc5468017ae2661db28b0fd10880d02",
+      "bytes": 1938,
+      "mode": 420
+    },
+    "mlnd_runtime/demand.py": {
+      "sha256": "1027fe0f20c135d605fb15c2d3679bfeb0e8a6e83e04f66fbf801ca7bde8e05f",
+      "bytes": 6808,
+      "mode": 420
+    },
+    "mlnd_runtime/input.py": {
+      "sha256": "5c072c7aca7e4b71a42cfc60338c864a149b3572af1c39e4ab12b1f25e03777b",
+      "bytes": 15492,
+      "mode": 420
+    },
+    "mlnd_runtime/native.py": {
+      "sha256": "9fe89eb077df26b0daf1367a24bb433f31d2f192f4d2954239606e9a975dc650",
+      "bytes": 5675,
+      "mode": 420
+    },
+    "mlnd_runtime/paths.py": {
+      "sha256": "dc3074c0b18b46a47536f1d140f61eabe1f84bcede3c0c5d1cd4cccc8e4a884f",
+      "bytes": 11741,
+      "mode": 420
+    },
+    "mlnd_runtime/resources.py": {
+      "sha256": "503d636b8f2c735bedb1d10012dd58d27fc8f27d4415893b6807cee35ec31b67",
+      "bytes": 8715,
+      "mode": 420
+    },
+    "mlnd_runtime/storage.py": {
+      "sha256": "d33cf129af7f03710cdea08cbd1a10ff1940a62ede64e157c82b4c10f186fd0f",
+      "bytes": 1147,
+      "mode": 420
+    },
+    "mlnd_runtime/types.py": {
+      "sha256": "4ed4212ca83279103da6d670d1cf4c5dee9db1e7e0a10a554b65437daeffb062",
+      "bytes": 8380,
+      "mode": 420
+    },
+    "mlnd_runtime/validation.py": {
+      "sha256": "893ea622c5688d0d7b21d04bf467aefa602468b1d0d5a2068420da73b41214f6",
+      "bytes": 27805,
+      "mode": 420
+    },
+    "requirements.txt": {
+      "sha256": "794e78e97975a317667c64e1975884140754ff26feb267649b3d4e0249549522",
+      "bytes": 24,
+      "mode": 420
+    }
+  },
+  "target_branch": "MLND_sever",
+  "baseline_saved_commit": "3ac3146e8bb61ec9ebf47ee292e394decf949388",
+  "authoritative_source_roots": [
+    "cpp/src",
+    "cpp/include",
+    "mlnd_runtime"
+  ],
+  "native_build": {
+    "cmake_source_directory": ".",
+    "target": "mlnd"
+  },
+  "excluded_server_entry_script": "run.py",
+  "scripts_policy": "No server launcher or experiment script copied; existing baseline scripts are retained without adaptation.",
+  "removed_legacy_native_files": [
+    "cpp/include/mlnd/assignment_support_cuts.hpp",
+    "cpp/include/mlnd/bdd.hpp",
+    "cpp/include/mlnd/bdd_search.hpp",
+    "cpp/include/mlnd/branch_joint_cuts.hpp",
+    "cpp/src/assignment_support_cuts.cpp",
+    "cpp/src/bdd.cpp",
+    "cpp/src/bdd_search.cpp",
+    "cpp/src/branch_joint_cuts.cpp"
+  ],
+  "removed_obsolete_build_entries": [
+    "cpp/CMakeLists.txt",
+    "cpp/Makefile"
+  ]
+}

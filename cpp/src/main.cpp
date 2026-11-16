@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace {
 mlnd::Json read_json(const std::filesystem::path& path) {
@@ -31,12 +33,9 @@ int main(int argc,char** argv) {
     auto result_method=[&]() -> std::string {
         if(fixed_path.empty()) return method;
         if(method=="full_path") return "fixed_design";
-        return method=="benders_cg"?"fixed_design_cg":"fixed_design_benders_full";
+        return "fixed_design_cg";
     };
-    auto demand_formulation=[&]() -> std::string {
-        return options.preprocessed_demand ? "preprocessed" :
-            options.conditional_demand ? "conditional" : "lifted";
-    };
+    auto demand_formulation=[]() -> std::string { return "preprocessed"; };
     auto compact_result=[](const Json& source) {
         Json compact=Json::object();
         for(auto it=source.begin();it!=source.end();++it)
@@ -68,6 +67,8 @@ int main(int argc,char** argv) {
                 !result.at("failed_during_construction").get<bool>();
             result["support_complete"]=paths.support_complete;
             result["catalogue_complete"]=paths.complete;
+            result["domain_complete"]=paths.domain_complete;
+            result["path_storage"]=method=="full_path"?"complete_catalogue":"generated_service_pool";
             result["has_feasible_solution"]=result.contains("_solution") && !result.at("_solution").is_null();
             result["bound_scope"]=fixed_path.empty()?"global":"fixed_design";
             result["validated_incumbent"]=result.at("has_feasible_solution");
@@ -75,8 +76,8 @@ int main(int argc,char** argv) {
             if(!result.contains("bound")) result["bound"]=nullptr;
             if(!result.contains("gap")) result["gap"]=nullptr;
             result["input_read_seconds"]=read_seconds;
-            result["support_preprocessing_seconds"]=method=="benders_cg"&&!options.preprocessed_demand?preprocessing_seconds:0.0;
-            result["enumeration_seconds"]=method=="benders_cg"&&!options.preprocessed_demand?0.0:preprocessing_seconds;
+            result["support_preprocessing_seconds"]=0.0;
+            result["enumeration_seconds"]=preprocessing_seconds;
             result["failed_phase_seconds"]=details.contains("pipeline_stage")?Json(nullptr):
                 Json(stage_started>0?wall_time()-stage_started:0);
             result["wall_before_output"]=wall_time()-started;
@@ -124,35 +125,51 @@ int main(int argc,char** argv) {
         return exit_code;
     };
     try {
+        // Resolve the method before applying any numeric/feature overrides.
+        // Thus --seconds/--threads behave identically on either side of --method.
+        std::vector<std::pair<std::string,std::string>> arguments;
+        std::string selected_method="benders_cg";
+        bool method_given=false;
         for(int i=1;i<argc;++i) {
-            std::string key=argv[i];
-            auto argument=[&]() -> std::string {
-                if(++i>=argc) throw std::invalid_argument("Missing value for "+key);
-                return argv[i];
-            };
-            if(configuration.acceleration_flag(key))continue;
-            if(key=="--preset") configuration.apply_preset(argument());
-            else if(key=="--input") input=argument();
+            const std::string key=argv[i];
+            if(key=="--help") {
+                std::cout<<"mlnd --input INSTANCE --out NEW_DIRECTORY [--k 1|2]\n"
+                    "     [--method benders_cg|full_path] [--seconds 600] [--gap .01]\n"
+                    "     [--threads 1] [--seed 43] [--disable ACCELERATION]\n"
+                    "     [--start SOLUTION_JSON] [--fixed-design SOLUTION_JSON]\n"
+                    "     [--cg-max-columns 512] [--max-iterations 1000000]\n"
+                    "     [--path-column-limit 0] [--cg-duality-tolerance 1e-6]\n"
+                    "     [--pricing-tolerance 1e-7] [--export-catalogue] [--log] [--inspect]\n"
+                    "Default: Benders column generation for the fixed independent-task model.\n"
+                    "full_path solves the same complete-path model directly with CPLEX.\n"
+                    "K defaults to the input. Benders CG stores generated service paths only;\n"
+                    "full-catalogue auxiliary models are disabled in its memory policy.\n"
+                    "--inspect validates input and reports the effective configuration without solving.\n"
+                    "--export-catalogue streams the complete path catalogue after optimization.\n"
+                    "--path-column-limit applies only to full_path enumeration.\n";
+                return 0;
+            }
+            const bool switch_only=key=="--inspect" || key=="--log" || key=="--export-catalogue";
+            std::string value;
+            if(!switch_only) {
+                if(++i>=argc)throw std::invalid_argument("Missing value for "+key);
+                value=argv[i];
+            }
+            if(key=="--method") {
+                if(method_given)throw std::invalid_argument("Specify --method once");
+                selected_method=value;method_given=true;
+            } else arguments.emplace_back(key,std::move(value));
+        }
+        configuration.apply_method(selected_method);
+        for(const auto& item:arguments) {
+            const auto& key=item.first;
+            const auto& value=item.second;
+            auto argument=[&]() -> const std::string& { return value; };
+            if(key=="--input") input=argument();
             else if(key=="--out") options.output=argument();
             else if(key=="--k") k=std::stoi(argument());
-            else if(key=="--method") method=argument();
-            else if(key=="--demand-formulation") {
-                const auto value=argument();
-                if(value!="lifted" && value!="conditional" && value!="preprocessed")
-                    throw std::invalid_argument("--demand-formulation expects lifted, conditional, or preprocessed");
-                options.conditional_demand=value=="conditional";
-                options.preprocessed_demand=value=="preprocessed";
-            }
-            else if(key=="--first-leg-consistency") options.first_leg_consistency=true;
-            else if(key=="--structural-strengthening") {
-                options.assignment_incident_clique=options.shared_rho_joint=options.queue_perspective=true;
-            }
             else if(key=="--topology-seconds") options.topology_seconds=std::stod(argument());
             else if(key=="--topology-cut-limit") options.topology_cut_limit=std::stoi(argument());
-            else if(key=="--assignment-support-seconds") options.assignment_support_seconds=std::stod(argument());
-            else if(key=="--assignment-support-floor") options.assignment_support_floor=std::stod(argument());
-            else if(key=="--assignment-support-cut-limit") options.assignment_support_cut_limit=std::stoi(argument());
-            else if(key=="--assignment-support-max-cuts") options.assignment_support_max_cuts=std::stoi(argument());
             else if(key=="--airline-resource-seconds") options.airline_resource_seconds=std::stod(argument());
             else if(key=="--airline-resource-cut-limit") options.airline_resource_cut_limit=std::stoi(argument());
             else if(key=="--task-resource-seconds") options.task_resource_seconds=std::stod(argument());
@@ -161,11 +178,6 @@ int main(int argc,char** argv) {
             else if(key=="--path-support-preprocessing-seconds") options.path_support_preprocessing_seconds=std::stod(argument());
             else if(key=="--path-support-cut-limit") options.path_support_cut_limit=std::stoi(argument());
             else if(key=="--path-support-max-cuts") options.path_support_max_cuts=std::stoi(argument());
-            else if(key=="--branch-joint-seconds") options.branch_joint_seconds=std::stod(argument());
-            else if(key=="--branch-joint-preprocessing-seconds") options.branch_joint_preprocessing_seconds=std::stod(argument());
-            else if(key=="--branch-joint-floor") options.branch_joint_floor=std::stod(argument());
-            else if(key=="--branch-joint-cut-limit") options.branch_joint_cut_limit=std::stoi(argument());
-            else if(key=="--branch-joint-max-cuts") options.branch_joint_max_cuts=std::stoi(argument());
             else if(key=="--seconds") options.seconds=std::stod(argument());
             else if(key=="--gap") options.gap=std::stod(argument());
             else if(key=="--threads") options.threads=std::stoi(argument());
@@ -213,69 +225,12 @@ int main(int argc,char** argv) {
             else if(key=="--stabilized-master-level") options.stabilized_master_level=std::stod(argument());
             else if(key=="--start") start_path=argument();
             else if(key=="--fixed-design") fixed_path=argument();
-            else if(key=="--no-pareto") configuration.set_acceleration("pareto_cuts",false);
-            else if(key=="--no-reuse-columns") configuration.set_acceleration("reuse_columns",false);
-            else if(key=="--plain") configuration.plain();
             else if(key=="--disable") configuration.set_acceleration(argument(),false);
             else if(key=="--export-catalogue") options.export_catalogue=true;
             else if(key=="--log") options.log=true;
             else if(key=="--capacity-cut-limit") options.capacity_cut_limit=std::stoi(argument());
             else if(key=="--inspect") inspect=true;
-            else if(key=="--help") {
-                std::cout<<"mlnd_cpp [--preset performance-20261105|accelerated-20261105|baseline-20261029|baseline|bounds-20261030|lb-20261030|speed-20261030|alns-20261030|full-cplex-20261029|legacy] "
-                           "--input INSTANCE --k 1|2 --out NEW_DIRECTORY "
-                           "[--method full_path|benders_cg|benders_full] [--seconds 600] "
-                           "[--demand-formulation lifted|conditional|preprocessed] [--first-leg-consistency] "
-                           "[--structural-strengthening] [--assignment-incident-clique] [--shared-rho-joint] [--queue-perspective] "
-                           "[--tight-airline-bounds] [--topology-cuts] [--topology-seconds 2] [--topology-cut-limit 1000] "
-                           "[--airline-connectivity-cuts] [--airline-resource-cuts] [--airline-resource-seconds 2] [--airline-resource-cut-limit 1000] "
-                           "[--primal-polish] "
-                           "[--design-face-cuts] [--queue-joint-cuts] "
-                           "[--primal-coupled-neighborhood] [--primal-seed-portfolio] "
-                           "[--branch-pricing-correction] [--cg-seed-reuse] [--staged-continuous-root] "
-                           "[--eliminate-zero-task-columns] [--compact-task-heads] "
-                           "[--cache-pricing-graph] [--persist-recourse-model] [--stabilized-pricing] "
-                           "[--pricing-smoothing-weight .5] [--pricing-exact-interval 4] "
-                           "[--primal-support-completion] [--grouped-local-branching] "
-                           "[--local-branching-head-radius 4] [--local-branching-capacity-radius 2] "
-                           "[--streamlined-recourse] [--catalogue-pricing] [--diverse-pricing] [--reuse-recourse-rhs] [--design-certificate-cache] [--design-cache-limit 16] [--adaptive-pricing] [--cg-primal-feedback] [--indexed-support-completion] [--stabilized-master] [--stabilized-master-seconds 2] [--stabilized-master-level .5] [--cut-pool-deduplication] [--cut-pool-management] [--cut-pool-active-limit 256] [--cut-pool-age 8] "
-                           "[--weak-dual-cuts] [--interior-cuts] [--primal-asset-neighborhood] "
-                           "[--search-scheduling] [--dual-lp-first] [--fractional-path-support] [--airline-resource-balance] "
-                           "[--od-airline-bounds] "
-                           "[--assignment-support-cuts] [--assignment-support-seconds .25] "
-                           "[--assignment-support-floor 1e-4] [--assignment-support-cut-limit 2000] [--assignment-support-max-cuts 16] "
-                           "[--path-support-cuts] [--path-support-seconds .25] [--path-support-preprocessing-seconds 2] "
-                           "[--path-support-cut-limit 50000] [--path-support-max-cuts 32] "
-                           "[--task-savings-bound] [--task-resource-cuts] [--task-airline-bounds] "
-                           "[--double-support-cuts] [--joint-base-cost-cuts] [--branch-joint-seconds .25] "
-                           "[--branch-joint-preprocessing-seconds 2] [--branch-joint-floor 1e-4] "
-                           "[--branch-joint-cut-limit 2000] [--branch-joint-max-cuts 16] "
-                           "[--gap 0.005] [--threads 1] [--seed 43] "
-                           "[--start solution.json] [--fixed-design solution.json] "
-                           "[--plain] [--disable ACCELERATION] [--no-pareto] "
-                           "[--max-iterations 1000] [--cg-max-columns 64] [--path-column-limit 500000 (0=unlimited)] "
-                           "[--root-cut-rounds 20] [--root-budget-fraction 0.1] "
-                           "[--continuous-root-seconds 120] [--continuous-root-budget-fraction 0.65] "
-                           "[--continuous-root-max-columns 512] "
-                           "[--root-inout-weight 0.9] [--reuse-dual-lp true|false] "
-                           "[--master-initial-gap 0.05] [--master-slice-seconds 30] "
-                           "[--resource-lp-seconds 5] [--resource-lp-cut-limit 100] "
-                           "[--heuristic-pool-size 4] [--neighborhood-cut-seconds 15] "
-                           "[--neighborhood-cut-budget-fraction 0.05] "
-                           "[--pareto-frequency 10] [--pareto-budget-fraction 0.05] "
-                           "[--pareto-call-seconds 30] [--heuristic-budget-fraction 0.2] "
-                           "[--local-branching-radius 8] "
-                           "[--capacity-cut-limit 100] "
-                           "[--queue-polymatroid-cuts] "
-                           "[--queue-price-search] [--target-master-refinement] "
-                           "[--queue-fractional-separation] "
-                           "[--cg-duality-tolerance 1e-6] [--pricing-tolerance 1e-7] [--export-catalogue] [--log]\n"
-                           "Place --preset first; later options override it. Without a preset, legacy defaults above apply.\n"
-                           "baseline-20261029: preprocessed benders_cg, 600 s, gap 0.01, complete paths, fractional queue.\n"
-                           "full-cplex-20261029: matching preprocessed full_path formulation and shared strengthening.\n"
-                           "--export-catalogue writes full_catalogue.json after optimization, outside its budget.\n";
-                return 0;
-            } else throw std::invalid_argument("Unknown argument: "+key);
+            else throw std::invalid_argument("Unknown argument: "+key);
         }
         if(input.empty()) throw std::invalid_argument("--input is required");
         configuration.validate();
@@ -286,7 +241,7 @@ int main(int argc,char** argv) {
             if(std::filesystem::exists(options.output/"result.json") || std::filesystem::exists(options.output/"progress.jsonl"))
                 throw std::invalid_argument("Output already contains a run; use a new directory");
             metadata={{"solver","CPLEX"},{"engine","cpp"},{"requested_method",method},{"method",result_method()},
-                {"preset",configuration.preset},{"resolved_configuration",resolved_configuration},
+                {"requested_configuration",resolved_configuration},
                 {"export_catalogue",options.export_catalogue},{"demand_formulation",demand_formulation()},
                 {"first_leg_consistency",options.first_leg_consistency},
                 {"structural_strengthening",{{"assignment_incident_clique",options.assignment_incident_clique},
@@ -323,28 +278,29 @@ int main(int argc,char** argv) {
             options.progress=std::make_shared<RunProgress>(options.output,started,budget,metadata);
             set_active_run_progress(options.progress);
             options.progress->status("running",{{"stage","input_read"},{"solved",false}});
-            options.progress->record({{"event","run_started"},{"stage","input_read"},{"configuration",metadata}});
         }
         stage="input_read"; stage_started=wall_time();
         data=read_input(input,k); have_input=true;
-        data.first_leg_consistency=options.first_leg_consistency;
-        if(options.preprocessed_demand) {
-            if((data.max_orders!=1 && data.max_orders!=2) || data.flow_policy!="aggregate")
-                throw std::invalid_argument("Preprocessed demand requires --k 1 or --k 2 and aggregate flow policy");
-            data.preprocessed_demand=true;
-        }
+        if((data.max_orders!=1 && data.max_orders!=2) || data.flow_policy!="aggregate")
+            throw std::invalid_argument("The fixed-task model requires K=1 or K=2 and aggregate flow policy");
+        data.preprocessed_demand=true;data.first_leg_consistency=false;
+        configuration.adapt_instance(data);
+        configuration.validate();
+        resolved_configuration=configuration.metadata();
+        metadata["resolved_configuration"]=resolved_configuration;
+        metadata["auto_disabled_accelerations"]=configuration.auto_disabled_accelerations;
+        metadata["primal_alns"]=options.primal_alns;
         metadata["assignment_scope"]=data.assignment_scope();
-        if (data.origin_assignment() && (options.assignment_support_cuts || options.double_support_cuts || options.joint_base_cost_cuts))
-            throw std::invalid_argument("Origin assignment requires disabling legacy base-pair assignment-support, double-support, and joint-base-cost cuts");
         read_seconds=wall_time()-stage_started;
         Json summary={{"assignment_scope",data.assignment_scope()},{"assignment_variables",data.assignment_count()},{"name",data.name},{"max_orders",data.max_orders},{"n_l",data.n_l},
                       {"n_h",data.n_h},{"n_od",data.n_od},{"input_read_seconds",read_seconds},
-                      {"preset",configuration.preset},{"resolved_configuration",resolved_configuration}};
+                      {"method",method},{"resolved_configuration",resolved_configuration}};
         if(inspect) { std::cout<<summary.dump(2)<<'\n'; return 0; }
         metadata.update({{"max_orders",data.max_orders},{"name",data.name},
             {"n_l",data.n_l},{"n_h",data.n_h},{"n_od",data.n_od},
             {"flow_policy",data.flow_policy},{"effective_delta",data.effective_delta()},{"path_scope",data.route_mode}});
         options.progress->update_metadata(metadata);
+        options.progress->record({{"event","run_started"},{"stage","input_read"},{"configuration",metadata}});
         atomic_json_file(options.output/"input_reference.json",{{"instance_path",data.instance_path.string()},
             {"manifest",data.manifest},{"model",data.model_json},{"max_orders",data.max_orders},
             {"assignment_scope",data.assignment_scope()}});
@@ -361,24 +317,26 @@ int main(int argc,char** argv) {
             baseline["max_orders"]=data.max_orders; baseline["name"]=data.name;
             options.progress->checkpoint(baseline,"before_preprocessing");
         }
-        // The fixed task rates use minimum physical route costs and common
-        // departure support. Enumerate their full domain once; Benders-CG
-        // still inserts only selected columns into each recourse model.
-        const bool implicit_paths=method=="benders_cg" && !options.preprocessed_demand;
-        stage=implicit_paths?"path_support":"path_enumeration"; stage_started=wall_time();
+        // Task rates require an exact scan of the physical domain. Only the
+        // direct formulation retains that catalogue; CG keeps finite support
+        // and registers service paths when its pricing oracle selects them.
+        stage=method=="full_path"?"path_enumeration":"path_support"; stage_started=wall_time();
         options.progress->guard(stage);
         options.progress->record({{"event","phase_start"},{"stage",stage}});
         auto path_progress=[&](std::size_t service,std::size_t empty,std::size_t segments) {
             options.progress->heartbeat(stage,{{"path_sizes",{{"segments",segments},{"service",service},{"empty",empty}}}});
         };
-        paths=implicit_paths
-            ?prepare_path_support(data,options.progress->remaining(),{},path_progress)
-            :enumerate_paths(data,path_column_limit==0?std::nullopt:std::optional<std::size_t>(path_column_limit),
-                             options.progress->remaining(),{},path_progress);
+        if(method=="full_path")
+            paths=enumerate_paths(data,path_column_limit==0?std::nullopt:std::optional<std::size_t>(path_column_limit),
+                                  options.progress->remaining(),{},path_progress);
+        else {
+            paths=prepare_path_support(data,options.progress->remaining(),{},path_progress);
+            register_empty_support_paths(data,paths,wall_time()+options.progress->remaining());
+        }
         if(options.preprocessed_demand) {
             options.progress->guard("demand_preprocessing");
             const double demand_started=wall_time();
-            preprocess_generalized_demand(data,paths);
+            preprocess_generalized_demand(data,paths,wall_time()+options.progress->remaining());
             data.preprocessed_demand_report["seconds"]=wall_time()-demand_started;
             if(data.first_leg_consistency)
                 data.first_leg_support_report=first_leg_support(data,paths);
@@ -400,8 +358,9 @@ int main(int argc,char** argv) {
         options.progress->record({{"event","phase_end"},{"stage",stage},{"seconds",preprocessing_seconds},
             {"path_sizes",{{"segments",paths.initial_segments.size()},{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}}},
             {"support_complete",paths.support_complete},{"catalogue_complete",paths.complete}});
-        std::cout<<(implicit_paths?"Implicit path support: K=":"Complete catalogue: K=")
+        std::cout<<(paths.complete?"Complete catalogue: K=":"Implicit physical domain: K=")
                  <<data.max_orders<<", segments="<<paths.initial_segments.size()
+                 <<", physical service="<<paths.physical_service_count
                  <<", registered service="<<paths.service_paths.size()
                  <<", registered empty="<<paths.empty_paths.size()<<std::endl;
         Json start, fixed;
@@ -416,7 +375,7 @@ int main(int argc,char** argv) {
         stage="optimization"; stage_started=wall_time();
         options.progress->guard(stage);
         options.seconds=options.progress->remaining();
-        options.column_generation=method!="benders_full";
+        options.column_generation=true;
         Json result=method=="full_path"
             ?solve_full(data,paths,options,fixed_path.empty()?nullptr:&fixed_design,start_path.empty()?nullptr:&start)
             :fixed_path.empty()
@@ -426,8 +385,8 @@ int main(int argc,char** argv) {
         stage="output_finalization"; stage_started=wall_time();
         synchronize_result_paths(data,paths,result);
         result["solver"]="CPLEX";
-        result["preset"]=configuration.preset;
         result["resolved_configuration"]=resolved_configuration;
+        result["auto_disabled_accelerations"]=configuration.auto_disabled_accelerations;
         result["export_catalogue"]=options.export_catalogue;
         result["demand_formulation"]=demand_formulation();
         result["tight_airline_bounds"]=options.tight_airline_bounds;
@@ -463,10 +422,16 @@ int main(int argc,char** argv) {
         if(std::filesystem::is_regular_file(argv[0])) result["binary_sha256"]=sha256_file(argv[0]);
         result["input_manifest_sha256"]=sha256_file(input/"manifest.json");
         result["catalogue"]={{"segments",paths.initial_segments.size()},{"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
-        result["path_storage"]=implicit_paths?"generated_columns_only":"complete_catalogue";
-        result["pricing_domain"]=options.preprocessed_demand && method=="benders_cg"
-            ? "complete_preprocessing_catalogue_with_exact_label_pricing"
-            : implicit_paths ? "implicit_complete_physical_domain" : "complete_catalogue";
+        result["path_storage"]=paths.complete?"complete_catalogue":"generated_service_pool";
+        result["pricing_domain"]=method=="benders_cg"
+            ? "implicit_complete_physical_domain" : "complete_catalogue";
+        result["domain_complete"]=paths.domain_complete;
+        result["physical_service_count"]=paths.physical_service_count;
+        result["registered_service_count"]=paths.service_paths.size();
+        result["memory_policy"]={{"potential_service_paths_retained",paths.complete},
+            {"service_pool",paths.complete?"complete":"generated_append_only"},
+            {"full_catalogue_auxiliaries",false},
+            {"column_batch_limit_is_lifetime_cap",false}};
         result["catalogue_complete"]=paths.complete;
         result["support_complete"]=paths.support_complete;
         if(!result.contains("generated_columns")) {
@@ -474,8 +439,8 @@ int main(int argc,char** argv) {
             result["generated_columns_scope"]=method=="full_path"?"full_path_model":"registered_generated_catalogue";
         }
         result["input_read_seconds"]=read_seconds;
-        result["support_preprocessing_seconds"]=implicit_paths?preprocessing_seconds:0.0;
-        result["enumeration_seconds"]=implicit_paths?0.0:preprocessing_seconds;
+        result["support_preprocessing_seconds"]=0.0;
+        result["enumeration_seconds"]=preprocessing_seconds;
         result["wall_before_output"]=wall_time()-started;
         std::filesystem::create_directories(options.output);
         const double output_started=wall_time();

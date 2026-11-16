@@ -61,9 +61,6 @@ struct SolverOptions {
     bool tight_airline_bounds = false, topology_cuts = false;
     double topology_seconds = 2;
     int topology_cut_limit = 1000;
-    bool assignment_support_cuts = false;
-    double assignment_support_seconds = .25, assignment_support_floor = 1e-4;
-    int assignment_support_cut_limit = 2000, assignment_support_max_cuts = 16;
     // Optimality-preserving canonicalization for fixed generalized tasks.
     // Does not preserve redundant zero-service assignment encodings.
     bool path_support_cuts = false;
@@ -92,10 +89,6 @@ struct SolverOptions {
     int airline_resource_cut_limit = 1000;
     std::vector<double> task_airline_upper;
     Json task_airline_metadata = {{"enabled",false}};
-    bool double_support_cuts = false, joint_base_cost_cuts = false;
-    double branch_joint_seconds = .25, branch_joint_preprocessing_seconds = 2;
-    double branch_joint_floor = 1e-4;
-    int branch_joint_cut_limit = 2000, branch_joint_max_cuts = 16;
     bool reuse_dual_lp = true;
     bool dual_lp_first = false;
     bool courier_savings_bound = true, initial_design = true, warm_start = true;

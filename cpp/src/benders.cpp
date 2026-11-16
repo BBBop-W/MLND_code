@@ -10,14 +10,12 @@
 #include "mlnd/output.hpp"
 #include "mlnd/strengthening.hpp"
 #include "mlnd/topology_cuts.hpp"
-#include "mlnd/assignment_support_cuts.hpp"
 #include "mlnd/path_support_cuts.hpp"
 #include "mlnd/airline_resources.hpp"
 #include "mlnd/queue_polymatroid.hpp"
 #include "mlnd/queue_fractional.hpp"
 #include "mlnd/queue_fractional_control.hpp"
 #include "mlnd/task_savings.hpp"
-#include "mlnd/branch_joint_cuts.hpp"
 #include "mlnd/heuristics.hpp"
 #include "mlnd/primal_portfolio.hpp"
 #include "mlnd/primal_alns.hpp"
@@ -67,9 +65,6 @@ struct Subproblem {
     Json continuous_operating_point = nullptr;
     bool full_bound_valid = false;
     bool recourse_optimal = false;
-    // No numerical profile was spent when the local slice could not provide
-    // a meaningful recovery solve. The caller may grant one bounded resume.
-    bool primal_recovery_deferred = false;
     bool conditional_demand = false;
     Json model_size = nullptr;
 };
@@ -104,11 +99,14 @@ bool recourse_columns_unchanged(const RecourseModelState& state,const PathCollec
 }
 struct SubproblemStateCache {
     std::unique_ptr<RecourseModelState> state;
+    // One auxiliary model, independent of primal RMP persistence. It retains
+    // no certificate and synchronizes against every new Pareto source model.
+    DualWorkspace dual_workspace;
     std::size_t hits=0,builds=0,rhs_updates=0;
     std::string last_rebuild_reason="unused";
     Json metadata() const {
         return {{"hits",hits},{"builds",builds},{"rhs_updates",rhs_updates},{"live_models",state?1:0},
-                {"last_rebuild_reason",last_rebuild_reason}};
+                {"last_rebuild_reason",last_rebuild_reason},{"dual_workspace",dual_workspace.metadata()}};
     }
 };
 std::string recourse_options_identity(const SolverOptions& o) {
@@ -449,7 +447,7 @@ Cut solve_dual(const Input& d, const PathCollection& paths, const Formulation& f
                const std::vector<int>& separated_service = {},
                const std::vector<int>& separated_empty = {}, int numerical_profile = 0,
                const std::vector<double>* primal_anchor = nullptr,
-               DualRayWorkspace* ray_workspace = nullptr) {
+               DualWorkspace* dual_workspace = nullptr) {
     const bool minimum_norm_recovery=numerical_profile==5;
     if(minimum_norm_recovery)numerical_profile=4;
     Cut result;
@@ -638,10 +636,14 @@ Cut solve_dual(const Input& d, const PathCollection& paths, const Formulation& f
         {"linear_rows", dual.rows.size()}, {"cones", dual.cones.size()}};
     if (remaining(deadline) <= 0) return finish_dual("deadline_during_linear_model_build");
     const double solver_build_started = wall_time();
-    const bool reuse_ray = options.reuse_dual_lp && ray_workspace && numerical_profile == 4 && !core && !minimum_norm_recovery;
+    const bool reuse_dual = options.reuse_dual_lp && dual_workspace;
     std::unique_ptr<NativeSolver> cold_solver;
-    Json workspace_diagnostics;
-    NativeSolver& solver = reuse_ray ? ray_workspace->synchronize(dual,options,workspace_diagnostics)
+    Json workspace_diagnostics={{"enabled",false},{"reused_solver",false},
+        {"model_class",dual.cones.empty()?"LP":"SOCP"},{"cone_count",dual.cones.size()},
+        {"basis_reuse_applicable",dual.cones.empty()},
+        {"basis_available_before_update",false},{"basis_submitted",false}};
+    NativeSolver& solver = reuse_dual ? dual_workspace->synchronize(dual,options,workspace_diagnostics,
+                                                                   minimum_norm_recovery?5:numerical_profile,deadline)
         : *(cold_solver=std::make_unique<NativeSolver>(dual, options, core ? "pareto_dual" : "benders_dual"));
     if (numerical_profile > 0) {
         solver.cplex.setParam(IloCplex::Param::Emphasis::Numerical, true);
@@ -650,16 +652,16 @@ Cut solve_dual(const Input& d, const PathCollection& paths, const Formulation& f
         solver.cplex.setParam(IloCplex::Param::Simplex::Tolerances::Optimality, 1e-9);
         solver.cplex.setParam(IloCplex::Param::Read::Scale, numerical_profile == 1 ? 1 : numerical_profile == 2 ? -1 : 0);
         if (numerical_profile == 3) solver.cplex.setParam(IloCplex::Param::Preprocessing::Presolve, false);
-        if (numerical_profile == 4) solver.cplex.setParam(IloCplex::Param::RootAlgorithm, IloCplex::Dual);
+        if (numerical_profile == 4 && dual.cones.empty()) solver.cplex.setParam(IloCplex::Param::RootAlgorithm, IloCplex::Dual);
     }
     result.diagnostics["solver_build_seconds"] = wall_time() - solver_build_started;
-    if (reuse_ray) result.diagnostics["dual_lp_workspace"] = workspace_diagnostics;
+    result.diagnostics["dual_workspace"] = workspace_diagnostics;
     if (remaining(deadline) <= 0) return finish_dual("deadline_during_solver_build");
     result.diagnostics["solver_time_limit_seconds"] = remaining(deadline);
     const double optimize_started = wall_time();
-    auto solved = reuse_ray ? ray_workspace->optimize(remaining(deadline),workspace_diagnostics)
+    auto solved = reuse_dual ? dual_workspace->optimize(remaining(deadline),workspace_diagnostics)
                            : solver.optimize(remaining(deadline));
-    if (reuse_ray) result.diagnostics["dual_lp_workspace"] = workspace_diagnostics;
+    result.diagnostics["dual_workspace"] = workspace_diagnostics;
     result.diagnostics["optimize_seconds"] = wall_time() - optimize_started;
     result.diagnostics["solver_status_code"] = solved.cplex_status;
     result.diagnostics["has_solution"] = solved.has_solution;
@@ -670,14 +672,22 @@ Cut solve_dual(const Input& d, const PathCollection& paths, const Formulation& f
     if (solved.values.size() != dual.variables.size()) return finish_dual("solver_values_dimension");
     if (!std::all_of(solved.values.begin(), solved.values.end(), [](double x) { return std::isfinite(x); }))
         return finish_dual("solver_values_nonfinite");
-    if (reuse_ray) {
+    {
+        // The workspace returns values in this source model's order. Validate
+        // all original rows, bounds and cones after synchronization; neither
+        // a model-cache hit nor solver optimality is a cut certificate.
         const double validation_started=wall_time();
-        result.diagnostics["dual_lp_source_residuals"]=feasibility_diagnostics(dual,solved.values);
-        result.diagnostics["dual_lp_source_objective"]=objective_value(dual,solved.values);
-        const bool source_valid=feasible_point(dual,solved.values);
-        result.diagnostics["dual_lp_source_validation_seconds"]=wall_time()-validation_started;
-        if (!source_valid)
-            return finish_dual("persistent_dual_lp_source_validation_failed");
+        auto assessment=assess_point(dual,solved.values);
+        const double source_objective=objective_value(dual,solved.values);
+        const bool objective_matches=std::isfinite(source_objective) &&
+            std::abs(source_objective-solved.objective)<=2e-7*(1+std::abs(source_objective));
+        result.diagnostics["dual_source_residuals"]=assessment.diagnostics();
+        result.diagnostics["dual_source_objective"]=source_objective;
+        result.diagnostics["dual_source_objective_matches"]=objective_matches;
+        result.diagnostics["dual_source_validated"]=assessment.feasible && objective_matches;
+        result.diagnostics["dual_source_validation_seconds"]=wall_time()-validation_started;
+        if (!assessment.feasible || !objective_matches)
+            return finish_dual("dual_source_validation_failed");
     }
     const double certificate_started = wall_time();
     result.prices.resize(m);
@@ -821,9 +831,10 @@ Json pricing_record(const LabelPricingResult& pricing) {
             {"minimum_service_reduced_cost", pricing.min_service}, {"minimum_empty_reduced_cost", pricing.min_empty},
             {"dual_correction", pricing.correction},
             {"fast_pricing_used",pricing.fast_pricing_used},
-            {"catalogue_pricing_used",pricing.catalogue_pricing_used},{"catalogue_paths_scanned",pricing.catalogue_paths_scanned},
+            {"catalogue_pricing_used",pricing.catalogue_pricing_used},{"implicit_streaming_pricing_used",pricing.implicit_streaming_pricing_used},
+            {"catalogue_paths_scanned",pricing.catalogue_paths_scanned},
             {"diverse_pricing_used",pricing.diverse_pricing_used},{"diversity_candidates",pricing.diversity_candidates},
-            {"diversity_groups",pricing.diversity_groups},{"branch_time_overlaps_pricing",pricing.catalogue_pricing_used},
+            {"diversity_groups",pricing.diversity_groups},{"branch_time_overlaps_pricing",pricing.catalogue_pricing_used || pricing.implicit_streaming_pricing_used},
             {"catalogue_path_reuses",pricing.catalogue_path_reuses},
             {"physical_path_builds",pricing.physical_path_builds},
             {"old_service_correction",pricing.old_service_correction},
@@ -894,6 +905,9 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
                               options.catalogue_pricing,persist);
     if(options.progress) options.progress->record({{"event","phase_end"},{"stage","label_graph_construction"},
         {"seconds",wall_time()-graph_started},{"fractional_design",fractional},{"cache_hit",oracle.graph_reused()}});
+    DualWorkspace local_dual_workspace;
+    DualWorkspace* dual_workspace=options.reuse_dual_lp
+        ?(state_cache?&state_cache->dual_workspace:&local_dual_workspace):nullptr;
     std::unique_ptr<RecourseModelState> state;
     bool model_reused=false,rhs_reused=false,reset_profile=false;
     if(persist) {
@@ -1118,20 +1132,10 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
         while (primal_retries_for_columns < 3) {
             if (recovered_primal) break;
             if (solved.has_solution && solved.optimal && point_feasible(solved)) break;
-            // Preserve untried profiles across short scheduling slices. Model
-            // extraction also consumes this deadline, so check both sides of it.
-            constexpr double minimum_recovery_seconds=1.0;
-            if (std::min(20.0,.25*remaining(deadline))<minimum_recovery_seconds) {
-                result.primal_recovery_deferred=true;break;
-            }
-            const int profile = primal_retries_for_columns+1;
+            if (remaining(deadline)<=0) break;
+            const int profile = ++primal_retries_for_columns;
             auto recovery=tighter_primal(profile);
-            const double recovery_seconds=std::min(20.0,.25*remaining(deadline));
-            if(recovery_seconds<minimum_recovery_seconds) {
-                result.primal_recovery_deferred=true;break;
-            }
-            ++primal_retries_for_columns;
-            auto candidate=recovery->optimize(recovery_seconds);
+            auto candidate=recovery->optimize(std::min(20.0,.25*remaining(deadline)));
             // A rejected local candidate may reuse the same stack address on
             // the next recovery attempt, but it is a new optimizer point.
             invalidate_assessment();
@@ -1144,7 +1148,6 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
             }
         }
         iteration["same_column_primal_retries"] = primal_retries_for_columns;
-        iteration["primal_recovery_deferred"] = result.primal_recovery_deferred;
         iteration["rmp_seconds"] = wall_time() - phase;
         iteration["rmp_status"] = solved.status;
         iteration["rmp_optimal"] = solved.optimal;
@@ -1446,7 +1449,7 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
                     try {
                     while (remaining(auxiliary_deadline) > 0) {
                         Cut auxiliary = solve_dual(d, paths, f, options, auxiliary_deadline, core, q, face,
-                                                   separated_p, separated_e);
+                                                   separated_p, separated_e,0,nullptr,dual_workspace);
                         result.pareto["auxiliary_solves"].push_back(auxiliary.diagnostics);
                         result.pareto["auxiliary_status"] = auxiliary.status;
                         result.pareto["reason"] = "auxiliary_" + auxiliary.diagnostics.value("termination_reason", std::string("unavailable"));
@@ -1520,6 +1523,10 @@ Subproblem subproblem(const Input& d, PathCollection& paths, const std::vector<d
                         result.pareto["reason"] = result.pareto.at("auxiliary_solves").empty()
                             ? "auxiliary_budget_exhausted_before_build" : "auxiliary_separation_time_limit";
                     }
+                    } catch (const RunBudgetExceeded& exception) {
+                        result.pareto["reason"] = "auxiliary_construction_time_limit";
+                        result.pareto["timeout"] = true;
+                        result.pareto["error"] = exception.what();
                     } catch (const IloException& exception) {
                         result.pareto["reason"] = "auxiliary_solver_error";
                         result.pareto["error"] = exception.getMessage();
@@ -1949,8 +1956,6 @@ Json continuous_cg_result(const Input& d, PathCollection& paths, const SolverOpt
                           CgColumnSeeds* reused = nullptr,
                           double no_gain_upper = std::numeric_limits<double>::quiet_NaN()) {
     if (!paths.support_complete) throw std::invalid_argument("Continuous CG requires complete physical support");
-    if (d.origin_assignment() && (options.assignment_support_cuts || options.double_support_cuts || options.joint_base_cost_cuts))
-        throw std::invalid_argument("K=1 origin assignment does not support base-pair assignment-support, double-support, or joint-base-cost cuts; disable these optional cuts");
     if (!options.column_generation && !paths.complete)
         throw std::invalid_argument("Full continuous recourse requires a complete path catalogue");
     if (!std::isfinite(options.seconds) || options.seconds < 0 || options.cg_max_columns < 1 ||
@@ -1974,9 +1979,10 @@ Json continuous_cg_result(const Input& d, PathCollection& paths, const SolverOpt
         {"coefficients",Json::array()},{"ordinary_cut",nullptr},{"cg_trace",Json::array()},
         {"timings",Json::object()},{"termination_reason","time_limit"},
         {"model_construction_complete",false},{"support_complete",true},
-        {"catalogue_complete",paths.complete},{"budget_seconds",options.seconds},
+        {"catalogue_complete",paths.complete},{"domain_complete",paths.complete || paths.domain_complete},
+        {"budget_seconds",options.seconds},
         {"budget_scope","seed_construction_model_build_optimization_pricing_validation"},
-        {"pricing_method",options.column_generation ? (options.catalogue_pricing && paths.complete?"exact_catalogue_scan":"exact_resource_labeling") : "all_columns"},
+        {"pricing_method",options.column_generation ? (!paths.complete && d.preprocessed_demand && paths.domain_complete?"implicit_streaming_exact_scan":options.catalogue_pricing && paths.complete?"exact_catalogue_scan":"exact_resource_labeling") : "all_columns"},
         {"cg_max_columns",options.cg_max_columns},
         {"continuous_numerical_recovery",true},
         {"cg_duality_tolerance",options.cg_duality_tolerance},{"pricing_tolerance",options.pricing_tolerance}};
@@ -2068,6 +2074,7 @@ Json continuous_cg_result(const Input& d, PathCollection& paths, const SolverOpt
     result["generated_empty_paths"] = d.preprocessed_demand ? result.value("empty_columns",std::size_t(0)) : paths.empty_paths.size();
     result["generated_columns_scope"] = d.preprocessed_demand ? "continuous_recourse_rmp" : "registered_generated_catalogue";
     result["catalogue_complete"] = paths.complete;
+    result["domain_complete"] = paths.complete || paths.domain_complete;
     if (options.progress) options.progress->record({{"event","continuous_cg_finished"},
         {"bound_scope",result.at("scope")},{"bound_valid",result.at("bound_valid")},
         {"certified_lower_bound",result.at("certified_lower_bound")},
@@ -2129,7 +2136,7 @@ Json solve_design_face_cg(const Input& d, PathCollection& paths, const SolverOpt
                           int head, int state,CgColumnSeeds* seeds,double no_gain_upper) {
     if(!d.preprocessed_demand || !d.origin_assignment() || d.n_l<=0 || d.max_orders!=2 ||
        d.flow_policy!="aggregate" || d.first_leg_consistency || d.route_mode!="direct" ||
-       d.has_candidate_routes || !paths.complete || !paths.support_complete ||
+       d.has_candidate_routes || !(paths.complete || paths.domain_complete) || !paths.support_complete ||
        head<0 || head>=d.assignment_entities() || state<0 || state>d.n_l)
         throw std::invalid_argument("Design faces require complete direct K2 preprocessed origin tasks");
     SolverOptions face_options=options;
@@ -2179,6 +2186,7 @@ Json solve_fixed_design_cg(const Input& d, PathCollection& paths, const SolverOp
     result["recourse_optimal"] = sub.recourse_optimal;
     result["construction_complete"] = true;
     result["catalogue_complete"] = paths.complete;
+    result["domain_complete"] = paths.complete || paths.domain_complete;
     result["support_complete"] = paths.support_complete;
     result["initial_columns"] = seeds.metadata;
     result["initial_service_columns"] = seeds.service.size();
@@ -2189,7 +2197,7 @@ Json solve_fixed_design_cg(const Input& d, PathCollection& paths, const SolverOp
     result["empty_columns"] = sub.empty.size();
     result["generated_columns"] = {{"service",sub.service.size()},{"empty",sub.empty.size()}};
     result["generated_columns_scope"] = "fixed_design_recourse_rmp";
-    result["pricing_method"] = options.column_generation ? (options.catalogue_pricing && paths.complete?"exact_catalogue_scan":"exact_resource_labeling") : "all_columns";
+    result["pricing_method"] = options.column_generation ? (!paths.complete && d.preprocessed_demand && paths.domain_complete?"implicit_streaming_exact_scan":options.catalogue_pricing && paths.complete?"exact_catalogue_scan":"exact_resource_labeling") : "all_columns";
     result["cg_max_columns"] = options.cg_max_columns;
     result["pricing_tolerance"] = options.pricing_tolerance;
     result["cg_duality_tolerance"] = options.cg_duality_tolerance;
@@ -2225,8 +2233,8 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     if (!paths.support_complete) throw std::runtime_error("Benders requires complete initial-segment support");
     if(options.primal_alns && (d.n_l!=2 || d.max_orders!=2 || !d.preprocessed_demand ||
        !d.origin_assignment() || d.flow_policy!="aggregate" || d.first_leg_consistency ||
-       !paths.complete || !options.reuse_columns))
-        throw std::invalid_argument("Primal ALNS requires complete L2 K2 preprocessed origin aggregate columns");
+       !(paths.complete || paths.domain_complete) || !options.reuse_columns))
+        throw std::invalid_argument("Primal ALNS requires certified L2 K2 preprocessed origin aggregate support");
     if(options.staged_continuous_root && (!options.cg_seed_reuse || !options.continuous_root))
         throw std::invalid_argument("Staged continuous root requires root CG and column seed reuse");
     if(options.fractional_path_support && !options.path_support_cuts)
@@ -2248,15 +2256,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         throw std::invalid_argument("Invalid task resource separation budget");
     if(options.task_airline_bounds && options.task_airline_upper.empty())
         throw std::invalid_argument("Prepare task airline bounds from the complete catalogue before Benders");
-    if (options.assignment_support_cut_limit < 0 || options.assignment_support_max_cuts < 1 ||
-        !std::isfinite(options.assignment_support_seconds) || options.assignment_support_seconds <= 0 ||
-        !std::isfinite(options.assignment_support_floor) || options.assignment_support_floor <= 0)
-        throw std::invalid_argument("Invalid assignment-support separation settings");
-    if (options.branch_joint_cut_limit < 0 || options.branch_joint_max_cuts < 1 ||
-        !std::isfinite(options.branch_joint_seconds) || options.branch_joint_seconds <= 0 ||
-        !std::isfinite(options.branch_joint_preprocessing_seconds) || options.branch_joint_preprocessing_seconds <= 0 ||
-        !std::isfinite(options.branch_joint_floor) || options.branch_joint_floor <= 0)
-        throw std::invalid_argument("Invalid branch/joint separation settings");
     if (!options.column_generation && !paths.complete) throw std::runtime_error("Full recourse requires a complete path catalogue");
     if (start_solution) validate_design(d, solution_design(d, *start_solution));
     const double started = wall_time(), deadline = started + options.seconds;
@@ -2336,17 +2335,11 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     int cuts = 0, ordinary_count = 0, pareto_count = 0, auxiliary_count = 0, pareto_attempts = 0, cg_iterations = 0;
     int conditional_cuts = 0, conditional_subproblems = 0;
     std::set<std::string> assignment_patterns;
-    std::set<std::size_t> conditional_row_indices, topology_row_indices, assignment_support_row_indices;
+    std::set<std::size_t> conditional_row_indices, topology_row_indices;
     std::set<std::string> topology_keys;
     Json topology_records = Json::array(), topology_attempts = Json::array();
     int topology_skipped = 0, topology_certificates = 0;
     double topology_seconds = 0;
-    AssignmentSupportCache assignment_support_cache;
-    std::set<std::string> assignment_support_keys;
-    Json assignment_support_records = Json::array(), assignment_support_attempts = Json::array();
-    int assignment_support_skipped = 0, assignment_support_certificates = 0;
-    std::size_t assignment_support_numerical_skips = 0;
-    double assignment_support_seconds = 0;
     PathSupportCache path_support_cache;
     std::set<std::string> path_support_keys;
     Json path_support_records = Json::array(), path_support_attempts = Json::array();
@@ -2356,15 +2349,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     double fractional_support_seconds=0, fractional_refresh_seconds=0;
     int fractional_support_cuts=0, support_rejections_since_refresh=0;
     Json fractional_support_attempts=Json::array(), fractional_support_records=Json::array();
-    const bool branch_joint_enabled = (options.double_support_cuts || options.joint_base_cost_cuts)
-        && options.branch_joint_cut_limit > 0;
-    BranchJointCache branch_joint_cache;
-    std::set<std::size_t> branch_joint_row_indices;
-    std::set<std::string> branch_joint_keys;
-    Json branch_joint_records = Json::array(), branch_joint_attempts = Json::array();
-    int branch_joint_skipped = 0, double_support_count = 0, joint_base_count = 0;
-    std::size_t branch_joint_certificates = 0, branch_joint_numerical_skips = 0;
-    double branch_joint_seconds = 0;
     Json subproblem_size=nullptr, subproblem_peak=nullptr;
     int cleanup_improvements = 0, primal_search_attempts = 0;
     int ordinary_cg_iterations = 0, heuristic_cg_iterations = 0, master_starts = 0;
@@ -2390,8 +2374,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     double last_restricted_search = started, integer_resource_seconds = 0;
     Json search_schedule_records = Json::array();
     std::vector<double> pending_design;
-    bool pending_primal_recovery=false;
-    int candidate_recovery_resumes=0,primal_recovery_resumes=0;
     Json pending_primal=nullptr;
     double pending_theta = 0;
     std::string active_candidate, pending_candidate;
@@ -2521,32 +2503,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         if(options.progress){attempt["event"]="fractional_path_support_separation";options.progress->record(attempt);}
         return added>0;
     };
-    assignment_support_cache.metadata = {{"enabled", false}};
-    if (((options.assignment_support_cuts && options.assignment_support_cut_limit > 0) || branch_joint_enabled)
-        && remaining(deadline) > 0) {
-        const double phase = wall_time();
-        assignment_support_cache = build_assignment_support_cache(d, paths,
-            std::min(deadline, phase + options.assignment_support_seconds));
-        assignment_support_cache.metadata["enabled"] = true;
-        add_time(timing, "assignment_support_preprocessing", phase);
-    }
-    branch_joint_cache.metadata = {{"enabled", false}};
-    if (branch_joint_enabled && remaining(deadline) > 0) {
-        const double phase = wall_time();
-        branch_joint_cache = build_branch_joint_cache(d, paths, assignment_support_cache,
-            std::min(deadline, phase + options.branch_joint_preprocessing_seconds), options.branch_joint_floor);
-        branch_joint_cache.metadata["enabled"] = true;
-        add_time(timing, "branch_joint_preprocessing", phase);
-    }
-    auto branch_joint_summary = [&]() -> Json {
-        return {{"enabled",branch_joint_enabled},{"double_support_enabled",options.double_support_cuts},
-            {"joint_base_cost_enabled",options.joint_base_cost_cuts},{"cuts",branch_joint_records.size()},
-            {"double_cuts",double_support_count},{"joint_cuts",joint_base_count},
-            {"attempts",branch_joint_attempts.size()},{"skipped_integer_subproblems",branch_joint_skipped},
-            {"certificates",branch_joint_certificates},{"numerical_skips",branch_joint_numerical_skips},
-            {"seconds",branch_joint_seconds},{"preprocessing_seconds",branch_joint_cache.seconds},
-            {"master_added_variables",0},{"validity_scope","binary_designs_branch_support_and_distinct_origin_costs"}};
-    };
     auto observe_global = [&](const char* stage, bool checkpoint = false) {
         if (!options.progress) return;
         options.progress->record({{"event","global_bounds"},{"stage",stage},{"objective",upper},{"upper_bound",upper},
@@ -2563,11 +2519,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             snapshot["topology_summary"]={{"enabled",options.topology_cuts},{"cuts",topology_records.size()},
                 {"attempts",topology_attempts.size()},{"skipped_integer_subproblems",topology_skipped},
                 {"zero_service_certificates",topology_certificates},{"seconds",topology_seconds}};
-            snapshot["assignment_support_summary"]={{"enabled",options.assignment_support_cuts},
-                {"cuts",assignment_support_records.size()},{"attempts",assignment_support_attempts.size()},
-                {"skipped_integer_subproblems",assignment_support_skipped},
-                {"certificates",assignment_support_certificates},{"numerical_skips",assignment_support_numerical_skips},
-                {"seconds",assignment_support_seconds},{"preprocessing_seconds",assignment_support_cache.seconds}};
             snapshot["construction_complete"]=true;
             snapshot["path_support_summary"]=path_support_summary();
             snapshot["airline_connectivity_metadata"]=airline_connectivity_metadata;
@@ -2580,7 +2531,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             snapshot["airline_resource_summary"]={{"enabled",options.airline_resource_cuts},
                 {"cuts",airline_resource_records.size()},{"attempts",airline_resource_attempts.size()},
                 {"skipped_integer_subproblems",airline_resource_skipped},{"master_added_variables",0}};
-            snapshot["branch_joint_summary"]=branch_joint_summary();
             snapshot["support_complete"]=paths.support_complete;
             snapshot["catalogue_complete"]=paths.complete;
             snapshot["generated_columns"]={{"service",d.preprocessed_demand?used_p.size():paths.service_paths.size()},
@@ -3373,7 +3323,9 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
                 {"direct_global_bound_update",false}});
         };
         try {
-            if(startup && start_solution) {
+            if(startup && start_solution && paths.complete) {
+                // External full-catalogue IDs are not generated-pool IDs.
+                // Implicit runs reoptimize only the supplied design below.
                 // Validate a supplied point in the original restricted model;
                 // no external point enters the trusted submission path directly.
                 const std::vector<int> empty_selection;
@@ -3464,7 +3416,8 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             std::min(continuous_total_limit,remaining(deadline));
         run_continuous_stage("continuous_root",allowance);
     }
-    if (!options.primal_alns && (options.initial_design || start_solution) && remaining(deadline) > 0 &&
+    if (((!options.primal_alns && (options.initial_design || start_solution)) ||
+         (start_solution && !paths.complete)) && remaining(deadline) > 0 &&
         options.seconds * options.heuristic_budget_fraction > heuristic_seconds) {
         std::vector<double> design = start_solution ? solution_design(d, *start_solution) :
             ((restricted_improvements || (options.primal_seed_portfolio && best.value("served",0.0)>0))
@@ -3480,6 +3433,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         account(sub, true, start_solution ? "supplied_design" : "initial_design");
         heuristic_records.push_back({{"stage", start_solution ? "supplied_design" : "initial_design"},
                                      {"candidate_id",active_candidate},
+                                     {"warm_start_scope",start_solution && !paths.complete?"design_only":"current_registry"},
                                      {"termination_reason", sub.reason}, {"pricing_complete", sub.ordinary.valid},
                                      {"wall", sub.wall}, {"cg_iterations", sub.iterations}, {"cg_trace", sub.trace}});
     }
@@ -3534,7 +3488,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         if (remaining(root_deadline) <= 0) { root_reason = "time_limit"; break; }
         const double phase = wall_time();
         LinearModel relaxation = master.matrix;
-        // Conditional, topology and assignment-support cuts use binary decisions, not the chosen
+        // Conditional and topology cuts use binary decisions, not the chosen
         // lifted continuous feasible set. Keep the root's primal and dual
         // diagnostics on that same continuous relaxation by excluding exactly
         // these append-only row indices from its temporary copy. They remain
@@ -3544,14 +3498,11 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         // must never be compared with the original continuous primal as UB.
         // Static path-support filters are retained as an optimality-preserving
         // restriction of assignment encodings; root_scope labels that separately.
-        if (!conditional_row_indices.empty() || !topology_row_indices.empty() || !assignment_support_row_indices.empty()
-            || !branch_joint_row_indices.empty()) {
+        if (!conditional_row_indices.empty() || !topology_row_indices.empty()) {
             std::vector<RowRecord> root_rows;
-            root_rows.reserve(relaxation.rows.size()-conditional_row_indices.size()-topology_row_indices.size()
-                -assignment_support_row_indices.size()-branch_joint_row_indices.size());
+            root_rows.reserve(relaxation.rows.size()-conditional_row_indices.size()-topology_row_indices.size());
             for (std::size_t j=0;j<relaxation.rows.size();++j)
-                if (!conditional_row_indices.count(j) && !topology_row_indices.count(j) && !assignment_support_row_indices.count(j)
-                    && !branch_joint_row_indices.count(j))
+                if (!conditional_row_indices.count(j) && !topology_row_indices.count(j))
                     root_rows.push_back(std::move(relaxation.rows[j]));
             relaxation.rows=std::move(root_rows);
         }
@@ -3585,8 +3536,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         Json root_record = {{"round", round + 1}, {"candidate_id", active_candidate},
             {"conditional_rows_excluded",conditional_row_indices.size()},
             {"topology_rows_excluded",topology_row_indices.size()},
-            {"assignment_support_rows_excluded",assignment_support_row_indices.size()},
-            {"branch_joint_rows_excluded",branch_joint_row_indices.size()},
             {"master_objective", root.objective}, {"lower_bound", root_lower},
             {"fractional_support_added",fractional_support_added},
             {"theta", root.values[theta]}, {"capacity_cuts_added", capacity_added ? 1 : 0},
@@ -3869,7 +3818,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         }
         if(pending_design.empty())latest_master_point=solved.values;
         const bool resumed_design = !pending_design.empty();
-        if(!resumed_design)candidate_recovery_resumes=0;
         active_candidate = resumed_design ? pending_candidate : (stabilized_candidate?"stabilized:":"integer:") + std::to_string(integer_master_solves);
         // Add both cut families before reoptimizing the integer master. If CG
         // needs another slice, retain this candidate and its already valid cut.
@@ -3979,96 +3927,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             continue;
         }
         if(options.search_scheduling && resource_reject) ++forced_cg_passes;
-        // Combine branch certificates before individual support cuts so a
-        // candidate blocked at several bases receives their joint cost bound.
-        if (!resumed_design && branch_joint_enabled && branch_joint_cache.support_complete &&
-            static_cast<int>(branch_joint_records.size()) < options.branch_joint_cut_limit && remaining(deadline) > 0) {
-            const int allowance = std::min(options.branch_joint_max_cuts,
-                options.branch_joint_cut_limit - static_cast<int>(branch_joint_records.size()));
-            auto separated = separate_branch_joint_cost(d, paths, assignment_support_cache, branch_joint_cache,
-                design, theta, candidate_theta, std::min(deadline, wall_time() + options.branch_joint_seconds),
-                options.double_support_cuts, options.joint_base_cost_cuts,
-                static_cast<std::size_t>(allowance), options.branch_joint_floor);
-            branch_joint_seconds += separated.seconds;
-            branch_joint_numerical_skips += separated.numerical_skips;
-            branch_joint_certificates += separated.certificates.size();
-            int inserted = 0;
-            for (auto& cut : separated.cuts) {
-                if (!cut.valid || !cut.violated || !branch_joint_keys.insert(cut.key).second) continue;
-                cut.row.name += "_" + std::to_string(branch_joint_records.size());
-                branch_joint_row_indices.insert(master.matrix.rows.size());
-                master.matrix.rows.push_back(cut.row);
-                solver.add_row(cut.row);
-                Json record = cut.metadata;
-                record.update({{"candidate_id",active_candidate},{"accepted",true},{"key",cut.key},{"kind",cut.kind},
-                    {"rhs",cut.row.rhs},{"coefficients",cut.row.coefficients},{"integer_only",true},
-                    {"blocking_arcs",cut.blocking_arcs},{"triggers",cut.triggers},{"origin_bases",cut.origin_bases}});
-                branch_joint_records.push_back(record);
-                if (cut.kind == "double_branch") ++double_support_count;
-                else if (cut.kind == "joint_bases") ++joint_base_count;
-                ++inserted;
-            }
-            Json record = separated.metadata;
-            record.update({{"candidate_id",active_candidate},{"accepted_cuts",inserted},
-                {"seconds",separated.seconds},{"integer_only",true}});
-            branch_joint_attempts.push_back(record);
-            if (options.progress) {
-                record["event"] = "branch_joint_separation";
-                options.progress->record(record);
-            }
-            if (inserted > 0) {
-                if(!options.search_scheduling || defer_resource_recourse(true,resource_restart_streak)) {
-                    ++branch_joint_skipped; ++resource_restart_streak;
-                    master_stalled_passes = 0;
-                    continue;
-                }
-                ++forced_cg_passes;
-            }
-        }
-        // Check mandatory single-order support before the more expensive
-        // assignment-independent topology oracle. Each accepted row uses only
-        // one assignment trigger and a complete, cached single-path domain.
-        if (!resumed_design && options.assignment_support_cuts && assignment_support_cache.complete_domain &&
-            static_cast<int>(assignment_support_records.size()) < options.assignment_support_cut_limit && remaining(deadline) > 0) {
-            const int allowance = std::min(options.assignment_support_max_cuts,
-                options.assignment_support_cut_limit - static_cast<int>(assignment_support_records.size()));
-            auto separated = separate_assignment_support_cost(d, assignment_support_cache, design,
-                theta, candidate_theta, std::min(deadline, wall_time() + options.assignment_support_seconds),
-                static_cast<std::size_t>(allowance), options.assignment_support_floor);
-            assignment_support_seconds += separated.seconds;
-            assignment_support_numerical_skips += separated.numerical_skips;
-            int inserted = 0;
-            for (auto& cut : separated.cuts) {
-                if (cut.valid) ++assignment_support_certificates;
-                if (!cut.valid || !cut.violated || !assignment_support_keys.insert(cut.key).second) continue;
-                cut.row.name += "_" + std::to_string(assignment_support_records.size());
-                assignment_support_row_indices.insert(master.matrix.rows.size());
-                master.matrix.rows.push_back(cut.row);
-                solver.add_row(cut.row);
-                Json record = cut.metadata;
-                record.update({{"candidate_id",active_candidate},{"accepted",true},{"key",cut.key},
-                    {"rhs",cut.row.rhs},{"coefficients",cut.row.coefficients},{"integer_only",true},
-                    {"blocking_arcs",cut.blocking_arcs}});
-                assignment_support_records.push_back(record);
-                ++inserted;
-            }
-            Json record = separated.metadata;
-            record.update({{"candidate_id",active_candidate},{"accepted_cuts",inserted},
-                {"seconds",separated.seconds},{"integer_only",true}});
-            assignment_support_attempts.push_back(record);
-            if (options.progress) {
-                record["event"] = "assignment_support_separation";
-                options.progress->record(record);
-            }
-            if (inserted > 0) {
-                if(!options.search_scheduling || defer_resource_recourse(true,resource_restart_streak)) {
-                    ++assignment_support_skipped; ++resource_restart_streak;
-                    master_stalled_passes = 0;
-                    continue;
-                }
-                ++forced_cg_passes;
-            }
-        }
         // A structural cost certificate covers every assignment on this
         // blocked topology. Reoptimize before paying for the SOCP; the cut is
         // integer-valid and cannot enter the original continuous diagnostics.
@@ -4113,8 +3971,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         std::string design_key;
         for (double bit : design) design_key.push_back(bit > .5 ? '1' : '0');
         if(options.primal_alns)run_primal_window(false);
-        const bool recovery_slice=resumed_design && pending_primal_recovery;
-        pending_primal_recovery=false;
         pending_design.clear();
         pending_candidate.clear();
         std::vector<int> selected_p(pool_p.begin(), pool_p.end()), selected_e(pool_e.begin(), pool_e.end());
@@ -4132,7 +3988,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         const double pareto_allowance = std::min(options.pareto_call_seconds,
             std::max(2.0, 3 * previous_dual_seconds) * std::pow(2.0, std::min(4, pareto_budget_failures)));
         sub_options.pareto_call_seconds = std::min({pareto_allowance, std::max(0.0,pareto_left), .2 * remaining(deadline)});
-        const double sub_deadline = recovery_slice ? std::min(deadline,wall_time()+30.0) : options.primal_alns
+        const double sub_deadline = options.primal_alns
             ? std::min(deadline,wall_time()+std::max(.01,primal_schedule.cg_slice(wall_time(),remaining(deadline))))
             : options.restricted_mip ? std::min(deadline,wall_time()+std::max(1.0,.45*options.seconds)) : deadline;
         const int cuts_before = cuts;
@@ -4222,20 +4078,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
             restricted_search("generated_column_mip", -1);
         if (!options.search_scheduling && options.restricted_mip && options.local_branching && (cg_call + 1) % (2 * options.heuristic_frequency) == 0)
             restricted_search("local_branching", options.local_branching_radius);
-        if(sub.primal_recovery_deferred && !sub.ordinary.valid &&
-           candidate_recovery_resumes<1 && remaining(deadline)>=4.0 && sub_deadline<deadline) {
-            pending_design=design;pending_candidate=active_candidate;pending_theta=candidate_theta;
-            pending_primal=std::move(resume_primal);pending_primal_recovery=true;
-            ++candidate_recovery_resumes;++primal_recovery_resumes;
-            iterations.back()["termination_reason"]="yield_for_primal_recovery";
-            iterations.back()["cg_termination_reason"]=sub.reason;
-            if(options.progress)options.progress->record({{"event","yield_for_primal_recovery"},
-                {"candidate_id",active_candidate},{"resume_limit",1},{"slice_limit_seconds",30.0},
-                {"retained_primal",!pending_primal.is_null()}});
-            continue;
-        }
-        if(options.primal_alns && !sub.recourse_optimal && !sub.primal_recovery_deferred &&
-           sub.reason!="primal_validation_failed" && remaining(deadline)>0 &&
+        if(options.primal_alns && !sub.recourse_optimal && remaining(deadline)>0 &&
            wall_time()>=sub_deadline-.05 && sub_deadline<deadline) {
             pending_design=design;pending_candidate=active_candidate;pending_theta=candidate_theta;
             pending_primal=std::move(resume_primal);++primal_yields;
@@ -4359,7 +4202,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["stabilized_master_summary"]={{"enabled",options.stabilized_master},{"seconds",stabilized_master_seconds},
         {"calls",stabilized_master_records.size()},{"trial_bound_used_globally",false}};
     best["bound"] = lower;
-    best["primal_recovery_resumes"] = primal_recovery_resumes;
     best["gap"] = gap(upper, lower);
     best["termination_reason"] = reason;
     best["budget_interruption"] = budget_interruption;
@@ -4368,6 +4210,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["last_subproblem_stage"] = last_subproblem_stage;
     best["last_subproblem_termination_reason"] = last_subproblem_termination;
     best["catalogue_complete"] = paths.complete;
+    best["domain_complete"] = paths.complete || paths.domain_complete;
     best["support_complete"] = paths.support_complete;
     best["construction_complete"] = paths.support_complete;
     best["generated_columns"]={{"service",d.preprocessed_demand?used_p.size():paths.service_paths.size()},
@@ -4378,7 +4221,10 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["initial_columns"] = seeds.metadata;
     best["initial_service_columns"] = seeds.service.size();
     best["initial_empty_columns"] = seeds.empty.size();
-    best["pricing_method"] = options.column_generation ? (options.catalogue_pricing && paths.complete?"exact_catalogue_scan":"exact_resource_labeling") : "all_columns";
+    best["column_pool_storage"]={{"policy","append_only_generated_paths"},{"physical_path_ids_stable",true},
+        {"cg_max_columns_scope","per_pricing_batch"},{"lifetime_column_cap",nullptr},
+        {"potential_path_payloads_materialized",paths.complete}};
+    best["pricing_method"] = options.column_generation ? (!paths.complete && d.preprocessed_demand && paths.domain_complete?"implicit_streaming_exact_scan":options.catalogue_pricing && paths.complete?"exact_catalogue_scan":"exact_resource_labeling") : "all_columns";
     best["cg_max_columns"] = options.cg_max_columns;
     best["pricing_tolerance"] = options.pricing_tolerance;
     best["cg_duality_tolerance"] = options.cg_duality_tolerance;
@@ -4408,7 +4254,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         {"attempts",topology_attempts.size()},{"skipped_integer_subproblems",topology_skipped},
         {"zero_service_certificates",topology_certificates},{"seconds",topology_seconds},
         {"master_added_variables",0},{"validity_scope","binary_designs_all_assignments"}};
-    best["assignment_support_preprocessing"] = assignment_support_cache.metadata;
     best["path_support_preprocessing"] = path_support_cache.metadata;
     best["path_support_cut_records"] = path_support_records;
     best["path_support_attempts"] = path_support_attempts;
@@ -4419,14 +4264,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         {"cuts",fractional_support_cuts},{"attempts",fractional_support_attempts.size()},
         {"seconds",fractional_support_seconds},{"refresh_seconds",fractional_refresh_seconds},
         {"master_added_variables",0},{"validity_scope","optimality_preserving_canonical_assignments"}};
-    best["assignment_support_cut_records"] = assignment_support_records;
-    best["assignment_support_attempts"] = assignment_support_attempts;
-    best["assignment_support_summary"] = {{"enabled",options.assignment_support_cuts},
-        {"cuts",assignment_support_records.size()},{"attempts",assignment_support_attempts.size()},
-        {"skipped_integer_subproblems",assignment_support_skipped},{"certificates",assignment_support_certificates},
-        {"numerical_skips",assignment_support_numerical_skips},{"seconds",assignment_support_seconds},
-        {"preprocessing_seconds",assignment_support_cache.seconds},{"master_added_variables",0},
-        {"validity_scope","binary_designs_single_assignment_trigger"}};
     best["resource_lp_cuts"] = resource_records;
     best["task_savings_metadata"]=task_savings_metadata;
     best["task_resource_cut_records"]=task_resource_records;
@@ -4475,12 +4312,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
     best["airline_resource_summary"]={{"enabled",options.airline_resource_cuts},{"cuts",airline_resource_records.size()},
         {"attempts",airline_resource_attempts.size()},{"skipped_integer_subproblems",airline_resource_skipped},
         {"master_added_variables",0},{"seconds",timing.value("airline_resource_separation",0.0)}};
-    best["branch_joint_preprocessing"] = branch_joint_cache.metadata;
-    best["branch_joint_cut_records"] = branch_joint_records;
-    best["branch_joint_attempts"] = branch_joint_attempts;
-    best["branch_joint_summary"] = branch_joint_summary();
-    best["branch_joint_summary"]["completed_double_groups"] = branch_joint_cache.completed_groups;
-    best["branch_joint_summary"]["double_candidates_checked"] = branch_joint_cache.candidates_checked;
     best["resource_lp_attempts"] = resource_attempts;
     best["resource_lp_metadata"] = resource_relaxation ? resource_relaxation->metadata() : Json{{"enabled", false}};
     best["od_airline_summary"] = {{"enabled",od_strengthened_root},
@@ -4517,9 +4348,7 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         {"pareto_core",options.conditional_demand?"fixed_assignment_face":"global_design_domain"}};
     best["timings"] = timing;
     best["timings"]["topology_separation"] = topology_seconds;
-    best["timings"]["assignment_support_separation"] = assignment_support_seconds;
     best["timings"]["path_support_separation"] = path_support_seconds;
-    best["timings"]["branch_joint_separation"] = branch_joint_seconds;
     best["timings"]["restricted_mip"] = restricted_seconds;
     best["timings"]["neighborhood_cg"] = neighborhood_seconds;
     best["heuristic_budget_used"] = heuristic_seconds;
@@ -4552,17 +4381,6 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         {"pareto_call_seconds",options.pareto_call_seconds},{"local_branching_radius",options.local_branching_radius},
         {"capacity_cut_limit",options.capacity_cut_limit},{"topology_cut_limit",options.topology_cut_limit},
         {"topology_seconds",options.topology_seconds}};
-    best["strengthening_parameters"].update({{"assignment_support_seconds",options.assignment_support_seconds},
-        {"assignment_support_cut_limit",options.assignment_support_cut_limit},
-        {"assignment_support_max_cuts",options.assignment_support_max_cuts},
-        {"assignment_support_floor",options.assignment_support_floor}});
-    best["strengthening_parameters"].update({{"branch_joint_seconds",options.branch_joint_seconds},
-        {"branch_joint_preprocessing_seconds",options.branch_joint_preprocessing_seconds},
-        {"branch_joint_cut_limit",options.branch_joint_cut_limit},{"branch_joint_max_cuts",options.branch_joint_max_cuts},
-        {"branch_joint_floor",options.branch_joint_floor}});
-    best["strengthening_parameters"].update({{"master_initial_gap",options.master_initial_gap},
-        {"master_slice_seconds",options.master_slice_seconds},{"resource_lp_seconds",options.resource_lp_seconds},
-        {"resource_lp_cut_limit",options.resource_lp_cut_limit}});
     best["strengthening_parameters"].update({{"path_support_seconds",options.path_support_seconds},
         {"path_support_preprocessing_seconds",options.path_support_preprocessing_seconds},
         {"path_support_cut_limit",options.path_support_cut_limit},{"path_support_max_cuts",options.path_support_max_cuts}});
@@ -4576,19 +4394,23 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         {"neighborhood_cut_seconds",options.neighborhood_cut_seconds},
         {"neighborhood_cut_budget_fraction",options.neighborhood_cut_budget_fraction}});
     best["algorithm_wall"] = wall_time() - started;
-    double accounted_wall = restricted_seconds + topology_seconds + assignment_support_seconds + branch_joint_seconds + path_support_seconds;
+    double accounted_wall = restricted_seconds + topology_seconds + path_support_seconds;
     for (const char* key : {"master_build", "greedy_initial_columns", "master_optimize", "master_update",
                            "subproblem_wall", "root_master", "capacity_cut_build", "capacity_cut_separation",
                            "resource_lp_build", "resource_lp_separation", "task_resource_build", "task_resource_separation", "airline_resource_build", "airline_resource_separation", "queue_polymatroid_build", "queue_polymatroid_profiles", "queue_polymatroid_separation", "queue_price_search", "target_master_refinement", "incumbent_cleanup", "continuous_root",
-                           "assignment_support_preprocessing", "branch_joint_preprocessing", "path_support_preprocessing", "support_root_master", "queue_fractional_master", "design_face_separation", "design_certificate_store", "cg_primal_feedback", "stabilized_master"})
+                           "path_support_preprocessing", "support_root_master", "queue_fractional_master", "design_face_separation", "design_certificate_store", "cg_primal_feedback", "stabilized_master"})
         accounted_wall += timing.value(key, 0.0);
     best["timings"]["bookkeeping_and_interrupted_work"] =
         std::max(0.0, best["algorithm_wall"].get<double>() - accounted_wall);
     best["accelerations"] = {{"pareto_cuts", options.pareto}, {"reuse_columns", options.reuse_columns},
-                             {"column_generation", options.column_generation}, {"reuse_dual_lp",false},
+                             {"column_generation", options.column_generation}, {"reuse_dual_lp",options.reuse_dual_lp},
                              {"courier_savings_bound", options.courier_savings_bound},
                              {"initial_design", options.initial_design}, {"warm_start", options.warm_start},
                              {"incumbent_cleanup", options.incumbent_cleanup}, {"primal_search", options.primal_search}};
+    best["dual_workspace_summary"]=recourse_state_cache.dual_workspace.metadata();
+    best["dual_workspace_summary"].update({{"enabled",options.reuse_dual_lp},
+        {"legacy_option_name","reuse_dual_lp"},{"production_scope","pareto_auxiliary_dual"},
+        {"socp_basis_reuse",false},{"certificate_reuse",false}});
     best["accelerations"]["primal_design_polish"] = options.primal_polish && options.restricted_mip;
     best["accelerations"].update({{"eliminate_zero_task_columns",options.eliminate_zero_task_columns},
         {"compact_task_heads",options.compact_task_heads},{"cache_pricing_graph",options.cache_pricing_graph},
@@ -4643,12 +4465,10 @@ Json solve_benders(const Input& d, PathCollection& paths, const SolverOptions& o
         {"tight_airline_bounds",options.tight_airline_bounds},{"topology_cuts",options.topology_cuts},
         {"assignment_incident_clique",options.assignment_incident_clique},
         {"shared_rho_joint",options.shared_rho_joint},{"queue_perspective",options.queue_perspective},
-        {"assignment_support_cuts",options.assignment_support_cuts},
         {"path_support_cuts",options.path_support_cuts},
         {"task_savings_bound",options.task_savings_bound},{"task_resource_cuts",options.task_resource_cuts},
         {"airline_connectivity_cuts",options.airline_connectivity_cuts},{"airline_resource_cuts",options.airline_resource_cuts},
         {"task_airline_bounds",options.task_airline_bounds},
-        {"double_support_cuts",options.double_support_cuts},{"joint_base_cost_cuts",options.joint_base_cost_cuts},
         {"root_cuts",options.root_cuts},{"restricted_mip",options.restricted_mip},
         {"local_branching",options.restricted_mip && options.local_branching && !options.primal_alns},
         {"incumbent_cutoff",options.incumbent_cutoff}});

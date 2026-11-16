@@ -22,9 +22,10 @@ struct LabelPricingOptions {
     // sparse vectors. The same complete label domain and exact ordering apply.
     bool fast_pricing = false;
     // Scan the canonical coefficients once when the physical catalogue is
-    // complete. Incomplete catalogues always fall back to exact labels.
+    // complete. Certified implicit fixed-task domains use bounded-memory streaming;
+    // other incomplete catalogues fall back to exact labels.
     bool catalogue_pricing = false;
-    // Catalogue backend only: diversify a bounded 4*max_columns pool while
+    // Catalogue and streaming backends: diversify a bounded 4*max_columns pool while
     // retaining the most negative witness. Certificates do not use the batch.
     bool diverse_pricing = false;
     double branch_deadline = std::numeric_limits<double>::infinity();
@@ -43,7 +44,7 @@ struct LabelPricingResult {
     // their underlying label traversal happened to finish.
     bool discovery_only = false;
     bool fast_pricing_used = false;
-    bool catalogue_pricing_used = false, diverse_pricing_used = false;
+    bool catalogue_pricing_used = false, implicit_streaming_pricing_used = false, diverse_pricing_used = false;
     std::size_t catalogue_paths_scanned = 0, diversity_candidates = 0, diversity_groups = 0;
     std::string diversity_policy = "disabled";
     std::size_t catalogue_path_reuses = 0, physical_path_builds = 0;

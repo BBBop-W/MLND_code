@@ -174,7 +174,12 @@ Json metric_json(const Input& data, const Json& solution, const Metrics& m) {
 }
 
 bool task_rates_available(const Input& data) {
-    return data.single_rates.size()==static_cast<std::size_t>(data.n_od) &&
+    // Arrays can be filled before the final preprocessing deadline check.
+    // Only its atomically published report makes those rates exportable.
+    return data.preprocessed_demand_report.contains("single_rates") &&
+        data.preprocessed_demand_report.contains("pair_rates") &&
+        data.preprocessed_demand_report.contains("head_rates") &&
+        data.single_rates.size()==static_cast<std::size_t>(data.n_od) &&
         data.head_rates.size()==static_cast<std::size_t>(data.n_od) &&
         data.pair_rates.rows==data.n_od && data.pair_rates.cols==data.n_od;
 }
@@ -241,7 +246,10 @@ void json_file(const std::filesystem::path& path, const Json& data, int indent =
     const auto temporary = path.string() + ".tmp";
     std::ofstream stream(temporary);
     if (!stream) throw std::runtime_error("Cannot open output: " + path.string());
-    stream << data.dump(indent) << '\n';
+    // Width zero is compact in operator<<, while dump(0) keeps newlines.
+    if (indent == 0) stream << data.dump(0);
+    else stream << std::setw(indent > 0 ? indent : 0) << data;
+    stream << '\n';
     stream.close();
     if (!stream) throw std::runtime_error("Cannot write output: " + path.string());
     std::filesystem::rename(temporary, path);
@@ -447,11 +455,13 @@ std::vector<double> solution_design(const Input& data, const Json& supplied) {
 
 Json write_complete_catalogue(const std::filesystem::path& file, const Input& data,
                               const PathCollection& paths) {
-    if (!paths.complete || !paths.support_complete)
-        throw std::invalid_argument("Complete catalogue export requires complete paths and support");
+    if ((!paths.complete && !paths.domain_complete) || !paths.support_complete)
+        throw std::invalid_argument("Complete catalogue export requires a certified physical domain and support");
     const Json counts = {{"segments",paths.initial_segments.size()},
-        {"service",paths.service_paths.size()},{"empty",paths.empty_paths.size()}};
+        {"service",paths.complete?paths.service_paths.size():paths.physical_service_count},
+        {"empty",paths.empty_paths.size()}};
     const Json header = {{"schema","mlnd-complete-catalogue/1"},{"complete",true},
+        {"id_scope","canonical_complete_catalogue_independent_of_generated_solution_ids"},
         {"scope",paths.scope},{"model_version",data.model_version},
         {"demand_formulation",data.preprocessed_demand ? "preprocessed" : "legacy"},
         {"max_orders",data.max_orders},{"assignment_scope",data.assignment_scope()},
@@ -474,23 +484,39 @@ Json write_complete_catalogue(const std::filesystem::path& file, const Input& da
         stream << ']';
     };
     write_paths("segments", paths.initial_segments);
-    write_paths("service", paths.service_paths);
+    if(paths.complete) write_paths("service", paths.service_paths);
+    else {
+        stream << ",\"service\":[";
+        std::size_t count=0;
+        visit_service_paths(data,paths,[&](const ServicePath& path) {
+            if(count) stream << ',';
+            Json record=path;record["id"]=count++;
+            stream << record.dump();
+        });
+        if(count!=paths.physical_service_count)
+            throw std::runtime_error("Physical domain changed during complete catalogue export");
+        stream << ']';
+    }
     write_paths("empty", paths.empty_paths);
     stream << "}\n";
     stream.close();
     if (!stream) throw std::runtime_error("Cannot write catalogue output: " + file.string());
     std::filesystem::rename(temporary, file);
     return {{"file",file.filename().string()},{"schema",header.at("schema")},
-        {"complete",true},{"counts",counts},{"sha256",sha256_file(file)}};
+        {"complete",true},{"counts",counts},{"sha256",sha256_file(file)},
+        {"id_scope","canonical_complete_catalogue_independent_of_generated_solution_ids"},
+        {"streamed_physical_domain",!paths.complete}};
 }
 
 void write_result(const std::filesystem::path& directory, const Input& data,
                   const PathCollection& paths, const Json& result) {
     std::filesystem::create_directories(directory);
-    Json overview = Json::object();
-    for (auto it = result.begin(); it != result.end(); ++it)
-        if (it.key().empty() || it.key().front() != '_') overview[it.key()] = it.value();
-    json_file(directory / "result.json", overview);
+    {
+        Json overview = Json::object();
+        for (auto it = result.begin(); it != result.end(); ++it)
+            if (it.key().empty() || it.key().front() != '_') overview[it.key()] = it.value();
+        json_file(directory / "result.json", overview);
+    }
     if (!result.contains("_solution") || result.at("_solution").is_null()) return;
     const Json& solution = result.at("_solution");
     json_file(directory / "solution.json", solution);

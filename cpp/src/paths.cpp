@@ -1,4 +1,5 @@
 #include "mlnd/paths.hpp"
+#include "mlnd/progress.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -213,6 +214,110 @@ PathCollection prepare_path_support(const Input& data,
     paths.support_complete=true;
     if (progress) progress(0,0,paths.initial_segments.size());
     return paths;
+}
+
+std::size_t visit_empty_paths(const Input& data, const PathCollection& support,
+        const std::function<void(const EmptyPath&)>& visitor, double deadline) {
+    if(data.route_mode!="direct" || data.has_candidate_routes || !support.support_complete ||
+       !visitor || std::isnan(deadline))
+        throw std::invalid_argument("Empty scan requires complete direct support, visitor and valid deadline");
+    std::size_t count=0;
+    auto guard=[&](bool force=false) {
+        const double now=std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if(now>=deadline)throw EnumerationStopped("time_limit",count,support.initial_segments.size());
+        model_construction_guard("physical_empty_path_scan",0,0,0,force);
+    };
+    guard(true);
+    if(support.complete) {
+        for(const auto& path:support.empty_paths) { guard();visitor(path);++count; }
+        guard(true);return count;
+    }
+    for(int origin=0;origin<data.n_l;++origin)for(int destination=0;destination<data.n_l;++destination) {
+        guard();
+        if(origin==destination || !data.allowed_links(origin,destination))continue;
+        const double flight=data.flight_times(origin,destination);
+        if(flight>data.operating_limit+tolerance)continue;
+        EmptyPath path;
+        path.b={origin,destination};path.legs={direct_leg(origin,destination)};
+        path.arc_counts=count_arcs(path.legs);
+        path.flight_time=path.time=flight;path.cost=data.flight_cost*flight;
+        visitor(path);++count;
+    }
+    guard(true);
+    return count;
+}
+
+std::size_t register_empty_support_paths(const Input& data, PathCollection& paths,
+        double deadline) {
+    const auto before=paths.empty_paths.size();
+    visit_empty_paths(data,paths,[&](const EmptyPath& path) {
+        register_empty_path(paths,path);
+    },deadline);
+    return paths.empty_paths.size()-before;
+}
+
+std::size_t visit_service_paths(const Input& data, const PathCollection& support,
+        const std::function<void(const ServicePath&)>& visitor, double deadline) {
+    if (data.route_mode!="direct" || data.has_candidate_routes || !support.support_complete)
+        throw std::invalid_argument("Physical scan requires complete direct initial-segment support");
+    if (!visitor || std::isnan(deadline))
+        throw std::invalid_argument("Physical scan requires a visitor and a valid deadline");
+    std::size_t checked=0, count=0;
+    auto guard=[&](bool force=false) {
+        if (!force && ++checked%256!=0) return;
+        const double now=std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if(now>=deadline)throw EnumerationStopped("time_limit",count,support.initial_segments.size());
+        model_construction_guard("physical_path_scan",0,0,0,force);
+    };
+    guard(true);
+    if(support.complete) {
+        for(const auto& path:support.service_paths) { guard();visitor(path);++count; }
+        guard(true);return count;
+    }
+    // Only one candidate is materialized. No continuation or full-path cache
+    // scales with the number of completed paths. The scalar builders are the
+    // same authoritative feasibility/resource routines used by enumeration.
+    for(const auto& segment:support.initial_segments) {
+        guard();
+        ServicePath path;
+        if(service_path(data,segment,nullptr,path)) { visitor(path);++count; }
+        if(data.effective_delta()==0)continue;
+        const int r=segment.first_od, j=segment.delivery, return_base=segment.b[1];
+        const int start=data.n_l+j;
+        const double initial=segment.t0+segment.t1+
+            first_wait(data.rider_mean(r,segment.pickup),segment.t0);
+        for(int second=0;second<data.n_od;++second) {
+            guard();
+            if(data.kappa(r,second)<=0)continue;
+            for(int pickup=0;pickup<data.n_h;++pickup) {
+                guard();
+                const int pickup_node=data.n_l+pickup;
+                if(pickup!=j && !data.allowed_links(start,pickup_node))continue;
+                const double transfer=data.flight_times(start,pickup_node);
+                const double wait=second_wait(data.rider_mean(second,pickup),transfer,data.effective_delta());
+                for(int delivery=0;delivery<data.n_h;++delivery) {
+                    guard();
+                    const int delivery_node=data.n_l+delivery;
+                    if(pickup==delivery || !data.allowed_links(pickup_node,delivery_node) ||
+                       !data.allowed_links(delivery_node,return_base))continue;
+                    const double loaded=data.flight_times(pickup_node,delivery_node);
+                    const double back=data.flight_times(delivery_node,return_base);
+                    const double q2=transfer+data.effective_delta()/2+wait;
+                    if(q2+loaded+data.delivery_receipt(second,delivery)>data.deadline[second]+tolerance)continue;
+                    const double approximate=initial+transfer+loaded+back+wait;
+                    const double slack=tolerance+64*std::numeric_limits<double>::epsilon()*
+                        std::max(1.0,std::abs(data.operating_limit));
+                    if(approximate>data.operating_limit+slack)continue;
+                    const Continuation c{second,pickup,delivery,transfer,loaded,back,wait};
+                    if(service_path(data,segment,&c,path)) { visitor(path);++count; }
+                }
+            }
+        }
+    }
+    guard(true);
+    return count;
 }
 
 std::pair<std::size_t,std::size_t> greedy_seed_paths(const Input& d,PathCollection& paths,
@@ -545,6 +650,8 @@ PathCollection enumerate_paths(const Input& data,
         }
     }
     rebuild_path_registry(result,check);
+    result.domain_complete=true;
+    result.physical_service_count=result.service_paths.size();
     if (progress) progress(result.service_paths.size(),result.empty_paths.size(),result.initial_segments.size());
     return result;
 }
@@ -569,6 +676,7 @@ void to_json(Json& out, const EmptyPath& p) {
 void to_json(Json& out, const PathCollection& paths) {
     out = {{"initial_segments", paths.initial_segments}, {"service_paths", paths.service_paths},
            {"empty_paths", paths.empty_paths}, {"complete", paths.complete},
-           {"support_complete",paths.support_complete}, {"scope", paths.scope}};
+           {"support_complete",paths.support_complete}, {"domain_complete",paths.domain_complete},
+           {"physical_service_count",paths.physical_service_count}, {"scope", paths.scope}};
 }
 } // namespace mlnd
