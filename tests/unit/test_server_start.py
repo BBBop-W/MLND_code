@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -28,6 +29,57 @@ def write_json(path, value):
 
 def git(root, *args):
     return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("entry,environment,lock_name,fresh_cplex", [
+    ("START_SERVER.sh", "server_environment", ".mlnd-capacity-run.lock", False),
+    ("START_CPLEX.sh", "server_cplex_environment", ".mlnd-capacity-cplex-run.lock", False),
+    ("START_CPLEX.sh", "server_cplex_environment", ".mlnd-capacity-cplex-run.lock", True),
+])
+def test_shell_entries_use_separate_environments_and_locks(
+        tmp_path, monkeypatch, entry, environment, lock_name, fresh_cplex):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for name in ("START_SERVER.sh", "START_CPLEX.sh"):
+        shutil.copy2(SCRIPTS.parent / name, repo / name)
+    write(repo / "requirements.txt", "numpy\n")
+    write(repo / "requirements-server.txt", "scipy\n")
+    fake_bin = tmp_path / "bin"
+    fake_conda = tmp_path / "conda"
+
+    def executable(path, content):
+        write(path, content).chmod(0o755)
+
+    executable(fake_bin / "uname", "#!/bin/sh\nprintf 'Linux\\n'\n")
+    executable(fake_bin / "flock", "#!/bin/sh\nexit 0\n")
+    executable(fake_bin / "sha256sum", "#!/bin/sh\ncat >/dev/null\nprintf 'fixture-hash  -\\n'\n")
+    executable(fake_bin / "conda", f"#!{sys.executable}\nimport shutil,sys\n"
+               f"if sys.argv[1:]==['info','--base']: print({str(fake_conda)!r})\n"
+               "else:\n"
+               "    source=sys.argv[sys.argv.index('--clone')+1]\n"
+               "    target=sys.argv[sys.argv.index('-p')+1]\n"
+               "    shutil.copytree(source,target)\n")
+    write(fake_conda / "etc/profile.d/conda.sh", 'conda() { export CONDA_PREFIX="$2"; }\n')
+    for name in ("server_environment", "server_cplex_environment"):
+        if fresh_cplex and name == "server_cplex_environment":
+            continue
+        env = repo / "outputs" / name
+        executable(env / "bin/python", f"#!{sys.executable}\nimport json,os,sys\n"
+                   "print(json.dumps({'entry': sys.argv[0], 'args': sys.argv[1:], "
+                   "'prefix': os.environ['CONDA_PREFIX']}))\n")
+        write(env / ".mlnd-requirements.sha256", "fixture-hash\n")
+        write(env / "package-versions", "frozen algorithm package versions\n")
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("CONDA_EXE", str(fake_bin / "conda"))
+    monkeypatch.delenv("MLND_LOCK_FILE", raising=False)
+    result = subprocess.run(["bash", str(repo / entry)], capture_output=True, text=True, check=True)
+    launched = json.loads(result.stdout)
+    assert launched["entry"] == str(repo / "outputs" / environment / "bin/python")
+    assert launched["prefix"] == str(repo / "outputs" / environment)
+    assert (repo / "outputs" / environment / "package-versions").read_text() == "frozen algorithm package versions\n"
+    assert (repo.parent / lock_name).is_file()
+    if entry == "START_CPLEX.sh":
+        assert launched["args"][-2:] == ["--method", "full_path"]
 
 
 @pytest.fixture
@@ -119,7 +171,8 @@ def test_input_snapshot_rejects_manifest_escape(tmp_path):
         start.freeze_suite(suite, tmp_path / "copy")
 
 
-def test_background_batch_keeps_global_flock_after_launcher_closes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("method", [None, "full_path"])
+def test_background_batch_keeps_global_flock_after_launcher_closes(tmp_path, monkeypatch, method):
     run = tmp_path / "run-test"
     write(run / "source/scripts/server_suite.py", "import time\ntime.sleep(30)\n")
     binary = write(run / "build/mlnd", "fake binary")
@@ -144,8 +197,16 @@ def test_background_batch_keeps_global_flock_after_launcher_closes(tmp_path, mon
         "except BlockingIOError: sys.exit(75)\n"
     ), str(lock_path)]
     try:
+        config = {"stage": "all", "max_parallel": 8}
+        if method:
+            config["method"] = method
         assert start.launch(run, lock, Namespace(retry_failed=False, foreground=False),
-                            {"stage": "all", "max_parallel": 8}) == 0
+                            config) == 0
+        command = json.loads((run / "launcher.json").read_text())["command"]
+        if method:
+            assert command[command.index("--method") + 1] == method
+        else:
+            assert "--method" not in command  # Old frozen suites have no such option.
         lock.close()
         check = actual_popen(probe)
         assert check.wait(timeout=5) == 75
@@ -188,7 +249,39 @@ def test_resume_restores_original_cplex_runtime_path(tmp_path, monkeypatch):
     assert launched == [True]
 
 
-def test_new_batch_builds_then_launches_eight_without_acceptance(clean_repository, tmp_path, monkeypatch):
+@pytest.mark.parametrize("saved,requested", [(None, "full_path"), ("full_path", "algorithm")])
+def test_resume_rejects_other_method_before_launch(tmp_path, monkeypatch, saved, requested):
+    runs = tmp_path / "runs"
+    write(runs / "CURRENT", "run-existing\n")
+    config = {"stage": "all", "max_parallel": 8, "cplex_root": str(tmp_path / "cplex"),
+              "runtime_environment": start.runtime_environment()}
+    if saved:
+        config["method"] = saved
+    write_json(runs / "run-existing/prepared.json", config)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "argv", ["server_start.py", "--resume", "--runs-root", str(runs),
+                                     "--method", requested])
+    monkeypatch.setenv("MLND_LOCK_FILE", str(tmp_path / "global.lock"))
+    monkeypatch.delenv("MLND_LAUNCH_LOCK_FD", raising=False)
+    launched = []
+    monkeypatch.setattr(start, "launch", lambda *args: launched.append(True) or 0)
+    assert start.main() == 2
+    assert not launched
+
+
+def test_launcher_rejects_abbreviated_method_before_selecting_a_profile(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["server_start.py", "--meth", "full_path", "--status"])
+    with pytest.raises(SystemExit) as exit_info:
+        start.main()
+    assert exit_info.value.code == 2
+
+
+@pytest.mark.parametrize("method,runs_name,other_lock", [
+    ("algorithm", "server_runs", ".mlnd-capacity-cplex-run.lock"),
+    ("full_path", "server_cplex_runs", ".mlnd-capacity-run.lock"),
+])
+def test_new_batch_builds_then_launches_eight_without_acceptance(
+        clean_repository, tmp_path, monkeypatch, method, runs_name, other_lock):
     root = clean_repository
     suite = tmp_path / "suite"
     model = write_json(suite / "instances/example/model.json", {"version": "input"})
@@ -199,8 +292,8 @@ def test_new_batch_builds_then_launches_eight_without_acceptance(clean_repositor
     monkeypatch.setattr(start, "ROOT", root)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(sys, "argv", ["server_start.py", "--suite-root", str(suite),
-                                     "--runs-root", str(tmp_path / "runs")])
-    monkeypatch.setenv("MLND_LOCK_FILE", str(tmp_path / "global.lock"))
+                                     "--method", method])
+    monkeypatch.delenv("MLND_LOCK_FILE", raising=False)
     monkeypatch.delenv("MLND_LAUNCH_LOCK_FD", raising=False)
     commands = []
 
@@ -213,6 +306,8 @@ def test_new_batch_builds_then_launches_eight_without_acceptance(clean_repositor
         pytest.fail("Startup invoked an acceptance process before the experiment batch")
 
     def launch(run, lock, args, config):
+        assert run.parent == root / "outputs" / runs_name
+        assert config["method"] == method
         assert config["max_parallel"] == 8
         assert config["stage"] == "all"
         assert len(commands) == 1
@@ -229,4 +324,6 @@ def test_new_batch_builds_then_launches_eight_without_acceptance(clean_repositor
 
     monkeypatch.setattr(start, "snapshot", snapshot_then_mock)
     monkeypatch.setattr(start, "launch", launch)
-    assert start.main() == 0
+    with (root.parent / other_lock).open("a+") as running_other_batch:
+        fcntl.flock(running_other_batch.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert start.main() == 0

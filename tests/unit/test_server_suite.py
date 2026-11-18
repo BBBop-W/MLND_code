@@ -97,6 +97,86 @@ def test_real_protocol_defaults_and_new_map_budget(prepared):
     assert command[command.index("--maps-root") + 1] == str(root / "maps")
 
 
+def test_full_path_uses_identical_matrix_budget_and_command(prepared):
+    root, _, args = prepared
+    _, algorithm, original_resources = suite.load_suite(root, args)
+    args.method = "full_path"
+    _, full_path, resources = suite.load_suite(root, args)
+    assert resources == original_resources
+    assert all(job["method"] == "algorithm" for job in algorithm)
+    assert full_path == [{**job, "method": "full_path"} for job in algorithm]
+    command = suite.make_command(
+        full_path[0],
+        Path("/binary"),
+        Path("/build.json"),
+        Path("/attempt"),
+        Path("/python"),
+    )
+    assert command[command.index("--method") + 1] == "full_path"
+
+
+def test_method_cli_and_dry_run_report(prepared, capsys):
+    root, _, _ = prepared
+    assert suite.parser().parse_args(["--suite-root", str(root)]).method == "algorithm"
+    assert (
+        suite.main(["--suite-root", str(root), "--method", "full_path", "--dry-run"])
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["method"] == "full_path"
+    assert report["jobs"] == report["selected_jobs"] == 3
+    assert report["resources"]["max_parallel"] == 8
+    assert report["actual_solver_started"] is False
+
+
+def test_identity_keeps_algorithm_contract_and_separates_methods(prepared, monkeypatch):
+    root, _, args = prepared
+    source = root / "source"
+    put(source / "SOURCE_VERSION.json", {"files": {}})
+    monkeypatch.setattr(suite, "ROOT", source)
+    args.binary.write_text("synthetic binary")
+    put(
+        args.build_manifest,
+        {
+            "schema_version": 1,
+            "binary_sha256": suite.digest(args.binary),
+            "source_sha256": {},
+            "source_version_sha256": suite.digest(source / "SOURCE_VERSION.json"),
+        },
+    )
+    path, algorithm, resources = suite.load_suite(root, args)
+    identity = suite.run_identity(
+        path, args.binary, args.build_manifest, algorithm, resources
+    )
+    # The existing algorithm identity and signature remain byte-for-byte stable
+    # for identical frozen source, matrix, binary and resource fingerprints.
+    legacy_identity = {
+        "schema": "mlnd-server-suite-run/2",
+        "suite_sha256": suite.digest(path),
+        "binary_sha256": suite.digest(args.binary),
+        "build_manifest_sha256": suite.digest(args.build_manifest),
+        "source_sha256": suite.source_fingerprints(source),
+        "jobs_sha256": suite.content_hash(algorithm),
+        "resources": resources,
+        "method": "algorithm",
+        "legacy_bundle_use": "input files and matrix only",
+    }
+    assert identity == legacy_identity
+    assert suite.job_signature(algorithm[0], identity) == suite.content_hash(
+        {"job": algorithm[0], "identity": legacy_identity}
+    )
+    args.method = "full_path"
+    _, full_path, _ = suite.load_suite(root, args)
+    direct_identity = suite.run_identity(
+        path, args.binary, args.build_manifest, full_path, resources
+    )
+    assert direct_identity["method"] == "full_path"
+    assert direct_identity["jobs_sha256"] != identity["jobs_sha256"]
+    assert suite.job_signature(full_path[0], direct_identity) != suite.job_signature(
+        algorithm[0], identity
+    )
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -158,6 +238,9 @@ def successful_native(attempt, *, qualified=True):
         native / "task_status.json",
         {
             "status": "completed",
+            "native_method": "full_path"
+            if own["job"]["method"] == "full_path"
+            else "benders_cg",
             "state": "qualified_baseline" if qualified else "validated_not_qualified",
             "qualified_baseline": qualified,
             "validation_passed": True,
@@ -229,6 +312,24 @@ def test_resume_cannot_promote_abnormal_validated_or_nonqualified_result(prepare
     assert not row["qualified_baseline"]
 
 
+@pytest.mark.parametrize("reported_method", ["benders_cg", None])
+def test_full_path_attempt_requires_matching_native_method(prepared, reported_method):
+    root, _, args = prepared
+    args.method = "full_path"
+    _, jobs, _ = suite.load_suite(root, args)
+    identity = {"binary_sha256": "binary", "build_manifest_sha256": "manifest"}
+    attempt = saved_attempt(root, jobs[0], identity)
+    signature = suite.job_signature(jobs[0], identity)
+    assert suite.completed_attempt(attempt, signature)
+    status = suite.read(attempt / "native/task_status.json")
+    status["native_method"] = reported_method
+    put(attempt / "native/task_status.json", status)
+    own = suite.read(attempt / "attempt.json")
+    own["artifact_sha256"] = suite.attempt_hashes(attempt)
+    put(attempt / "attempt.json", own)
+    assert not suite.completed_attempt(attempt, signature)
+
+
 def test_output_lock_excludes_second_controller(tmp_path):
     with suite.OutputLock(tmp_path):
         with pytest.raises(RuntimeError, match="lock"):
@@ -253,7 +354,15 @@ def fake_scheduler(monkeypatch, qualified=True, fail_core=False, fail_jobs=()):
     identity = {"binary_sha256": "binary", "build_manifest_sha256": "manifest"}
     launches = []
     monkeypatch.setattr(suite, "require_linux", lambda: None)
-    monkeypatch.setattr(suite, "run_identity", lambda *a: identity)
+    monkeypatch.setattr(
+        suite,
+        "run_identity",
+        lambda *a: {
+            **identity,
+            "method": a[3][0]["method"],
+            "jobs_sha256": suite.content_hash(a[3]),
+        },
+    )
     monkeypatch.setattr(
         suite.psutil,
         "virtual_memory",
@@ -325,6 +434,33 @@ def test_complete_then_resume_has_no_duplicate_launch_or_status_collision(
     assert suite.execute(args, path, jobs, resources) == 0
     assert launches == ["p1", "p2", "c1"]
     assert len(suite.read(args.output / "summary.json")["attempts"]) == 3
+
+
+@pytest.mark.parametrize("method", ["algorithm", "full_path"])
+def test_method_recorded_and_cross_method_resume_rejected(
+    prepared, monkeypatch, method
+):
+    root, _, args = prepared
+    args.method = method
+    launches = fake_scheduler(monkeypatch)
+    path, jobs, resources = suite.load_suite(root, args)
+    assert suite.execute(args, path, jobs, resources) == 0
+    assert launches == ["p1", "p2", "c1"]
+    assert suite.read(args.output / "suite_status.json")["method"] == method
+    summary = suite.read(args.output / "summary.json")
+    assert summary["method"] == method
+    assert {row["method"] for row in summary["attempts"]} == {method}
+    original_identity = suite.read(args.output / "run_identity.json")
+    assert original_identity["method"] == method
+    args.resume = True
+    assert suite.execute(args, path, jobs, resources) == 0
+    assert launches == ["p1", "p2", "c1"]
+    args.method = "full_path" if method == "algorithm" else "algorithm"
+    path, jobs, resources = suite.load_suite(root, args)
+    with pytest.raises(ValueError, match="[Mm]ethod"):
+        suite.execute(args, path, jobs, resources)
+    assert launches == ["p1", "p2", "c1"]
+    assert suite.read(args.output / "run_identity.json") == original_identity
 
 
 def test_failed_tasks_need_explicit_retry_and_keep_previous_attempt(

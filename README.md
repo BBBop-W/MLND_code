@@ -16,6 +16,17 @@ bash START_SERVER.sh
 
 查看状态用 `bash START_SERVER.sh --status`；恢复同批次用 `bash START_SERVER.sh --resume`。结果、日志、源码快照、构建指纹均在被忽略的 `outputs/server_runs/` 下。后续 `git pull` 不替换在跑批次的源码或程序。
 
+完整模型 CPLEX 对照使用同一输入包和 156 项矩阵：
+
+```bash
+bash START_CPLEX.sh
+# 查看或恢复 CPLEX 批次：
+bash START_CPLEX.sh --status
+bash START_CPLEX.sh --resume
+```
+
+CPLEX 入口使用 `full_path` 完整枚举路径并整体求解 MISOCP，目标 gap 1%，每任务 7200 秒、1 线程、seed 43，并行上限 8。两套入口可同时运行：算法结果在 `outputs/server_runs/`，CPLEX 结果在 `outputs/server_cplex_runs/`；锁、环境和恢复进度各自独立。两套合计最多 16 项任务，各自沿用 24 GiB 预算与机器 8 GiB 可用内存下限。CPLEX 使用全部路径，不使用算法的 ALNS 或算法启动解；求解后执行相同的独立物理校验与绘图。
+
 以下为迁移前历史说明；当前运行以顶部版本说明和服务器运行说明为准。
 
 # MLND consecutive delivery network

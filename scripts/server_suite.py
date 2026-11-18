@@ -38,6 +38,7 @@ from job_control import (  # noqa: E402
 from linux_process import require_linux  # noqa: E402
 
 STAGES = ("core", "stress")
+METHODS = ("algorithm", "full_path")
 SCHEMA = "mlnd-server-capacity-suite/1"
 
 
@@ -184,6 +185,9 @@ def host_environment():
 
 
 def load_suite(suite_root, args):
+    method = getattr(args, "method", "algorithm")
+    if method not in METHODS:
+        raise ValueError(f"Unsupported suite method: {method}")
     root = Path(suite_root).resolve()
     if not (root / "suite.json").is_file() and (root / "suite/suite.json").is_file():
         root = root / "suite"
@@ -334,7 +338,7 @@ def load_suite(suite_root, args):
                 "input_sha256": inputs[relative],
                 "memory_bytes": int(memory * GIB),
                 "exclusive": memory == 24,
-                "method": "algorithm",
+                "method": method,
                 "dimensions": {name: values[name] for name in ("n_l", "n_h", "n_od")},
             }
         )
@@ -370,6 +374,9 @@ def source_fingerprints(root):
 
 
 def run_identity(suite, binary, build_manifest, jobs, resources):
+    methods = {job["method"] for job in jobs}
+    if len(methods) != 1 or not methods.issubset(METHODS):
+        raise ValueError("A suite run must use exactly one supported method")
     manifest = read(build_manifest)
     sources = source_fingerprints(ROOT)
     version = read(ROOT / "SOURCE_VERSION.json")
@@ -391,7 +398,7 @@ def run_identity(suite, binary, build_manifest, jobs, resources):
         "source_sha256": sources,
         "jobs_sha256": content_hash(jobs),
         "resources": resources,
-        "method": "algorithm",
+        "method": next(iter(methods)),
         "legacy_bundle_use": "input files and matrix only",
     }
 
@@ -429,6 +436,10 @@ def completed_attempt(attempt, signature, *, qualified=False):
             status.get("input_sha256") != own["job"]["input_sha256"]
             or status.get("binary_sha256") != own.get("binary_sha256")
             or status.get("build_manifest_sha256") != own.get("build_manifest_sha256")
+            or status.get("native_method")
+            != {"algorithm": "benders_cg", "full_path": "full_path"}.get(
+                own["job"]["method"], "unsupported"
+            )
         ):
             return False
         certificate = read(attempt / "native/native_validation.json")
@@ -494,7 +505,7 @@ def make_command(job, binary, build_manifest, attempt, python, maps_root=None):
         "--k",
         str(job["k"]),
         "--method",
-        "algorithm",
+        job["method"],
         "--seconds",
         str(job["seconds"]),
         "--gap",
@@ -521,6 +532,8 @@ def write_summary(output):
         own, status = read(path), native_record(path.parent)
         row = {
             "job_id": own["job"]["id"],
+            "method": own["job"]["method"],
+            "native_method": status.get("native_method"),
             "stage": own["job"]["stage"],
             "source_stage": own["job"].get("source_stage", own["job"]["stage"]),
             "k": own["job"]["k"],
@@ -562,10 +575,16 @@ def write_summary(output):
                 else "unvalidated_failed"
             )
         rows.append(row)
+    identity_path = output / "run_identity.json"
+    methods = {row["method"] for row in rows}
+    method = next(iter(methods)) if len(methods) == 1 else "mixed" if methods else None
+    if identity_path.is_file():
+        method = read(identity_path)["method"]
     atomic_json(
         output / "summary.json",
         {
             "updated_utc": utc(),
+            "method": method,
             "attempts": rows,
             "bound_note": "Native reported global bounds retain their provenance; primal validation is not independent bound certification.",
             "memory_note": "RLIMIT_AS hard per process; group RSS sampled only; swap not disabled.",
@@ -608,7 +627,12 @@ def execute(args, suite, jobs, resources):
     with OutputLock(output):
         identity_path = output / "run_identity.json"
         if identity_path.exists():
-            if not args.resume or read(identity_path) != identity:
+            previous_identity = read(identity_path)
+            if previous_identity.get("method") != identity["method"]:
+                raise ValueError(
+                    "Method changed; use a new output for the other method"
+                )
+            if not args.resume or previous_identity != identity:
                 raise ValueError(
                     "Source/binary/inputs/matrix/resource policy changed; use a new output"
                 )
@@ -763,6 +787,7 @@ def execute(args, suite, jobs, resources):
                         attempt.mkdir()
                         own = {
                             "schema": "mlnd-server-attempt/2",
+                            "method": job["method"],
                             "job": job,
                             "signature": job_signature(job, identity),
                             "binary_sha256": identity["binary_sha256"],
@@ -829,6 +854,7 @@ def execute(args, suite, jobs, resources):
                     output / "suite_status.json",
                     {
                         "updated_utc": utc(),
+                        "method": identity["method"],
                         "status": "draining" if stop_reason else "running",
                         "dispatch_stop_reason": stop_reason,
                         "active": [i["job"]["id"] for i in active],
@@ -868,6 +894,7 @@ def execute(args, suite, jobs, resources):
                 output / "suite_status.json",
                 {
                     "updated_utc": utc(),
+                    "method": identity["method"],
                     "status": "interrupted",
                     "error": str(error),
                     "cleanup_errors": cleanup_errors,
@@ -888,6 +915,7 @@ def execute(args, suite, jobs, resources):
             output / "suite_status.json",
             {
                 "updated_utc": utc(),
+                "method": identity["method"],
                 "status": "stopped"
                 if stop_reason
                 else "completed_with_failures"
@@ -910,6 +938,7 @@ def parser():
     result.add_argument("--build-manifest", type=Path)
     result.add_argument("--output", "--out", type=Path)
     result.add_argument("--python", type=Path)
+    result.add_argument("--method", choices=METHODS, default="algorithm")
     result.add_argument("--stage", choices=(*STAGES, "all"), default="all")
     result.add_argument("--job", action="append")
     result.add_argument("--resume", action="store_true")
@@ -940,7 +969,7 @@ def main(argv=None):
                             s: sum(j["stage"] == s for j in jobs) for s in STAGES
                         },
                         "resources": resources,
-                        "method": "algorithm",
+                        "method": args.method,
                         "suite": str(suite),
                     },
                     indent=2,

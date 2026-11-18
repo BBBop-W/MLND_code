@@ -110,6 +110,70 @@ def test_completion_does_not_conflate_primal_validation_and_gap(updates, state, 
     assert record["global_lower_bound_independently_certified"] is False
 
 
+def test_cplex_internal_memory_abort_preserves_feasible_result_without_completion(tmp_path):
+    args = runner.parser().parse_args([
+        "--input", str(tmp_path / "input"), "--output", str(tmp_path), "--k", "2",
+        "--method", "full_path",
+    ])
+    native = dict(objective=100., bound=99.5, gap=.005, termination_reason="MemLimFeas",
+                  solver_status="MemLimFeas", solver_status_code=111, has_solver_solution=True,
+                  bound_scope="global", optimization_completed=True, has_feasible_solution=True,
+                  assignment_scope="task", delivery_time_scope="courier_home",
+                  demand_formulation="preprocessed", max_orders=2, requested_method="full_path",
+                  threads=1, seed=43, requested_gap=.01, budget=7200.)
+    write_json(tmp_path / "result.json", native)
+    record = completed_record(native_method="full_path", binary_sha256="binary",
+                              input_sha256={"manifest.json": "input"})
+    assert runner.capture_result(record, tmp_path, args)
+    result = runner.classify(record)
+    assert (result["status"], result["state"], result["qualified_baseline"]) == (
+        "failed", "validated_abnormal_termination", False)
+    assert result["solver_status"] == "MemLimFeas"
+    assert result["solver_status_code"] == 111
+    assert result["has_solver_solution"] is True
+    assert result["objective"] == 100. and result["validation_passed"] is True
+
+
+@pytest.mark.parametrize("status,reason,gap,expected", [
+    ("Optimal", "gap_limit", .005, "qualified_baseline"),
+    ("OptimalTol", "gap_limit", .005, "qualified_baseline"),
+    ("AbortTimeLim", "AbortTimeLim", .05, "validated_not_qualified"),
+    ("AbortDetTimeLim", "AbortDetTimeLim", .05, "validated_not_qualified"),
+    ("time_limit", "time_limit", .05, "validated_not_qualified"),
+    ("OptimalTol", "optimal_with_repaired_incumbent", .05, "validated_not_qualified"),
+])
+def test_full_path_expected_solver_stops_remain_completed(status, reason, gap, expected):
+    record = runner.classify(completed_record(native_method="full_path", solver_status=status,
+        termination_reason=reason, gap=gap, bound=100. * (1 - gap)))
+    assert (record["status"], record["state"]) == ("completed", expected)
+    assert record["native_termination_error"] is None
+
+
+@pytest.mark.parametrize("status", ["MemLimFeas", "MemLimInfeas", "FailFeas", "FailInfeas",
+                                   "NumBest", "OptimalInfeas", "AbortUser", "Unknown", None])
+def test_full_path_abnormal_or_unknown_stops_cannot_qualify(status):
+    record = runner.classify(completed_record(native_method="full_path", solver_status=status,
+                                              termination_reason="gap_limit"))
+    assert record["status"] == "failed"
+    assert record["state"] == "validated_abnormal_termination"
+    assert record["qualified_baseline"] is False
+    assert record["native_termination_error"]
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("gap_limit", "completed"), ("time_limit", "completed"),
+    ("iteration_limit", "completed"), ("certificate_tolerance_limit", "completed"),
+    ("master_AbortTimeLim", "completed"), ("master_MemLimFeas", "failed"),
+    ("master_FailFeas", "failed"), ("master_NumBest", "failed"),
+    ("numerical_bound_inconsistency", "failed"), ("solver_exception", "failed"),
+    ("master_candidate_validation_failed", "failed"),
+])
+def test_algorithm_expected_stops_preserved_and_explicit_failures_rejected(reason, expected):
+    record = runner.classify(completed_record(native_method="benders_cg", termination_reason=reason))
+    assert record["status"] == expected
+    assert record["qualified_baseline"] is (expected == "completed")
+
+
 def test_external_timeout_reaps_its_owned_child(tmp_path):
     command = [sys.executable, "-c", "import os,time; print(os.getpid(), flush=True); time.sleep(60)"]
     result = runner.invoke(command, tmp_path, "solver", .5)

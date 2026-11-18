@@ -41,10 +41,63 @@ server path. It uses the 78 input directories, the 156-job matrix, and the offli
 map backgrounds. It never executes the old bundle's solver or scripts. Input data,
 maps, native binaries, environments and results stay outside Git.
 
+## Independent complete-model CPLEX comparison
+
+Use the same checkout and extracted input suite:
+
+```bash
+bash START_CPLEX.sh
+bash START_CPLEX.sh --status
+bash START_CPLEX.sh --resume
+# Explicitly retry failed/interrupted CPLEX attempts:
+bash START_CPLEX.sh --resume --retry-failed
+```
+
+This runs the same 78 inputs and 156 K1/K2 tasks through `--method full_path`.
+The native solver enumerates the complete physical path catalogue and solves the
+entire MISOCP with CPLEX. It imposes no path-column limit and supplies no algorithm
+warm start or ALNS search. Physical inputs, task preprocessing, the four common
+model strengthenings, seed 43, one thread, 7200-second native budget, 1% gap target,
+validation, maps, and per-task memory classes match the algorithm batch. The native
+budget includes input reading, path construction, preprocessing, model construction,
+and optimization. Complete-model solving does not guarantee finishing within that
+budget; the result retains its bound, gap and termination status.
+
+| Item | Algorithm | Complete CPLEX |
+|---|---|---|
+| Entry | `START_SERVER.sh` | `START_CPLEX.sh` |
+| Method | `benders_cg` | `full_path` |
+| Run directory | `outputs/server_runs/` | `outputs/server_cplex_runs/` |
+| Environment | `outputs/server_environment/` | `outputs/server_cplex_environment/` |
+| Default batch lock in checkout parent | `.mlnd-capacity-run.lock` | `.mlnd-capacity-cplex-run.lock` |
+| Concurrent jobs per batch | 8 | 8 |
+
+The two batches can run at the same time. Each retains the existing 24 GiB
+reservation budget and 8 GiB host available-memory floor; there is no shared
+24 GiB reservation pool between the two dispatchers. Together they may admit up
+to 16 jobs, subject to memory admission and pressure controls. A 24 GiB job is
+exclusive within its own batch. Both workloads share the server's CPU and memory.
+
+The CPLEX launcher creates its own environment. If the algorithm environment is
+already installed with the same requirements fingerprint, it clones those package
+versions into the new prefix. Otherwise it installs the same dependency requirements.
+Later environment setup for one method does not update the other method's prefix.
+The installed CPLEX SDK is shared read-only. Both entries also accept `--suite-root`,
+`--cplex-root`, `--stage` and `--max-parallel` as before; direct use of
+`START_SERVER.sh --method full_path` selects the same CPLEX profile.
+
+Each method has its own `CURRENT` marker, source/input snapshot, build, logs,
+summary and retry history. Method is part of the run identity; resuming an
+algorithm directory through the CPLEX entry (or conversely) is rejected. Existing
+algorithm batches retain their original frozen scripts and configuration after
+`git pull`. Do not give both methods the same custom `--runs-root` or
+`MLND_LOCK_FILE` when simultaneous independent runs are intended.
+
 ## Startup
 
-1. Acquire the same global batch lock used by the old launcher. A running old or
-   new capacity batch prevents a second launch and prevents environment updates.
+1. Acquire the selected method's batch lock. The algorithm uses the same lock as
+   the old launcher; CPLEX has its own lock. A second batch of the same method is
+   rejected before updating that method's environment.
 2. Require branch `MLND_sever` and no tracked local changes. Freeze files from the
    exact Git commit, verify all 69 `SOURCE_VERSION.json` entries, and copy inputs
    plus map provenance into a new `outputs/server_runs/run-...` directory.
@@ -68,8 +121,9 @@ as `source_stage` for provenance. They do not run exclusively or gate other task
 The matrix describes capacity screening with one seed, not a replicated paper
 experiment.
 
-Every matrix task uses the current algorithm (`--method benders_cg`), native budget
-7200 seconds, target gap 0.01, seed 43 and one solver thread. Historical preset
+The algorithm entry uses `--method benders_cg`; the CPLEX entry uses `--method
+full_path`. Every matrix task has native budget 7200 seconds, target gap 0.01,
+seed 43 and one solver thread. Historical preset
 labels in the input matrix are provenance only: new runner flags and the native
 `resolved_configuration` determine the actual current implementation.
 
@@ -119,7 +173,9 @@ Summary rows retain original native objective, global-bound provenance, gap,
 termination reason, exit status, physical validation, memory observations and map
 status. `completed` does not mean 1%; `qualified_baseline` requires normal completion,
 physical feasibility and a consistent native global gap within 1%. A saved feasible
-solution from an abnormal termination remains explicitly abnormal. Independent
+solution from an abnormal termination remains explicitly abnormal. This includes
+internal CPLEX memory, numerical and user aborts even when a feasible point was
+written; their original solver status is retained. Independent
 physical validation does not independently certify the solver's global lower bound.
 
 Maps use the frozen real basemap and display L, H and connections, with no OD nodes.
@@ -127,6 +183,14 @@ Map failure is reported separately and does not change the native solve or prima
 feasibility result. All original files remain available for inspection.
 
 ## Development validation
+
+The 2026-11-19 CPLEX entry passed 102 portable server tests. Eight short complete
+CPLEX cases (L=2/3/5/8, K=1/2, H=3, OD=3) used the existing matching native build
+and passed independent physical validation with complete catalogues. Seven reached
+1%; L8/K2 reached its 60-second development budget at an 8.56% gap and was correctly
+recorded as validated but not qualified. No C++ solver source changed in this entry
+addition. These runs do not establish large-instance performance or Linux behavior.
+
 
 The 2026-11-17 change passed 60 portable server tests and a fresh macOS arm64
 native build. Eight short synthetic cases (L=2/3/5/8, K=1/2, H=3, OD=3) all ran

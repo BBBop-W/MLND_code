@@ -37,6 +37,7 @@ RESULT_FIELDS = (
     "assignment_scope", "delivery_time_scope", "demand_formulation", "max_orders",
     "requested_method", "method", "budget", "threads", "seed", "requested_gap",
     "resolved_configuration", "auto_disabled_accelerations", "solver_version",
+    "solver_status", "solver_status_code", "has_solver_solution",
 )
 
 
@@ -251,19 +252,46 @@ def finite_number(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def native_termination_error(record):
+    """A retained feasible point does not turn an internal solver abort into success."""
+    reason, status = record.get("termination_reason"), record.get("solver_status")
+    method = record.get("native_method", record.get("requested_method", record.get("method")))
+    if method == "full_path":
+        # CPLEX's optimal and configured time-limit stops are expected. Other
+        # stops (including memory/numerical/user aborts) retain their evidence
+        # but must not be accepted as a normal completed comparison attempt.
+        expected = {"Optimal", "OptimalTol", "AbortTimeLim", "AbortDetTimeLim", "time_limit"}
+        expected_reasons = expected | {"gap_limit", "optimal_with_repaired_incumbent",
+                                      "solver_optimal_validated_gap_above_target"}
+        if status not in expected or reason not in expected_reasons:
+            return f"Unexpected full-path termination: solver_status={status!r}, reason={reason!r}"
+    else:
+        # Benders reports its own stopping reasons, sometimes with a master_
+        # prefix. Keep ordinary budget/gap/certificate stops unchanged.
+        for value in (reason, status):
+            if isinstance(value, str) and any(token in value.lower() for token in (
+                    "memlim", "memory", "numbest", "optimalinfeas", "failfeas", "failinfeas",
+                    "abortuser", "numerical", "validation_failed", "exception", "error",
+                    "infeasible", "unbounded", "inforunbd")):
+                return f"Abnormal native termination: {value}"
+    return None
+
+
 def classify(record):
     """Keep process completion, primal validity and target gap as distinct facts."""
     validated = record.get("validation_passed") is True
     provenance = all(record.get(key) is True for key in
                      ("source_unchanged", "input_unchanged", "binary_unchanged", "runner_unchanged",
                       "build_manifest_unchanged"))
+    record["native_termination_error"] = native_termination_error(record)
     normal = (record.get("solver_returncode") == 0
               and record.get("validation_returncode") == 0
               and not record.get("solver_timed_out")
               and not record.get("validation_timed_out")
               and record.get("optimization_completed") is True
               and record.get("has_feasible_solution") is True
-              and not record.get("error") and provenance and validated)
+              and not record.get("error") and not record["native_termination_error"]
+              and provenance and validated)
     objective, bound, gap = (record.get(key) for key in ("objective", "bound", "gap"))
     bound_consistent = (all(finite_number(value) for value in (objective, bound, gap))
                         and gap >= 0 and bound <= objective + 1e-7 * (1 + abs(objective)))

@@ -102,6 +102,9 @@ def launch(run: Path, lock, args, config: dict) -> int:
                "--build-manifest", str(run / "build/build_manifest.json"),
                "--output", str(run / "results"), "--stage", config["stage"],
                "--max-parallel", str(config["max_parallel"])]
+    # Older frozen algorithm launchers predate the method argument.
+    if "method" in config:
+        command.extend(["--method", config["method"]])
     if (run / "results/run_identity.json").exists():
         command.append("--resume")
     if args.retry_failed:
@@ -114,7 +117,8 @@ def launch(run: Path, lock, args, config: dict) -> int:
         log.close()
     write_json(run / "launcher.json", {"pid": process.pid, "command": command,
                                       "started_utc": datetime.now(timezone.utc).isoformat()})
-    print(f"Started PID {process.pid}; single solver thread, max parallel {config['max_parallel']}.")
+    print(f"Started PID {process.pid}; method {config.get('method', 'algorithm')}; "
+          f"single solver thread, max parallel {config['max_parallel']}.")
     print("The background process retains the global batch lock; closing this terminal is safe.")
     time.sleep(1)
     if process.poll() is not None and process.returncode != 0:
@@ -135,22 +139,24 @@ def runtime_environment() -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--foreground", action="store_true")
+    parser.add_argument("--method", choices=("algorithm", "full_path"), default="algorithm")
     parser.add_argument("--suite-root", type=Path, default=os.environ.get("MLND_SUITE_ROOT"))
     parser.add_argument("--cplex-root", type=Path, default=os.environ.get("CPLEX_ROOT", "/home/autumn/workspace/wangsongtao/cplex"))
     parser.add_argument("--json-include", type=Path, default=Path(os.environ.get("CONDA_PREFIX", sys.prefix)) / "include")
     parser.add_argument("--max-parallel", type=int, default=None)
     parser.add_argument("--stage", choices=("core", "stress", "all"), default=None)
     parser.add_argument("--build-jobs", type=int, choices=(1, 2), default=1)
-    parser.add_argument("--runs-root", type=Path, default=ROOT / "outputs/server_runs")
+    parser.add_argument("--runs-root", type=Path)
     args = parser.parse_args()
     try:
-        runs = args.runs_root.resolve()
+        runs_name = "server_cplex_runs" if args.method == "full_path" else "server_runs"
+        runs = (args.runs_root or ROOT / "outputs" / runs_name).resolve()
         if args.status:
             show_status(current_run(runs))
             return 0
@@ -161,7 +167,8 @@ def main() -> int:
         if args.retry_failed and not args.resume:
             raise ValueError("--retry-failed requires --resume")
         runs.mkdir(parents=True, exist_ok=True)
-        lock_path = Path(os.environ.get("MLND_LOCK_FILE", str(ROOT.parent / ".mlnd-capacity-run.lock")))
+        lock_name = ".mlnd-capacity-cplex-run.lock" if args.method == "full_path" else ".mlnd-capacity-run.lock"
+        lock_path = Path(os.environ.get("MLND_LOCK_FILE", str(ROOT.parent / lock_name)))
         # The child inherits this open file description. Never LOCK_UN here:
         # closing our descriptor leaves its exclusive lock held by the batch.
         inherited_fd = os.environ.pop("MLND_LAUNCH_LOCK_FD", None)
@@ -180,6 +187,8 @@ def main() -> int:
                 if run is None or not (run / "prepared.json").is_file():
                     raise ValueError("No prepared run to resume; start without --resume")
                 config = json.loads((run / "prepared.json").read_text())
+                if config.get("method", "algorithm") != args.method:
+                    raise ValueError("Resume cannot change the frozen run's solver method; use its matching entrypoint")
                 if config.get("runtime_environment") != runtime_environment():
                     raise ValueError("Python environment differs from this frozen run; restore its recorded environment before resuming")
                 for name in ("stage", "max_parallel"):
@@ -203,6 +212,7 @@ def main() -> int:
                 snapshot(ROOT, run / "source")
                 freeze_suite(suite, run / "suite")
                 config = {"stage": args.stage or "all", "max_parallel": args.max_parallel or 8,
+                          "method": args.method,
                           "python": sys.executable, "cplex_root": str(args.cplex_root.resolve()),
                           "runtime_environment": runtime_environment(),
                           "git_commit": json.loads((run / "source/SNAPSHOT.json").read_text())["git_commit"]}
